@@ -1,0 +1,111 @@
+# Build directories
+/build/
+# Ignore any alternative or ad-hoc CMake build directories accidentally created
+build_*/
+/*build*/
+**/build/
+cmake-build-*/
+out/
+
+# CMake files and cache
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+CMakeUserPresets.json
+
+# CTest output directories
+Testing/
+
+# Ninja build files
+.build.ninja
+.ninja_log
+.ninja_deps
+
+# CMake file API responses
+build/.cmake/api/v1/reply/
+
+# Editor/IDE files
+.vscode/
+.vs/
+.idea/
+*.swp
+*~
+*.code-workspace
+*.suo
+*.user
+*.userosscache
+*.VC.db
+*.VC.opendb
+*.tds
+
+# Binaries
+/bin/
+/bin/*
+*.dll
+*.dylib
+*.so
+*.a
+*.lib
+*.idb
+*.pdb
+*.ipdb
+*.ilk
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+*.trace
+
+# Temporary
+tmp/
+*.tmp
+*.bak
+~$*
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Coverage and test artifacts
+coverage/
+*.gcno
+*.gcda
+*.gcov
+
+# Other
+*.o
+*.obj
+*.exe
+*.out
+*.exp
+
+# Generated documentation
+docs/html/
+docs/latex/
+
+# Visual Studio/MSBuild intermediates
+/Debug/
+/Release/
+/x64/
+
+# Ignore the build output directory just in case
+/build
+
+test_files/
+test_output/
+test_output.txt
+received_file_*
+
+# ESP-IDF generated files
+sdkconfig
+sdkconfig.old
+flash_project_args
+flash_project_args.in
+partition_table/
+*.bin
+*.elf
+*.map
+

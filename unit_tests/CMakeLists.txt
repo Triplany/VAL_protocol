@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.15)
+
+# Always build unit test executables and register them with CTest.
+
+function(add_ctest_exe name src)
+    add_executable(${name} ${src} support/test_support.c)
+    target_include_directories(${name} PRIVATE support include)
+    target_link_libraries(${name} PRIVATE val_protocol)
+    add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+endfunction()
+
+# Add unit tests
+
+add_ctest_exe(ut_sr_check send_receive/suite_send_receive_check.c)
+add_ctest_exe(ut_recovery_check recovery/suite_recovery_check.c)
+add_ctest_exe(ut_resume_policies recovery/test_resume_policies.c)

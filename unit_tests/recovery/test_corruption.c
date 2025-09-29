@@ -1,0 +1,142 @@
+#include "test_support.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#if defined(_WIN32)
+#include <direct.h>
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+
+static int write_pattern(const char *path, size_t size)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return -1;
+    for (size_t i = 0; i < size; ++i)
+        fputc((int)(i * 13 & 0xFF), f);
+    fclose(f);
+    return 0;
+}
+static int files_equal(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
+    if (!fa || !fb)
+    {
+        if (fa)
+            fclose(fa);
+        if (fb)
+            fclose(fb);
+        return 0;
+    }
+    int eq = 1;
+    int ca, cb;
+    do
+    {
+        ca = fgetc(fa);
+        cb = fgetc(fb);
+        if (ca != cb)
+        {
+            eq = 0;
+            break;
+        }
+    } while (ca != EOF && cb != EOF);
+    fclose(fa);
+    fclose(fb);
+    return eq;
+}
+
+int main(void)
+{
+    const size_t packet = 4096, depth = 64;
+    const size_t size = 1 * 1024 * 1024 + 333; // reduced size to speed up test
+    test_duplex_t d;
+    test_duplex_init(&d, packet, depth);
+    // Inject very low probability corruption and some drops/dups to exercise retransmission
+    d.faults.bitflip_per_million = 5;      // 0.0005% bytes flipped
+    d.faults.drop_frame_per_million = 800; // ~0.08% frames dropped
+    d.faults.dup_frame_per_million = 800;  // ~0.08% frames duplicated
+
+    char artroot[1024];
+    if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
+    {
+        fprintf(stderr, "failed to determine artifacts root\n");
+        return 1;
+    }
+#if defined(_WIN32)
+    char outdir[1024];
+    snprintf(outdir, sizeof(outdir), "%s\\corrupt\\out", artroot);
+    char in[1024];
+    snprintf(in, sizeof(in), "%s\\corrupt\\corrupt.bin", artroot);
+    char out[1024];
+    snprintf(out, sizeof(out), "%s\\corrupt\\out\\corrupt.bin", artroot);
+#else
+    char outdir[1024];
+    snprintf(outdir, sizeof(outdir), "%s/corrupt/out", artroot);
+    char in[1024];
+    snprintf(in, sizeof(in), "%s/corrupt/corrupt.bin", artroot);
+    char out[1024];
+    snprintf(out, sizeof(out), "%s/corrupt/out/corrupt.bin", artroot);
+#endif
+    if (ts_ensure_dir(outdir) != 0)
+    {
+        fprintf(stderr, "failed to create artifacts dir\n");
+        return 1;
+    }
+    // Clean any previous input/output files to avoid stale resume behavior when size changes
+    (void)remove(in);
+    (void)remove(out);
+    write_pattern(in, size);
+
+    uint8_t *sb_a = (uint8_t *)calloc(1, packet), *rb_a = (uint8_t *)calloc(1, packet);
+    uint8_t *sb_b = (uint8_t *)calloc(1, packet), *rb_b = (uint8_t *)calloc(1, packet);
+
+    test_duplex_t end_tx = d;
+    test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet, .faults = d.faults};
+
+    val_config_t cfg_tx, cfg_rx;
+    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_VERIFY, 16384);
+    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_VERIFY, 16384);
+    ts_set_console_logger(&cfg_tx);
+    ts_set_console_logger(&cfg_rx);
+
+    val_session_t *tx = val_session_create(&cfg_tx);
+    val_session_t *rx = val_session_create(&cfg_rx);
+    if (!tx || !rx)
+    {
+        fprintf(stderr, "session create failed\n");
+        return 1;
+    }
+
+    ts_thread_t th = ts_start_receiver(rx, outdir);
+
+    const char *files[1] = {in};
+    val_status_t st = val_send_files(tx, files, 1, NULL);
+
+    ts_join_thread(th);
+
+    val_session_destroy(tx);
+    val_session_destroy(rx);
+    free(sb_a);
+    free(rb_a);
+    free(sb_b);
+    free(rb_b);
+
+    // 'out' path was constructed above
+
+    if (st != VAL_OK)
+    {
+        fprintf(stderr, "send failed %d\n", (int)st);
+        return 2;
+    }
+    if (!files_equal(in, out))
+    {
+        fprintf(stderr, "corruption recovery mismatch\n");
+        return 3;
+    }
+    test_duplex_free(&d);
+    printf("OK\n");
+    return 0;
+}

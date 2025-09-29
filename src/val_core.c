@@ -1,0 +1,849 @@
+#include "val_internal.h"
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Internal logging implementation. If compile-time logging is enabled and a sink is provided in config,
+// forward messages; otherwise, drop them. This function itself is a tiny call and will be removed by
+// the compiler entirely when VAL_LOG_LEVEL==0 because no callers remain.
+void val_internal_log(val_session_t *s, int level, const char *file, int line, const char *msg)
+{
+    if (!s || !s->config)
+        return;
+    // Runtime level filter: forward only if logger exists and level <= min_level (non-zero)
+    if (s->config->debug.log)
+    {
+        int minlvl = s->config->debug.min_level;
+        if (minlvl == 0)
+            return; // OFF
+        if (level <= minlvl)
+            s->config->debug.log(s->config->debug.context, level, file, line, msg);
+    }
+}
+
+void val_internal_logf(val_session_t *s, int level, const char *file, int line, const char *fmt, ...)
+{
+    char stackbuf[256];
+    va_list ap, ap2;
+    int needed;
+    if (!s || !s->config || !s->config->debug.log || !fmt)
+        return;
+    // Runtime filter check before doing any formatting work
+    int minlvl = s->config->debug.min_level;
+    if (minlvl == 0 || level > minlvl)
+        return;
+    va_start(ap, fmt);
+    // Try to compute required length portably
+    va_copy(ap2, ap);
+    needed = vsnprintf(NULL, 0, fmt, ap2);
+    va_end(ap2);
+#if defined(_MSC_VER)
+    if (needed < 0)
+    {
+        // MSVC returns -1 for insufficient buffer; use _vscprintf
+        va_list ap3;
+        va_copy(ap3, ap);
+        needed = _vscprintf(fmt, ap3);
+        va_end(ap3);
+    }
+#endif
+    if (needed < 0)
+    {
+        // Give up and emit the format string
+        va_end(ap);
+        s->config->debug.log(s->config->debug.context, level, file, line, fmt);
+        return;
+    }
+    if ((size_t)needed < sizeof(stackbuf))
+    {
+        (void)vsnprintf(stackbuf, sizeof(stackbuf), fmt, ap);
+        va_end(ap);
+        s->config->debug.log(s->config->debug.context, level, file, line, stackbuf);
+        return;
+    }
+    else
+    {
+        size_t need_bytes = (size_t)needed + 1;
+        char *heapbuf = (char *)malloc(need_bytes);
+        if (!heapbuf)
+        {
+            // fallback to truncated stack buffer
+            (void)vsnprintf(stackbuf, sizeof(stackbuf), fmt, ap);
+            va_end(ap);
+            s->config->debug.log(s->config->debug.context, level, file, line, stackbuf);
+            return;
+        }
+        (void)vsnprintf(heapbuf, need_bytes, fmt, ap);
+        va_end(ap);
+        s->config->debug.log(s->config->debug.context, level, file, line, heapbuf);
+        free(heapbuf);
+        return;
+    }
+}
+
+// Simple CRC32 (IEEE 802.3) table
+static uint32_t crc32_table[256];
+static int crc32_table_init = 0;
+
+static void crc32_init_table(void)
+{
+    if (crc32_table_init)
+        return;
+    uint32_t poly = 0xEDB88320u;
+    for (uint32_t i = 0; i < 256; ++i)
+    {
+        uint32_t c = i;
+        for (int j = 0; j < 8; ++j)
+        {
+            c = (c & 1u) ? (poly ^ (c >> 1)) : (c >> 1);
+        }
+        crc32_table[i] = c;
+    }
+    crc32_table_init = 1;
+}
+
+uint32_t val_crc32(const void *data, size_t length)
+{
+    crc32_init_table();
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < length; ++i)
+    {
+        c = crc32_table[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+uint32_t val_crc32_init_state(void)
+{
+    crc32_init_table();
+    return 0xFFFFFFFFu;
+}
+
+uint32_t val_crc32_update_state(uint32_t state, const void *data, size_t length)
+{
+    crc32_init_table();
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t c = state;
+    for (size_t i = 0; i < length; ++i)
+    {
+        c = crc32_table[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
+    }
+    return c;
+}
+
+uint32_t val_crc32_finalize_state(uint32_t state)
+{
+    return state ^ 0xFFFFFFFFu;
+}
+
+uint32_t val_get_builtin_features(void)
+{
+    return VAL_BUILTIN_FEATURES;
+}
+
+// Session-aware CRC adapters
+uint32_t val_internal_crc32(val_session_t *s, const void *data, size_t length)
+{
+    if (s && s->config && s->config->crc.crc32)
+    {
+        return s->config->crc.crc32(s->config->crc.crc_context, data, length);
+    }
+    return val_crc32(data, length);
+}
+
+uint32_t val_internal_crc32_init(val_session_t *s)
+{
+    if (s && s->config && s->config->crc.crc32_init)
+    {
+        return s->config->crc.crc32_init(s->config->crc.crc_context);
+    }
+    return val_crc32_init_state();
+}
+
+uint32_t val_internal_crc32_update(val_session_t *s, uint32_t state, const void *data, size_t length)
+{
+    if (s && s->config && s->config->crc.crc32_update)
+    {
+        return s->config->crc.crc32_update(s->config->crc.crc_context, state, data, length);
+    }
+    return val_crc32_update_state(state, data, length);
+}
+
+uint32_t val_internal_crc32_final(val_session_t *s, uint32_t state)
+{
+    if (s && s->config && s->config->crc.crc32_final)
+    {
+        return s->config->crc.crc32_final(s->config->crc.crc_context, state);
+    }
+    return val_crc32_finalize_state(state);
+}
+
+size_t val_internal_strnlen(const char *s, size_t maxlen)
+{
+    size_t n = 0;
+    if (!s)
+        return 0;
+    while (n < maxlen && s[n])
+        ++n;
+    return n;
+}
+
+void val_clean_filename(const char *input, char *output, size_t output_size)
+{
+    if (!output || output_size == 0)
+        return;
+    output[0] = '\0';
+    if (!input)
+        return;
+    size_t j = 0;
+    for (size_t i = 0; input[i] && j + 1 < output_size; ++i)
+    {
+        unsigned char c = (unsigned char)input[i];
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+        {
+            continue;
+        }
+        if ((c < 32) || (c == 127))
+            continue;
+        output[j++] = (char)c;
+    }
+    if (j == 0 && output_size > 1)
+        output[j++] = 'f';
+    output[j] = '\0';
+}
+
+void val_clean_path(const char *input, char *output, size_t output_size)
+{
+    if (!output || output_size == 0)
+        return;
+    output[0] = '\0';
+    if (!input)
+        return;
+    size_t j = 0;
+    for (size_t i = 0; input[i] && j + 1 < output_size; ++i)
+    {
+        unsigned char c = (unsigned char)input[i];
+        if ((c < 32) || (c == '"') || (c == '<') || (c == '>') || (c == '|') || (c == 127))
+            continue;
+        output[j++] = (char)c;
+    }
+    output[j] = '\0';
+}
+
+void val_internal_set_last_error(val_session_t *s, val_status_t code, uint32_t detail)
+{
+    if (!s)
+        return;
+    // Protect last error fields with session lock
+#if defined(_WIN32)
+    EnterCriticalSection(&s->lock);
+#else
+    pthread_mutex_lock(&s->lock);
+#endif
+    s->last_error_code = code;
+    s->last_error_detail = detail;
+#if defined(_WIN32)
+    LeaveCriticalSection(&s->lock);
+#else
+    pthread_mutex_unlock(&s->lock);
+#endif
+}
+
+val_status_t val_get_last_error(val_session_t *session, val_status_t *code, uint32_t *detail_mask)
+{
+    if (!session)
+        return VAL_ERR_INVALID_ARG;
+    // Protect reads with session lock
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    if (code)
+        *code = session->last_error_code;
+    if (detail_mask)
+        *detail_mask = session->last_error_detail;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
+static int validate_config(const val_config_t *cfg)
+{
+    if (!cfg)
+        return 0;
+    if (!cfg->transport.send || !cfg->transport.recv)
+        return 0;
+    if (!cfg->filesystem.fopen || !cfg->filesystem.fread || !cfg->filesystem.fwrite || !cfg->filesystem.fseek ||
+        !cfg->filesystem.ftell || !cfg->filesystem.fclose)
+        return 0;
+    if (!cfg->buffers.send_buffer || !cfg->buffers.recv_buffer)
+        return 0;
+    if (cfg->buffers.packet_size < VAL_MIN_PACKET_SIZE || cfg->buffers.packet_size > VAL_MAX_PACKET_SIZE)
+        return 0;
+    return 1;
+}
+
+val_session_t *val_session_create(const val_config_t *config)
+{
+    if (!validate_config(config))
+        return NULL;
+    val_session_t *s = (val_session_t *)calloc(1, sizeof(val_session_t));
+    if (!s)
+        return NULL;
+    // store by value to decouple from caller mutability, but keep pointer for callbacks
+    s->cfg = *config;
+    s->config = &s->cfg;
+    s->seq_counter = 1;
+    s->output_directory[0] = '\0';
+    s->effective_packet_size = s->cfg.buffers.packet_size; // default until handshake negotiates min
+    s->handshake_done = 0;
+    s->peer_features = 0;
+    s->last_error_code = VAL_OK;
+    s->last_error_detail = 0;
+    // Fill in sane defaults for newly added resume policy fields if caller left them zero.
+    // Important: If policy==NONE, we preserve legacy resume.mode behavior; do not override to SAFE_DEFAULT here.
+    if (s->cfg.resume.verify_algo == 0)
+    {
+        s->cfg.resume.verify_algo = VAL_VERIFY_ALGO_CRC32;
+    }
+    if (s->cfg.resume.on_fs_anomaly == 0)
+    {
+        s->cfg.resume.on_fs_anomaly = VAL_FS_ANOMALY_SKIP_FILE;
+    }
+    if (s->cfg.resume.on_verify_mismatch == 0)
+    {
+        // Choose mismatch default based on policy when enabled; otherwise default to START_ZERO
+        if (s->cfg.resume.policy == VAL_RESUME_POLICY_STRICT_RESUME_ONLY)
+            s->cfg.resume.on_verify_mismatch = VAL_RESUME_MISMATCH_ABORT_FILE;
+        else if (s->cfg.resume.policy == VAL_RESUME_POLICY_SKIP_IF_DIFFERENT)
+            s->cfg.resume.on_verify_mismatch = VAL_RESUME_MISMATCH_SKIP_FILE;
+        else
+            s->cfg.resume.on_verify_mismatch = VAL_RESUME_MISMATCH_START_ZERO;
+    }
+#if VAL_LOG_LEVEL == 0
+    s->cfg.debug.min_level = 0; // OFF in builds without logging
+#else
+    if (s->cfg.debug.min_level == 0)
+    {
+        // Default runtime threshold to compile-time level if caller leaves it 0
+        s->cfg.debug.min_level = VAL_LOG_LEVEL;
+    }
+#endif
+#if defined(_WIN32)
+    InitializeCriticalSection(&s->lock);
+#else
+    // Initialize a recursive mutex so internal helpers can lock even when public API already holds the lock
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+#if defined(PTHREAD_MUTEX_RECURSIVE)
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+#else
+    // Fallback for platforms using the NP constant
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE_NP);
+#endif
+    pthread_mutex_init(&s->lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+#endif
+    return s;
+}
+
+void val_session_destroy(val_session_t *session)
+{
+    if (!session)
+        return;
+#if defined(_WIN32)
+    DeleteCriticalSection(&session->lock);
+#else
+    pthread_mutex_destroy(&session->lock);
+#endif
+    free(session);
+}
+
+// Packet helpers
+static void fill_header(val_session_t *s, val_packet_header_t *h, val_packet_type_t type, uint32_t payload_len, uint64_t offset,
+                        uint32_t seq)
+{
+    memset(h, 0, sizeof(*h));
+    h->type = (uint8_t)type;
+    // On-wire is little-endian for multi-byte fields
+    h->payload_len = val_htole32(payload_len);
+    h->seq = val_htole32(seq);
+    h->offset = val_htole64(offset);
+    // header CRC of header without header_crc field
+    val_packet_header_t tmp = *h;
+    tmp.header_crc = 0;
+    uint32_t crc = val_internal_crc32(s, &tmp, sizeof(val_packet_header_t));
+    h->header_crc = val_htole32(crc);
+}
+
+int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len, uint64_t offset)
+{
+    // Serialize low-level send operations; recursive with public API locks
+#if defined(_WIN32)
+    EnterCriticalSection(&s->lock);
+#else
+    pthread_mutex_lock(&s->lock);
+#endif
+    size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size; // MTU
+    if (payload_len > (uint32_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t)))
+    {
+        VAL_LOG_ERROR(s, "send_packet: payload too large for MTU");
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_INVALID_ARG;
+    }
+    uint8_t *buf = (uint8_t *)s->config->buffers.send_buffer;
+    val_packet_header_t *hdr = (val_packet_header_t *)buf;
+    uint32_t seq = s->seq_counter++;
+    fill_header(s, hdr, type, payload_len, offset, seq);
+    uint8_t *payload_dst = buf + sizeof(val_packet_header_t);
+    if (payload_len && payload)
+    {
+        memcpy(payload_dst, payload, payload_len);
+    }
+    // Trailer CRC over Header+Data
+    size_t used = sizeof(val_packet_header_t) + payload_len;
+    uint32_t pkt_crc = val_internal_crc32(s, buf, used);
+    uint32_t pkt_crc_le = val_htole32(pkt_crc);
+    memcpy(buf + used, &pkt_crc_le, sizeof(pkt_crc_le));
+    size_t total_len = used + sizeof(uint32_t);
+    int rc = s->config->transport.send(s->config->transport.io_context, buf, total_len);
+#if defined(_WIN32)
+    LeaveCriticalSection(&s->lock);
+#else
+    pthread_mutex_unlock(&s->lock);
+#endif
+    if (rc != (int)total_len)
+    {
+        VAL_LOG_ERROR(s, "send_packet: transport send failed");
+        return VAL_ERR_IO;
+    }
+    return VAL_OK;
+}
+
+int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *payload_out, uint32_t payload_cap,
+                             uint32_t *payload_len_out, uint64_t *offset_out, uint32_t timeout_ms)
+{
+    // Serialize low-level recv operations; recursive with public API locks
+#if defined(_WIN32)
+    EnterCriticalSection(&s->lock);
+#else
+    pthread_mutex_lock(&s->lock);
+#endif
+    size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size; // MTU
+    uint8_t *buf = (uint8_t *)s->config->buffers.recv_buffer;
+    size_t got = 0;
+    // Read header first
+    int rc = s->config->transport.recv(s->config->transport.io_context, buf, sizeof(val_packet_header_t), &got, timeout_ms);
+    if (rc < 0)
+    {
+        VAL_LOG_ERROR(s, "recv_packet: transport error on header");
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_IO;
+    }
+    if (got != sizeof(val_packet_header_t))
+    {
+        VAL_LOG_DEBUG(s, "recv_packet: header timeout");
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_TIMEOUT;
+    }
+    // Validate header CRC using a zeroed copy of header_crc
+    val_packet_header_t hdr_copy;
+    memcpy(&hdr_copy, buf, sizeof(hdr_copy));
+    uint32_t header_crc_expected = val_letoh32(hdr_copy.header_crc);
+    hdr_copy.header_crc = 0;
+    uint32_t header_crc_calc = val_internal_crc32(s, &hdr_copy, sizeof(val_packet_header_t));
+    if (header_crc_calc != header_crc_expected)
+    {
+        VAL_LOG_ERROR(s, "recv_packet: header CRC mismatch");
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_CRC;
+    }
+    val_packet_header_t *hdr = (val_packet_header_t *)buf; // original header bytes remain for trailer CRC
+    uint32_t payload_len = val_letoh32(hdr->payload_len);
+    // Enforce bounds vs MTU (header + payload + trailer <= P)
+    if (payload_len > (uint32_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t)))
+    {
+        VAL_LOG_ERROR(s, "recv_packet: payload_len exceeds MTU");
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_PROTOCOL;
+    }
+    // Read payload
+    if (payload_len > 0)
+    {
+        size_t got2 = 0;
+        rc = s->config->transport.recv(s->config->transport.io_context, buf + sizeof(val_packet_header_t), payload_len, &got2,
+                                       timeout_ms);
+        if (rc < 0)
+        {
+            VAL_LOG_ERROR(s, "recv_packet: transport error on payload");
+#if defined(_WIN32)
+            LeaveCriticalSection(&s->lock);
+#else
+            pthread_mutex_unlock(&s->lock);
+#endif
+            return VAL_ERR_IO;
+        }
+        if (got2 != payload_len)
+        {
+            VAL_LOG_DEBUG(s, "recv_packet: payload timeout");
+#if defined(_WIN32)
+            LeaveCriticalSection(&s->lock);
+#else
+            pthread_mutex_unlock(&s->lock);
+#endif
+            return VAL_ERR_TIMEOUT;
+        }
+    }
+    // Read trailer CRC
+    uint32_t trailer_crc = 0;
+    size_t got3 = 0;
+    rc = s->config->transport.recv(s->config->transport.io_context, &trailer_crc, sizeof(trailer_crc), &got3, timeout_ms);
+    if (rc < 0)
+    {
+        VAL_LOG_ERROR(s, "recv_packet: transport error on trailer");
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_IO;
+    }
+    if (got3 != sizeof(trailer_crc))
+    {
+        VAL_LOG_DEBUG(s, "recv_packet: trailer timeout");
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_TIMEOUT;
+    }
+    // Verify trailer CRC over header+payload
+    uint32_t calc_crc = val_internal_crc32(s, buf, sizeof(val_packet_header_t) + payload_len);
+    if (val_letoh32(trailer_crc) != calc_crc)
+    {
+        VAL_LOG_ERROR(s, "recv_packet: trailer CRC mismatch");
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_CRC;
+    }
+    if (type)
+        *type = (val_packet_type_t)hdr->type;
+    if (offset_out)
+        *offset_out = val_letoh64(hdr->offset);
+    if (payload_len_out)
+        *payload_len_out = payload_len;
+    if (payload_out && payload_cap)
+    {
+        if (payload_len > payload_cap)
+        {
+#if defined(_WIN32)
+            LeaveCriticalSection(&s->lock);
+#else
+            pthread_mutex_unlock(&s->lock);
+#endif
+            return VAL_ERR_INVALID_ARG;
+        }
+        memcpy(payload_out, buf + sizeof(val_packet_header_t), payload_len);
+    }
+#if defined(_WIN32)
+    LeaveCriticalSection(&s->lock);
+#else
+    pthread_mutex_unlock(&s->lock);
+#endif
+    return VAL_OK;
+}
+
+// The actual sending/receiving logic is implemented in separate compilation units
+extern val_status_t val_internal_send_file(val_session_t *session, const char *filepath, const char *sender_path);
+extern val_status_t val_internal_receive_files(val_session_t *session, const char *output_directory);
+
+// Single-file public sends are intentionally removed; use val_send_files with count=1.
+
+val_status_t val_receive_files(val_session_t *session, const char *output_directory)
+{
+    if (!session)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    if (output_directory)
+    {
+        size_t n = val_internal_strnlen(output_directory, VAL_MAX_PATH);
+        if (n > VAL_MAX_PATH)
+            n = VAL_MAX_PATH;
+        memcpy(session->output_directory, output_directory, n);
+        session->output_directory[n] = '\0';
+    }
+    else
+    {
+        session->output_directory[0] = '\0';
+    }
+    // Ensure handshake once per session on first receive call
+    val_status_t hs = val_internal_do_handshake_receiver(session);
+    if (hs != VAL_OK)
+    {
+#if defined(_WIN32)
+        LeaveCriticalSection(&session->lock);
+#else
+        pthread_mutex_unlock(&session->lock);
+#endif
+        return hs;
+    }
+    val_status_t rs = val_internal_receive_files(session, session->output_directory);
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return rs;
+}
+
+// EOT is internal and sent automatically by val_send_files when all files are sent.
+
+static uint32_t def_or(uint32_t v, uint32_t d)
+{
+    return v ? v : d;
+}
+
+// Ensure local config.required only contains compiled-in features; sanitize requested
+static val_status_t val_internal_validate_local_features(const val_config_t *cfg, uint32_t *out_requested_sanitized)
+{
+    if (!cfg)
+        return VAL_ERR_INVALID_ARG;
+    uint32_t missing_required = cfg->features.required & ~VAL_BUILTIN_FEATURES;
+    if (missing_required)
+    {
+        // Local build does not support some required features; abort before handshake
+        return VAL_ERR_FEATURE_NEGOTIATION;
+    }
+    if (out_requested_sanitized)
+    {
+        *out_requested_sanitized = cfg->features.requested & VAL_BUILTIN_FEATURES;
+    }
+    return VAL_OK;
+}
+
+// Handshake implementations
+val_status_t val_internal_do_handshake_sender(val_session_t *s)
+{
+    if (s->handshake_done)
+        return VAL_OK;
+    uint32_t requested_sanitized = 0;
+    // Pre-validate local features: fail fast if required contains unsupported bits
+    val_status_t vr = val_internal_validate_local_features(s->config, &requested_sanitized);
+    if (vr != VAL_OK)
+        return vr;
+    val_handshake_t hello;
+    // Prepare handshake message
+    memset(&hello, 0, sizeof(hello));
+    hello.magic = VAL_MAGIC;
+    hello.version_major = (uint8_t)VAL_VERSION_MAJOR;
+    hello.version_minor = (uint8_t)VAL_VERSION_MINOR;
+    // Propose our configured size; effective size will be min on negotiation
+    hello.packet_size = (uint32_t)s->config->buffers.packet_size;
+    // Advertise built-in features and clamp required/requested to built-in
+    hello.features = VAL_BUILTIN_FEATURES;
+    hello.required = s->config->features.required; // don't mask required; we validated locally
+    hello.requested = requested_sanitized;         // drop unsupported requested bits
+    // Send LE-encoded hello
+    val_handshake_t hello_le = hello;
+    hello_le.magic = val_htole32(hello_le.magic);
+    hello_le.packet_size = val_htole32(hello_le.packet_size);
+    hello_le.features = val_htole32(hello_le.features);
+    hello_le.required = val_htole32(hello_le.required);
+    hello_le.requested = val_htole32(hello_le.requested);
+    val_status_t st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
+    if (st != VAL_OK)
+        return st;
+    uint32_t len = 0;
+    uint64_t off = 0;
+    val_packet_type_t t = 0;
+    val_handshake_t peer;
+    uint32_t to = def_or(s->config->timeouts.handshake_ms, 5000u);
+    uint8_t tries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0;
+    uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+    for (;;)
+    {
+        st = val_internal_recv_packet(s, &t, &peer, sizeof(peer), &len, &off, to);
+        if (st == VAL_OK)
+            break;
+        if (st != VAL_ERR_TIMEOUT || tries == 0)
+            return st;
+        // Retransmit HELLO and backoff
+        val_status_t rs = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
+        if (rs != VAL_OK)
+            return rs;
+        if (backoff && s->config->system.delay_ms)
+            s->config->system.delay_ms(backoff);
+        if (backoff)
+            backoff <<= 1;
+        --tries;
+    }
+    if (t != VAL_PKT_HELLO || len < sizeof(peer))
+        return VAL_ERR_PROTOCOL;
+    // Convert from LE to host
+    val_handshake_t peer_h = peer;
+    peer_h.magic = val_letoh32(peer_h.magic);
+    peer_h.packet_size = val_letoh32(peer_h.packet_size);
+    peer_h.features = val_letoh32(peer_h.features);
+    peer_h.required = val_letoh32(peer_h.required);
+    peer_h.requested = val_letoh32(peer_h.requested);
+    if (peer_h.magic != VAL_MAGIC)
+        return VAL_ERR_PROTOCOL;
+    if (peer_h.version_major != VAL_VERSION_MAJOR)
+        return VAL_ERR_INCOMPATIBLE_VERSION;
+    // Adopt the smaller packet size so both can operate; both peers independently take min
+    size_t negotiated =
+        (peer_h.packet_size < s->config->buffers.packet_size) ? peer_h.packet_size : s->config->buffers.packet_size;
+    if (negotiated < VAL_MIN_PACKET_SIZE || negotiated > VAL_MAX_PACKET_SIZE)
+        return VAL_ERR_PACKET_SIZE_MISMATCH;
+    s->effective_packet_size = negotiated;
+    // Enforce required features: our required must be present on peer
+    s->peer_features = peer_h.features;
+    uint32_t missing_on_peer = hello.required & ~peer_h.features;
+    if (missing_on_peer)
+    {
+        val_internal_set_last_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_on_peer);
+        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_on_peer);
+        return VAL_ERR_FEATURE_NEGOTIATION;
+    }
+    // Optionally adjust behavior based on requested ∧ peer.features later
+    s->handshake_done = 1;
+    // features compatibility: ensure required features supported. For now, just note the peer features; could gate behavior
+    // later.
+    (void)peer;
+    return VAL_OK;
+}
+
+val_status_t val_internal_do_handshake_receiver(val_session_t *s)
+{
+    if (s->handshake_done)
+    {
+        // If already done, do nothing
+        return VAL_OK;
+    }
+    // Receive sender hello
+    uint32_t len = 0;
+    uint64_t off = 0;
+    val_packet_type_t t = 0;
+    val_handshake_t peer;
+    uint32_t to = def_or(s->config->timeouts.handshake_ms, 5000u);
+    uint8_t tries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0;
+    uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+    val_status_t st = VAL_OK;
+    for (;;)
+    {
+        st = val_internal_recv_packet(s, &t, &peer, sizeof(peer), &len, &off, to);
+        if (st == VAL_OK)
+            break;
+        if (st != VAL_ERR_TIMEOUT || tries == 0)
+            return st;
+        // Just backoff and continue waiting; receiver doesn't send until hello is received
+        if (backoff && s->config->system.delay_ms)
+            s->config->system.delay_ms(backoff);
+        if (backoff)
+            backoff <<= 1;
+        --tries;
+    }
+    if (t != VAL_PKT_HELLO || len < sizeof(peer))
+        return VAL_ERR_PROTOCOL;
+    // Convert from LE to host
+    val_handshake_t peer_h = peer;
+    peer_h.magic = val_letoh32(peer_h.magic);
+    peer_h.packet_size = val_letoh32(peer_h.packet_size);
+    peer_h.features = val_letoh32(peer_h.features);
+    peer_h.required = val_letoh32(peer_h.required);
+    peer_h.requested = val_letoh32(peer_h.requested);
+    if (peer_h.magic != VAL_MAGIC)
+        return VAL_ERR_PROTOCOL;
+    if (peer_h.version_major != VAL_VERSION_MAJOR)
+        return VAL_ERR_INCOMPATIBLE_VERSION;
+    size_t negotiated =
+        (peer_h.packet_size < s->config->buffers.packet_size) ? peer_h.packet_size : s->config->buffers.packet_size;
+    if (negotiated < VAL_MIN_PACKET_SIZE || negotiated > VAL_MAX_PACKET_SIZE)
+        return VAL_ERR_PACKET_SIZE_MISMATCH;
+    s->effective_packet_size = negotiated;
+
+    // Send our hello back
+    val_handshake_t hello;
+    memset(&hello, 0, sizeof(hello));
+    hello.magic = VAL_MAGIC;
+    hello.version_major = (uint8_t)VAL_VERSION_MAJOR;
+    hello.version_minor = (uint8_t)VAL_VERSION_MINOR;
+    hello.packet_size = (uint32_t)s->effective_packet_size;
+    // Validate our local required; sanitize requested
+    uint32_t requested_sanitized = s->config->features.requested & VAL_BUILTIN_FEATURES;
+    uint32_t missing_required = s->config->features.required & ~VAL_BUILTIN_FEATURES;
+    if (missing_required)
+    {
+        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_required);
+        return VAL_ERR_FEATURE_NEGOTIATION;
+    }
+    hello.features = VAL_BUILTIN_FEATURES;
+    hello.required = s->config->features.required; // keep as-is; validated above
+    hello.requested = requested_sanitized;
+    s->peer_features = peer_h.features;
+    // Enforce peer's required features: must be subset of our features
+    uint32_t missing_local = peer_h.required & ~hello.features;
+    if (missing_local)
+    {
+        val_internal_set_last_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_local);
+        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_local);
+        return VAL_ERR_FEATURE_NEGOTIATION;
+    }
+    // Send LE-encoded hello back
+    val_handshake_t hello_le2 = hello;
+    hello_le2.magic = val_htole32(hello_le2.magic);
+    hello_le2.packet_size = val_htole32(hello_le2.packet_size);
+    hello_le2.features = val_htole32(hello_le2.features);
+    hello_le2.required = val_htole32(hello_le2.required);
+    hello_le2.requested = val_htole32(hello_le2.requested);
+    st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le2, sizeof(hello_le2), 0);
+    if (st == VAL_OK)
+        s->handshake_done = 1;
+    return st;
+}
+
+val_status_t val_internal_send_error(val_session_t *s, val_status_t code, uint32_t detail)
+{
+    val_error_payload_t p;
+    memset(&p, 0, sizeof(p));
+    // Encode payload in LE
+    uint32_t code_bits = (uint32_t)((int32_t)code);
+    p.code = (int32_t)val_htole32(code_bits);
+    p.detail = val_htole32(detail);
+    return val_internal_send_packet(s, VAL_PKT_ERROR, &p, sizeof(p), 0);
+}
