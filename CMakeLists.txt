@@ -4,6 +4,10 @@ project(val_protocol C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Build options
+option(VAL_BUILD_HOST_UTILS "Build host-only error string utilities" ON)
+option(VAL_MCU_BUILD "Enable MCU-optimized build (no host utilities, optimize for size)" OFF)
+
 # Platform-specific settings
 if(WIN32)
     # Windows-specific settings
@@ -21,6 +25,23 @@ add_library(val_protocol STATIC
 )
 target_include_directories(val_protocol PUBLIC include)
 
+if(VAL_MCU_BUILD)
+    target_compile_definitions(val_protocol PUBLIC VAL_MCU_OPTIMIZED=1)
+    if(MSVC)
+        # Favor size in MSVC
+        target_compile_options(val_protocol PRIVATE /Os)
+    else()
+        target_compile_options(val_protocol PRIVATE -Os)
+    endif()
+endif()
+
+if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
+    add_library(val_error_strings STATIC src/val_error_strings.c)
+    target_include_directories(val_error_strings PUBLIC include)
+    target_compile_definitions(val_error_strings PRIVATE VAL_HOST_UTILITIES=1)
+    # Link into examples/tests but not into the core library to keep MCU footprint minimal
+endif()
+
 # ---------------- Examples (cross-platform TCP) ----------------
 add_library(example_tcp_common STATIC
     examples/tcp/common/tcp_util.c)
@@ -29,10 +50,16 @@ target_include_directories(example_tcp_common PUBLIC examples/tcp/common)
 add_executable(val_example_send examples/tcp/val_example_send.c)
 target_include_directories(val_example_send PRIVATE examples/tcp/common include)
 target_link_libraries(val_example_send PRIVATE val_protocol example_tcp_common)
+if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
+    target_link_libraries(val_example_send PRIVATE val_error_strings)
+endif()
 
 add_executable(val_example_receive examples/tcp/val_example_receive.c)
 target_include_directories(val_example_receive PRIVATE examples/tcp/common include)
 target_link_libraries(val_example_receive PRIVATE val_protocol example_tcp_common)
+if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
+    target_link_libraries(val_example_receive PRIVATE val_error_strings)
+endif()
 
 if (WIN32)
     target_link_libraries(example_tcp_common PUBLIC ws2_32)
@@ -49,6 +76,9 @@ function(add_val_ut name src)
     add_executable(${name} ${src} $<TARGET_OBJECTS:test_support>)
     target_include_directories(${name} PRIVATE unit_tests/support include)
     target_link_libraries(${name} PRIVATE val_protocol)
+    if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
+        target_link_libraries(${name} PRIVATE val_error_strings)
+    endif()
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 

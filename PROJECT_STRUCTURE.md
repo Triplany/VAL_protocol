@@ -6,11 +6,14 @@ This document summarizes the layout of the VAL protocol repository and the purpo
 
 - `include/` — Public API headers
 	- `val_protocol.h` — Main public API and configuration (`val_config_t`, sessions, send/receive, utilities)
+	- `val_errors.h` — Public status codes and 32‑bit error detail mask (shared across host/MCU)
+	- `val_error_strings.h` — Optional host‑only error string/report helpers
 - `src/` — Implementation sources
 	- `val_internal.h` — Internal types (packets, payloads), session struct, helpers, logging macros
 	- `val_core.c` — CRC32 (one-shot and streaming), session lifecycle, handshake, packet I/O, error helpers
 	- `val_sender.c` — Sender path: metadata, resume negotiation, DATA/DONE/EOT loops with retries/backoff
 	- `val_receiver.c` — Receiver path: resume decision, VERIFY exchange, receive/ACK loop, CRC validation
+	- `val_error_strings.c` — Host‑only error formatting (compiled when enabled)
 - `examples/` — Usage examples and demos
 	- `tcp/` — Cross-platform TCP examples: `val_example_send.c`, `val_example_receive.c`, and `common/tcp_util.*`
 - `unit_tests/` — Plain C unit tests registered with CTest (no external framework)
@@ -21,6 +24,9 @@ This document summarizes the layout of the VAL protocol repository and the purpo
 - `docs/` — Additional documentation (if present)
 - `CMakeLists.txt`, `CMakePresets.json` — Cross-platform builds for Windows/MSVC and Linux/WSL
 - `README.md`, `DEVELOPMENT.md`, `PROTOCOL_FLOW.md` — Overview, API/developer guide, and packet flow reference
+
+Header layout (base protocol)
+- Packet header begins with `type` followed by `wire_version` (reserved; always 0), then `payload_len`, `seq`, `offset`, and `header_crc`.
 
 ## Notes
 

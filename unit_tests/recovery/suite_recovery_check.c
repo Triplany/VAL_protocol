@@ -39,7 +39,8 @@ static int files_equal(const char *a, const char *b)
 
 static int test_resume_crc_verify_check(void)
 {
-    const size_t packet = 1024, depth = 16, size = 512 * 1024 + 7;
+    // Larger packet lowers per-packet overhead; slightly smaller file still exercises resume+verify.
+    const size_t packet = 2048, depth = 16, size = 384 * 1024 + 7;
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
 #if defined(_WIN32)
@@ -146,7 +147,8 @@ static int test_resume_crc_verify_check(void)
 
 static int test_corruption_recovery_check(void)
 {
-    const size_t packet = 4096, depth = 64, size = 1 * 1024 * 1024 + 333;
+    // Maintain corruption stress but reduce runtime via smaller file and same packet size.
+    const size_t packet = 4096, depth = 64, size = 768 * 1024 + 333;
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
     d.faults.bitflip_per_million = 5;

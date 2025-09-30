@@ -8,11 +8,12 @@
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--mtu N] [--policy NAME|ID] <port> <outdir>\n"
+            "Usage: %s [--mtu N] [--policy NAME|ID] [--no-validation] <port> <outdir>\n"
             "  --mtu N        Packet size/MTU (default 4096; min %u, max %u)\n"
             "  --policy P     Resume policy name or numeric ID:\n"
             "                 none(0), safe(1), start_zero(2), skip_if_exists(3),\n"
-            "                 skip_if_different(4), always_skip(5), strict_only(6)\n",
+            "                 skip_if_different(4), always_skip(5), strict_only(6)\n"
+            "  --no-validation  Disable metadata validation (accept all files)\n",
             prog, (unsigned)VAL_MIN_PACKET_SIZE, (unsigned)VAL_MAX_PACKET_SIZE);
 }
 
@@ -104,6 +105,43 @@ static int tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received
     return 0;
 }
 
+static int tp_is_connected(void *ctx)
+{
+    int fd = *(int *)ctx;
+    return tcp_is_connected(fd);
+}
+
+static void tp_flush(void *ctx)
+{
+    int fd = *(int *)ctx;
+    tcp_flush(fd);
+}
+
+// Example metadata validator: basic size/type filtering
+static val_validation_action_t example_validator(const val_meta_payload_t *meta, const char *target_path, void *context)
+{
+    (void)context;
+    // Skip files larger than 10MB
+    if (meta->file_size > 10ull * 1024ull * 1024ull)
+    {
+        printf("Skipping large file: %s (%llu bytes)\n", meta->filename, (unsigned long long)meta->file_size);
+        return VAL_VALIDATION_SKIP;
+    }
+    const char *ext = strrchr(meta->filename, '.');
+    if (ext && (_stricmp(ext, ".exe") == 0 || _stricmp(ext, ".bat") == 0))
+    {
+        printf("Aborting session - blocked file type: %s -> %s\n", meta->filename, target_path);
+        return VAL_VALIDATION_ABORT;
+    }
+    if (strstr(meta->filename, "temp") || strstr(meta->filename, ".tmp"))
+    {
+        printf("Skipping temporary file: %s\n", meta->filename);
+        return VAL_VALIDATION_SKIP;
+    }
+    printf("Accepting file: %s (%llu bytes) -> %s\n", meta->filename, (unsigned long long)meta->file_size, target_path);
+    return VAL_VALIDATION_ACCEPT;
+}
+
 int main(int argc, char **argv)
 {
     // Defaults
@@ -148,6 +186,10 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Invalid --policy value\n");
                 return 1;
             }
+        }
+        else if (strcmp(arg, "--no-validation") == 0)
+        {
+            // marker handled later; nothing to parse here
         }
         else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0)
         {
@@ -198,6 +240,8 @@ int main(int argc, char **argv)
     memset(&cfg, 0, sizeof(cfg));
     cfg.transport.send = tp_send;
     cfg.transport.recv = tp_recv;
+    cfg.transport.is_connected = tp_is_connected;
+    cfg.transport.flush = tp_flush;
     cfg.transport.io_context = &fd;
     cfg.buffers.send_buffer = send_buf;
     cfg.buffers.recv_buffer = recv_buf;
@@ -218,6 +262,27 @@ int main(int argc, char **argv)
     cfg.resume.verify_bytes = 16384;
     cfg.resume.policy = policy;
 
+    // Enable example metadata validation by default unless --no-validation present
+    int use_validation = 1;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strcmp(argv[i], "--no-validation") == 0)
+        {
+            use_validation = 0;
+            break;
+        }
+    }
+    if (use_validation)
+    {
+        val_config_set_validator(&cfg, example_validator, NULL);
+        printf("Metadata validation enabled (example filter)\n");
+    }
+    else
+    {
+        val_config_validation_disabled(&cfg);
+        printf("Metadata validation disabled\n");
+    }
+
     val_session_t *rx = val_session_create(&cfg);
     if (!rx)
     {
@@ -227,7 +292,18 @@ int main(int argc, char **argv)
 
     val_status_t st = val_receive_files(rx, outdir);
     if (st != VAL_OK)
-        fprintf(stderr, "receive failed: %d\n", (int)st);
+    {
+        val_status_t lc = VAL_OK;
+        uint32_t det = 0;
+        (void)val_get_last_error(rx, &lc, &det);
+#ifdef VAL_HOST_UTILITIES
+        char buf[256];
+        val_format_error_report(lc, det, buf, sizeof(buf));
+        fprintf(stderr, "receive failed: %s\n", buf);
+#else
+        fprintf(stderr, "receive failed: code=%d detail=0x%08X\n", (int)lc, (unsigned)det);
+#endif
+    }
 
     val_session_destroy(rx);
     tcp_close(fd);

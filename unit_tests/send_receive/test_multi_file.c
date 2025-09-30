@@ -80,15 +80,17 @@ int main(void)
         return 1;
     }
 
-    // Two different sizes to cross packet boundaries
-    uint8_t *buf1 = (uint8_t *)malloc(300 * 1024 + 17);
-    for (size_t i = 0; i < 300 * 1024 + 17; ++i)
+    // Two different sizes to cross packet boundaries (overridable via env)
+    const size_t s1 = ts_env_size_bytes("VAL_TEST_MULTI_A_SIZE", 300 * 1024 + 17);
+    const size_t s2 = ts_env_size_bytes("VAL_TEST_MULTI_B_SIZE", 123 * 1024 + 9);
+    uint8_t *buf1 = (uint8_t *)malloc(s1);
+    for (size_t i = 0; i < s1; ++i)
         buf1[i] = (uint8_t)(i * 7);
-    uint8_t *buf2 = (uint8_t *)malloc(123 * 1024 + 9);
-    for (size_t i = 0; i < 123 * 1024 + 9; ++i)
+    uint8_t *buf2 = (uint8_t *)malloc(s2);
+    for (size_t i = 0; i < s2; ++i)
         buf2[i] = (uint8_t)(255 - (i * 3));
-    write_file(in1, buf1, 300 * 1024 + 17);
-    write_file(in2, buf2, 123 * 1024 + 9);
+    write_file(in1, buf1, s1);
+    write_file(in2, buf2, s2);
 
     uint8_t *sb_a = (uint8_t *)calloc(1, packet);
     uint8_t *rb_a = (uint8_t *)calloc(1, packet);

@@ -13,18 +13,26 @@ This document reflects the current implementation in `include/` and `src/` and i
   - No user‑editable compiled features at runtime; a built‑in feature mask is advertised during handshake.
   - Allocation‑free control/error path: `val_status_t` code + detail mask.
   - Pre‑1.0 compatibility: we may change wire semantics; strict major version check in HELLO prevents cross‑version sessions.
+  - A reserved `wire_version` byte exists in every packet header (after `type`). It is always 0 in the base protocol; receivers validate it and reject non‑zero as incompatible.
 
 ## Repository layout
 
 - `include/val_protocol.h` — Public API: configuration, session lifecycle, send/receive, utilities.
+- `include/val_errors.h` — Public status codes (negative for errors) and a 32‑bit detail mask split into categories.
+- `include/val_error_strings.h` — Host‑only helpers to format errors to strings (not compiled into the core unless enabled).
 - `src/val_core.c` — CRC implementation and wrappers, handshake, packet send/recv, session setup.
 - `src/val_sender.c` — Sender: metadata, resume negotiation, data loop, DONE/EOT.
 - `src/val_receiver.c` — Receiver: resume decisions, verify exchange, receive/ACK loop, CRC validate, DONE/EOT.
 - `src/val_internal.h` — Internal packet types/headers/payloads, helpers, session struct.
+- `src/val_error_strings.c` — Implementation of host‑only error formatting utilities (guarded by a CMake option).
 - `examples/tcp/` — Cross‑platform TCP examples: `val_example_send.c`, `val_example_receive.c`, and `common/tcp_util.*`.
 - `unit_tests/` — CTest executables (no external framework): send/receive, recovery (resume/corruption), policies, support shims.
 - `CMakeLists.txt`, `CMakePresets.json` — Build configuration (Windows/MSVC, Linux/WSL).
 - Docs: `README.md`, `DEVELOPMENT.md`, `PROTOCOL_FLOW.md`, `PROJECT_STRUCTURE.md`.
+
+Build options of note (set via CMake cache variables):
+- `VAL_BUILD_HOST_UTILS` (ON by default): builds `val_error_strings` and links it only into examples/tests; core library remains numeric‑only.
+- `VAL_MCU_BUILD` (OFF by default): enables size‑optimized flags and `VAL_MCU_OPTIMIZED` define for embedded builds.
 
 ## Public API (short tour)
 
@@ -47,6 +55,8 @@ Header: `include/val_protocol.h` (source of truth for public constants and types
 - Transport (blocking)
   - `int (*send)(void* io_ctx, const void* data, size_t len)` — Must send exactly `len` bytes.
   - `int (*recv)(void* io_ctx, void* buf, size_t buf_size, size_t* received, uint32_t timeout_ms)` — Reads exactly `buf_size` bytes or times out; returns 0 on success.
+  - Optional: `int (*is_connected)(void* io_ctx)` — Return 1 if connected, 0 if disconnected, <0 if unknown. If NULL, the core assumes connected.
+  - Optional: `void (*flush)(void* io_ctx)` — Best‑effort flush after control packets. If NULL, treated as no‑op.
   - `void* io_context`
 - Filesystem
   - Thin wrappers: `fopen/fread/fwrite/fseek/ftell/fclose`
@@ -87,6 +97,7 @@ Header: `include/val_protocol.h` (source of truth for public constants and types
 
 - Endianness: all on‑wire multi‑byte integers are little‑endian.
 - Framing: fixed header (with header CRC) + variable payload (0..N) + trailer CRC32 over header+payload (no padding).
+  - Header layout (base/core): `type`, `wire_version` (=0), `payload_len`, `seq`, `offset`, `header_crc`.
 - DATA_ACK semantics: cumulative; ACK.offset is the next expected offset (total bytes durably written).
 
 ### Packet types (high‑level)
@@ -102,6 +113,9 @@ Header: `include/val_protocol.h` (source of truth for public constants and types
 2. Both adopt `effective_packet_size = min(local, peer)`.
 3. Required features are validated (fail fast if missing); requested are sanitized to local and peer.
 4. On incompatibility, send ERROR { code=VAL_ERR_FEATURE_NEGOTIATION, detail=missing_mask } and abort.
+
+Wire version enforcement
+- Independently of HELLO’s version check, every packet header carries `wire_version`. Receivers must verify it is 0 in the base protocol. A non‑zero value results in `VAL_ERR_INCOMPATIBLE_VERSION` with `VAL_ERROR_DETAIL_VERSION_MAJOR` and aborting the operation.
 
 ### Resume negotiation and VERIFY exchange
 
@@ -127,7 +141,12 @@ Immediately after SEND_META the sender issues RESUME_REQ. The receiver responds 
 ### ERROR packet usage
 
 - Payload: `{ int32 code, uint32 detail }` — compact, no strings. Primarily used during handshake failures today.
-- Sessions track last error (`val_get_last_error`).
+- Sessions track last error (`val_get_last_error`). On wire, ERROR uses compact payload: `{ int32 code, uint32 detail }` (LE). The 32‑bit detail mask is segmented into categories (Network, CRC, Protocol, FS, Context).
+
+Error system (host vs MCU)
+- The core library records numeric `val_status_t` and a 32‑bit detail mask (see `include/val_errors.h`).
+- Optional host‑only helpers in `val_error_strings.*` can format human‑readable strings and reports; enabled by `VAL_BUILD_HOST_UTILS`.
+- Examples/tests print rich error messages when host utils are linked; otherwise they print numeric code/detail.
 
 ## Examples: TCP send/receive
 

@@ -29,6 +29,31 @@ static int closesock(int fd)
 {
     return closesocket((SOCKET)fd);
 }
+
+int tcp_is_connected(int fd)
+{
+    // Use getsockopt to check SO_ERROR and a non-blocking peek
+    char buf;
+    int r = recv((SOCKET)fd, &buf, 1, MSG_PEEK);
+    if (r == 0)
+        return 0; // orderly shutdown
+    if (r < 0)
+    {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK)
+            return 1; // connected but no data
+        // For other transient errors, assume connected
+        return 1;
+    }
+    return 1;
+}
+
+void tcp_flush(int fd)
+{
+    // Winsock has no explicit flush; disable Nagle to reduce latency
+    int yes = 1;
+    setsockopt((SOCKET)fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&yes, sizeof(yes));
+}
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -60,6 +85,39 @@ static void set_nonblock(int fd, int nb)
 static int closesock(int fd)
 {
     return close(fd);
+}
+
+int tcp_is_connected(int fd)
+{
+    // Check SO_ERROR
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
+        return -1;
+    if (err != 0)
+        return 0;
+    // poll for hangup using select with zero timeout
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval tv = {0, 0};
+    int r = select(fd + 1, &rfds, NULL, NULL, &tv);
+    if (r > 0)
+    {
+        // If readable, check if peer closed
+        char ch;
+        ssize_t n = recv(fd, &ch, 1, MSG_PEEK);
+        if (n == 0)
+            return 0; // closed
+    }
+    return 1;
+}
+
+void tcp_flush(int fd)
+{
+    // Nothing to do on POSIX for stream sockets; disabling Nagle might help
+    int yes = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
 }
 #endif
 

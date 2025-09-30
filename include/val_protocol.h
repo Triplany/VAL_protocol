@@ -6,6 +6,7 @@ extern "C"
 {
 #endif
 
+#include "val_errors.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -17,25 +18,36 @@ extern "C"
 #define VAL_MAX_PACKET_SIZE 65536u
 #define VAL_MAX_FILENAME 127u
 #define VAL_MAX_PATH 127u
+    // Metadata payload shared with application callbacks (public)
+    typedef struct
+    {
+        // Sanitized basename only (no directories). Sender strips paths and cleans unsafe chars.
+        char filename[VAL_MAX_FILENAME + 1];
+        // Reported/original path hint from the sender (sanitized). For receiver information only — do not trust for output paths.
+        // Receivers should decide their own output directory and must not concatenate this blindly to avoid path traversal.
+        char sender_path[VAL_MAX_PATH + 1];
+        uint64_t file_size;
+        uint32_t file_crc32; // whole-file CRC for integrity verification
+    } val_meta_payload_t;
 
-    // Status codes
+    // Validation response actions
     typedef enum
     {
-        VAL_OK = 0,
-        // Non-error informational status for per-file completion
-        VAL_SKIPPED = 1,
-        VAL_ERR_INVALID_ARG = -1,
-        VAL_ERR_NO_MEMORY = -2,
-        VAL_ERR_IO = -3,
-        VAL_ERR_TIMEOUT = -4,
-        VAL_ERR_PROTOCOL = -5,
-        VAL_ERR_CRC = -6,
-        VAL_ERR_RESUME_VERIFY = -7,
-        VAL_ERR_INCOMPATIBLE_VERSION = -8,
-        VAL_ERR_PACKET_SIZE_MISMATCH = -9,
-        VAL_ERR_FEATURE_NEGOTIATION = -10,
-        VAL_ERR_ABORTED = -11,
-    } val_status_t;
+        VAL_VALIDATION_ACCEPT = 0, // File is valid, proceed with transfer
+        VAL_VALIDATION_SKIP = 1,   // Skip this file, continue session with next file
+        VAL_VALIDATION_ABORT = 2,  // Abort entire session immediately
+    } val_validation_action_t;
+
+    // Single metadata validation callback type
+    // Parameters:
+    //   meta: File metadata from SEND_META packet
+    //   target_path: Full constructed path where file will be saved
+    //   context: User-provided context pointer
+    // Returns: VAL_VALIDATION_ACCEPT/SKIP/ABORT
+    typedef val_validation_action_t (*val_metadata_validator_t)(const val_meta_payload_t *meta, const char *target_path,
+                                                                void *context);
+
+    // val_status_t is defined in val_errors.h
 
     typedef enum
     {
@@ -108,6 +120,13 @@ extern "C"
             // Receive exactly 'buffer_size' bytes, blocking until filled or timeout. Return 0 on success, <0 on error.
             // The protocol reads header, then payload_len, then trailer CRC in separate calls.
             int (*recv)(void *ctx, void *buffer, size_t buffer_size, size_t *received, uint32_t timeout_ms);
+            // Optional: report whether the underlying transport is currently connected.
+            // Return 1 if connected/usable, 0 if not connected, and <0 if unknown. When absent (NULL), the
+            // protocol assumes the transport is connected.
+            int (*is_connected)(void *ctx);
+            // Optional: flush any buffered data in the transport to the wire (best-effort). When absent (NULL),
+            // this is treated as a no-op.
+            void (*flush)(void *ctx);
             void *io_context;
         } transport;
 
@@ -195,6 +214,15 @@ extern "C"
             void (*on_progress)(uint64_t bytes_transferred, uint64_t total_bytes);
         } callbacks;
 
+        // Simple metadata validation configuration (optional)
+        struct
+        {
+            // Single validation callback — NULL means accept all files
+            val_metadata_validator_t validator;
+            // Context pointer passed to validator callback
+            void *validator_context;
+        } metadata_validation;
+
         // Optional debug logging sink. Logging is compile-time gated by VAL_LOG_LEVEL macro (0..5).
         // If VAL_LOG_LEVEL == 0, all logging macros compile to no-ops with zero runtime overhead.
         // If enabled (>0), and this sink is provided, messages will be sent here; otherwise they are dropped.
@@ -228,6 +256,12 @@ extern "C"
 
     // Retrieve last error info recorded by the session (code and optional detail mask)
     val_status_t val_get_last_error(val_session_t *session, val_status_t *code, uint32_t *detail_mask);
+
+    // Metadata validation helpers
+    // Initialize with no validation (default - accept all files)
+    void val_config_validation_disabled(val_config_t *config);
+    // Set custom validator with context
+    void val_config_set_validator(val_config_t *config, val_metadata_validator_t validator, void *context);
 
 #ifdef __cplusplus
 }

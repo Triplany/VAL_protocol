@@ -5,6 +5,7 @@ A small, robust, blocking-I/O file transfer protocol library in C. Frames are fi
 - Development guide: [DEVELOPMENT.md](./DEVELOPMENT.md)
 - Packet flow reference: [PROTOCOL_FLOW.md](./PROTOCOL_FLOW.md)
 - Pre‑1.0 policy: backward compatibility isn’t guaranteed until v1.0. The current on‑wire behavior uses cumulative DATA_ACKs, DONE_ACK, and two CRCs (header + trailer). All multi‑byte fields are little‑endian.
+  - The packet header includes a reserved `wire_version` byte (after `type`) that is always 0 in the base protocol; receivers validate it and reject non‑zero as incompatible for future evolution.
 - Public headers: `include/`
 - Sources: `src/`
 - Examples: `examples/tcp/` (TCP send/receive)
@@ -22,7 +23,14 @@ A small, robust, blocking-I/O file transfer protocol library in C. Frames are fi
       SKIP_IF_DIFFERENT(4); ALWAYS_SKIP(5); STRICT_RESUME_ONLY(6)
   - On mismatch/anomaly defaults come from the session (see `val_session_create()` in `src/val_core.c`)
 
-## Debug logging
+## Error system and debug logging
+
+Errors
+- Numeric `val_status_t` codes (negative for errors) with a 32‑bit detail mask segmented by category (Network/CRC/Protocol/FS/Context) live in `include/val_errors.h`.
+- The core library is MCU‑friendly and records only numeric code+detail.
+- Optional host‑only utilities (`include/val_error_strings.h`, `src/val_error_strings.c`) provide string formatting and diagnostics; controlled via the `VAL_BUILD_HOST_UTILS` CMake option and linked only into examples/tests.
+
+Logging
 
 Compile-time gated logging with a runtime filter.
 
@@ -74,8 +82,9 @@ On Linux/WSL, use the provided `linux-*` presets in `CMakePresets.json` and run 
 - Windows and WSL builds via `CMakePresets.json`
 - Examples: cross‑platform TCP transport using a minimal helper
 - On‑wire framing: fixed header + variable payload + trailer CRC; header CRC validates early. All multi‑byte integers are little‑endian.
+  - Header layout (base/pre‑1.0): type, wire_version(=0), payload_len, seq, offset, header CRC.
 - Mid‑stream recovery: cumulative DATA_ACK semantics and DONE_ACK implemented.
-- Errors on the wire are compact: `val_status_t code` + `detail mask`.
+- Errors on the wire are compact: `val_status_t code` + `detail mask` (both little‑endian in ERROR payload).
 
 Resilience and timeouts:
 - All blocking waits are bounded with configurable timeouts and retries (exponential backoff).
@@ -85,3 +94,12 @@ Resilience and timeouts:
 
 Diagnostics:
 - Logging is compile-time gated. Provide `cfg.debug.log` to capture logs (unit tests use a simple console logger).
+
+### Transport hooks (optional)
+
+The transport interface in `val_config_t` supports two optional hooks:
+
+- `int (*is_connected)(void* ctx)`: returns 1 if connected/usable, 0 if definitively disconnected, <0 if unknown. When absent, the core assumes connected.
+- `void (*flush)(void* ctx)`: best‑effort flush after control packets (HELLO, DONE, EOT, ERROR). When absent, treated as a no‑op.
+
+The TCP examples wire these to `tcp_is_connected()` and `tcp_flush()` from `examples/tcp/common/tcp_util.*`.

@@ -9,21 +9,31 @@ static val_status_t get_file_size_and_name(val_session_t *s, const char *filepat
 
     void *f = s->config->filesystem.fopen(s->config->filesystem.fs_context, filepath, "rb");
     if (!f)
+    {
+        VAL_LOG_ERROR(s, "fopen failed");
+        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_FILE_NOT_FOUND);
         return VAL_ERR_IO;
+    }
     if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, 0, SEEK_END) != 0)
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        VAL_LOG_ERROR(s, "fseek end failed");
+        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
         return VAL_ERR_IO;
     }
     long sz = s->config->filesystem.ftell(s->config->filesystem.fs_context, f);
     if (sz < 0)
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        VAL_LOG_ERROR(s, "ftell failed");
+        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
         return VAL_ERR_IO;
     }
     if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, 0, SEEK_SET) != 0)
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        VAL_LOG_ERROR(s, "fseek set failed");
+        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
         return VAL_ERR_IO;
     }
     *out_size = (uint64_t)sz;
@@ -76,11 +86,15 @@ static val_status_t compute_crc_region(val_session_t *s, const char *filepath, u
     }
     void *f = s->config->filesystem.fopen(s->config->filesystem.fs_context, filepath, "rb");
     if (!f)
+    {
+        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
         return VAL_ERR_IO;
+    }
     uint64_t start = end_offset - length;
     if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)start, SEEK_SET) != 0)
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
         return VAL_ERR_IO;
     }
     uint32_t state = val_internal_crc32_init(s);
@@ -105,6 +119,7 @@ static val_status_t compute_crc_region(val_session_t *s, const char *filepath, u
         if (r != (int)chunk)
         {
             s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+            val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
             return VAL_ERR_IO;
         }
         state = val_internal_crc32_update(s, state, buf, chunk);
@@ -134,12 +149,19 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         for (;;)
         {
+            if (!val_internal_transport_is_connected(s))
+            {
+                VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                return VAL_ERR_IO;
+            }
             st = val_internal_recv_packet(s, &t, tmp, sizeof(tmp), &len, &off, to);
             if (st == VAL_OK)
                 break;
             if (st != VAL_ERR_TIMEOUT || tries == 0)
             {
                 VAL_LOG_ERRORF(s, "resume_req: recv failed %d (tries=%u)", (int)st, (unsigned)tries);
+                if (st == VAL_ERR_TIMEOUT && tries == 0)
+                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
                 return st;
             }
             // Retransmit RESUME_REQ and backoff
@@ -160,6 +182,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
     if (t != VAL_PKT_RESUME_RESP || len < sizeof(val_resume_resp_t))
     {
         VAL_LOG_ERRORF(s, "resume_req: protocol mismatch t=%d len=%u", (int)t, (unsigned)len);
+        VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
     }
     val_resume_resp_t resp;
@@ -217,6 +240,11 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
             uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
             for (;;)
             {
+                if (!val_internal_transport_is_connected(s))
+                {
+                    VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                    return VAL_ERR_IO;
+                }
                 st = val_internal_recv_packet(s, &t, tmp, sizeof(tmp), &len, &off, to);
                 if (st == VAL_OK)
                 {
@@ -242,6 +270,8 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                 if (st != VAL_ERR_TIMEOUT || tries == 0)
                 {
                     VAL_LOG_ERRORF(s, "verify: recv failed %d (tries=%u)", (int)st, (unsigned)tries);
+                    if (st == VAL_ERR_TIMEOUT && tries == 0)
+                        VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
                     return st;
                 }
                 // Retransmit VERIFY on timeout
@@ -391,6 +421,7 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
     if (!f)
     {
         VAL_LOG_ERROR(s, "fopen for data failed");
+        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
         return VAL_ERR_IO;
     }
     if (resume_off != 0)
@@ -399,6 +430,7 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
         {
             s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
             VAL_LOG_ERROR(s, "fseek to resume_off failed");
+            val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
             return VAL_ERR_IO;
         }
     }
@@ -500,6 +532,12 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         for (;;)
         {
+            if (!val_internal_transport_is_connected(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                return VAL_ERR_IO;
+            }
             st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to_ack);
             if (st == VAL_OK)
             {
@@ -513,6 +551,7 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                 {
                     s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                     VAL_LOG_ERRORF(s, "recv: expected DATA_ACK got %d", (int)t);
+                    VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_UNKNOWN_TYPE);
                     return VAL_ERR_PROTOCOL;
                 }
                 VAL_LOG_DEBUGF(s, "data: got DATA_ACK off=%llu", (unsigned long long)off);
@@ -526,6 +565,7 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                     {
                         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                         VAL_LOG_ERROR(s, "fseek forward failed");
+                        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
                         return VAL_ERR_IO;
                     }
                     sent = off;
@@ -538,6 +578,7 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                     {
                         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                         VAL_LOG_ERROR(s, "fseek backward failed");
+                        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
                         return VAL_ERR_IO;
                     }
                     sent = off;
@@ -553,6 +594,8 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
             {
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                 VAL_LOG_ERRORF(s, "recv DATA_ACK failed %d", (int)st);
+                if (st == VAL_ERR_TIMEOUT && tries == 0)
+                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
                 return st;
             }
             // Timeout: retransmit the same DATA chunk and backoff
@@ -594,6 +637,12 @@ send_done:
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         for (;;)
         {
+            if (!val_internal_transport_is_connected(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                return VAL_ERR_IO;
+            }
             st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
             if (st == VAL_OK)
             {
@@ -622,6 +671,7 @@ send_done:
                 if (s->config->callbacks.on_file_complete)
                     s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_TIMEOUT);
                 VAL_LOG_ERROR(s, "recv DONE_ACK: retries exhausted");
+                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
                 return VAL_ERR_TIMEOUT;
             }
             // Retransmit DONE on timeout or wrong packet
@@ -666,6 +716,11 @@ send_done_no_file:
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         for (;;)
         {
+            if (!val_internal_transport_is_connected(s))
+            {
+                VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                return VAL_ERR_IO;
+            }
             st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
             if (st == VAL_OK)
             {
@@ -691,6 +746,7 @@ send_done_no_file:
                 if (s->config->callbacks.on_file_complete)
                     s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_TIMEOUT);
                 VAL_LOG_ERROR(s, "recv DONE_ACK (skip): retries exhausted");
+                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
                 return VAL_ERR_TIMEOUT;
             }
             // Retransmit DONE on timeout or wrong packet

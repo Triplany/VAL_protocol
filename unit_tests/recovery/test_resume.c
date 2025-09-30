@@ -51,7 +51,7 @@ static int files_equal(const char *a, const char *b)
 int main(void)
 {
     const size_t packet = 1024, depth = 16;
-    const size_t size = 512 * 1024 + 7;
+    const size_t size = ts_env_size_bytes("VAL_TEST_RESUME_SIZE", 512 * 1024 + 7);
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
 

@@ -144,6 +144,23 @@ uint32_t val_get_builtin_features(void)
     return VAL_BUILTIN_FEATURES;
 }
 
+// Metadata validation helpers
+void val_config_validation_disabled(val_config_t *config)
+{
+    if (!config)
+        return;
+    config->metadata_validation.validator = NULL;
+    config->metadata_validation.validator_context = NULL;
+}
+
+void val_config_set_validator(val_config_t *config, val_metadata_validator_t validator, void *context)
+{
+    if (!config)
+        return;
+    config->metadata_validation.validator = validator;
+    config->metadata_validation.validator_context = context;
+}
+
 // Session-aware CRC adapters
 uint32_t val_internal_crc32(val_session_t *s, const void *data, size_t length)
 {
@@ -372,6 +389,7 @@ static void fill_header(val_session_t *s, val_packet_header_t *h, val_packet_typ
 {
     memset(h, 0, sizeof(*h));
     h->type = (uint8_t)type;
+    h->wire_version = 0; // base/core protocol reserves this byte; always 0 for now
     // On-wire is little-endian for multi-byte fields
     h->payload_len = val_htole32(payload_len);
     h->seq = val_htole32(seq);
@@ -391,9 +409,22 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
 #else
     pthread_mutex_lock(&s->lock);
 #endif
+    // Optional preflight connection check
+    if (!val_internal_transport_is_connected(s))
+    {
+        VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_IO;
+    }
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size; // MTU
     if (payload_len > (uint32_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t)))
     {
+        // Payload does not fit into negotiated MTU
+        val_internal_set_error_detailed(s, VAL_ERR_INVALID_ARG, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
         VAL_LOG_ERROR(s, "send_packet: payload too large for MTU");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -425,8 +456,14 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
 #endif
     if (rc != (int)total_len)
     {
+        VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_SEND_FAILED);
         VAL_LOG_ERROR(s, "send_packet: transport send failed");
         return VAL_ERR_IO;
+    }
+    // Best-effort flush after control packets where timely delivery matters
+    if (type == VAL_PKT_DONE || type == VAL_PKT_EOT || type == VAL_PKT_HELLO || type == VAL_PKT_ERROR)
+    {
+        val_internal_transport_flush(s);
     }
     return VAL_OK;
 }
@@ -447,6 +484,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     int rc = s->config->transport.recv(s->config->transport.io_context, buf, sizeof(val_packet_header_t), &got, timeout_ms);
     if (rc < 0)
     {
+        VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
         VAL_LOG_ERROR(s, "recv_packet: transport error on header");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -457,6 +495,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     }
     if (got != sizeof(val_packet_header_t))
     {
+        VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
         VAL_LOG_DEBUG(s, "recv_packet: header timeout");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -473,6 +512,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     uint32_t header_crc_calc = val_internal_crc32(s, &hdr_copy, sizeof(val_packet_header_t));
     if (header_crc_calc != header_crc_expected)
     {
+        VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_HEADER);
         VAL_LOG_ERROR(s, "recv_packet: header CRC mismatch");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -482,10 +522,22 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         return VAL_ERR_CRC;
     }
     val_packet_header_t *hdr = (val_packet_header_t *)buf; // original header bytes remain for trailer CRC
+    // Verify wire_version is zero (reserved for future use)
+    if (hdr->wire_version != 0)
+    {
+        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION_MAJOR);
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return VAL_ERR_INCOMPATIBLE_VERSION;
+    }
     uint32_t payload_len = val_letoh32(hdr->payload_len);
     // Enforce bounds vs MTU (header + payload + trailer <= P)
     if (payload_len > (uint32_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t)))
     {
+        VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
         VAL_LOG_ERROR(s, "recv_packet: payload_len exceeds MTU");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -502,6 +554,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
                                        timeout_ms);
         if (rc < 0)
         {
+            VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
             VAL_LOG_ERROR(s, "recv_packet: transport error on payload");
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
@@ -512,6 +565,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         }
         if (got2 != payload_len)
         {
+            VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
             VAL_LOG_DEBUG(s, "recv_packet: payload timeout");
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
@@ -527,6 +581,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     rc = s->config->transport.recv(s->config->transport.io_context, &trailer_crc, sizeof(trailer_crc), &got3, timeout_ms);
     if (rc < 0)
     {
+        VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
         VAL_LOG_ERROR(s, "recv_packet: transport error on trailer");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -537,6 +592,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     }
     if (got3 != sizeof(trailer_crc))
     {
+        VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
         VAL_LOG_DEBUG(s, "recv_packet: trailer timeout");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -549,6 +605,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     uint32_t calc_crc = val_internal_crc32(s, buf, sizeof(val_packet_header_t) + payload_len);
     if (val_letoh32(trailer_crc) != calc_crc)
     {
+        VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_TRAILER);
         VAL_LOG_ERROR(s, "recv_packet: trailer CRC mismatch");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -567,6 +624,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     {
         if (payload_len > payload_cap)
         {
+            val_internal_set_error_detailed(s, VAL_ERR_INVALID_ARG, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
 #else
@@ -665,7 +723,15 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     // Pre-validate local features: fail fast if required contains unsupported bits
     val_status_t vr = val_internal_validate_local_features(s->config, &requested_sanitized);
     if (vr != VAL_OK)
+    {
+        // Encode which required features are missing locally
+        uint32_t missing_required = s->config->features.required & ~VAL_BUILTIN_FEATURES;
+        if (missing_required)
+        {
+            VAL_SET_FEATURE_ERROR(s, missing_required);
+        }
         return vr;
+    }
     val_handshake_t hello;
     // Prepare handshake message
     memset(&hello, 0, sizeof(hello));
@@ -701,7 +767,13 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
         if (st == VAL_OK)
             break;
         if (st != VAL_ERR_TIMEOUT || tries == 0)
+        {
+            if (st == VAL_ERR_TIMEOUT && tries == 0)
+            {
+                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_HELLO);
+            }
             return st;
+        }
         // Retransmit HELLO and backoff
         val_status_t rs = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
         if (rs != VAL_OK)
@@ -713,7 +785,10 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
         --tries;
     }
     if (t != VAL_PKT_HELLO || len < sizeof(peer))
+    {
+        VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
+    }
     // Convert from LE to host
     val_handshake_t peer_h = peer;
     peer_h.magic = val_letoh32(peer_h.magic);
@@ -722,22 +797,31 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     peer_h.required = val_letoh32(peer_h.required);
     peer_h.requested = val_letoh32(peer_h.requested);
     if (peer_h.magic != VAL_MAGIC)
+    {
+        VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
+    }
     if (peer_h.version_major != VAL_VERSION_MAJOR)
+    {
+        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION_MAJOR);
         return VAL_ERR_INCOMPATIBLE_VERSION;
+    }
     // Adopt the smaller packet size so both can operate; both peers independently take min
     size_t negotiated =
         (peer_h.packet_size < s->config->buffers.packet_size) ? peer_h.packet_size : s->config->buffers.packet_size;
     if (negotiated < VAL_MIN_PACKET_SIZE || negotiated > VAL_MAX_PACKET_SIZE)
+    {
+        val_internal_set_error_detailed(s, VAL_ERR_PACKET_SIZE_MISMATCH, VAL_ERROR_DETAIL_PACKET_SIZE);
         return VAL_ERR_PACKET_SIZE_MISMATCH;
+    }
     s->effective_packet_size = negotiated;
     // Enforce required features: our required must be present on peer
     s->peer_features = peer_h.features;
     uint32_t missing_on_peer = hello.required & ~peer_h.features;
     if (missing_on_peer)
     {
-        val_internal_set_last_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_on_peer);
-        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_on_peer);
+        VAL_SET_FEATURE_ERROR(s, missing_on_peer);
+        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, VAL_SET_MISSING_FEATURE(missing_on_peer));
         return VAL_ERR_FEATURE_NEGOTIATION;
     }
     // Optionally adjust behavior based on requested ∧ peer.features later
@@ -770,7 +854,13 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
         if (st == VAL_OK)
             break;
         if (st != VAL_ERR_TIMEOUT || tries == 0)
+        {
+            if (st == VAL_ERR_TIMEOUT && tries == 0)
+            {
+                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_HELLO);
+            }
             return st;
+        }
         // Just backoff and continue waiting; receiver doesn't send until hello is received
         if (backoff && s->config->system.delay_ms)
             s->config->system.delay_ms(backoff);
@@ -779,7 +869,10 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
         --tries;
     }
     if (t != VAL_PKT_HELLO || len < sizeof(peer))
+    {
+        VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
+    }
     // Convert from LE to host
     val_handshake_t peer_h = peer;
     peer_h.magic = val_letoh32(peer_h.magic);
@@ -788,13 +881,22 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     peer_h.required = val_letoh32(peer_h.required);
     peer_h.requested = val_letoh32(peer_h.requested);
     if (peer_h.magic != VAL_MAGIC)
+    {
+        VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
+    }
     if (peer_h.version_major != VAL_VERSION_MAJOR)
+    {
+        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION_MAJOR);
         return VAL_ERR_INCOMPATIBLE_VERSION;
+    }
     size_t negotiated =
         (peer_h.packet_size < s->config->buffers.packet_size) ? peer_h.packet_size : s->config->buffers.packet_size;
     if (negotiated < VAL_MIN_PACKET_SIZE || negotiated > VAL_MAX_PACKET_SIZE)
+    {
+        val_internal_set_error_detailed(s, VAL_ERR_PACKET_SIZE_MISMATCH, VAL_ERROR_DETAIL_PACKET_SIZE);
         return VAL_ERR_PACKET_SIZE_MISMATCH;
+    }
     s->effective_packet_size = negotiated;
 
     // Send our hello back
@@ -809,7 +911,8 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     uint32_t missing_required = s->config->features.required & ~VAL_BUILTIN_FEATURES;
     if (missing_required)
     {
-        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_required);
+        VAL_SET_FEATURE_ERROR(s, missing_required);
+        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, VAL_SET_MISSING_FEATURE(missing_required));
         return VAL_ERR_FEATURE_NEGOTIATION;
     }
     hello.features = VAL_BUILTIN_FEATURES;
@@ -820,8 +923,8 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     uint32_t missing_local = peer_h.required & ~hello.features;
     if (missing_local)
     {
-        val_internal_set_last_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_local);
-        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, missing_local);
+        VAL_SET_FEATURE_ERROR(s, missing_local);
+        (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, VAL_SET_MISSING_FEATURE(missing_local));
         return VAL_ERR_FEATURE_NEGOTIATION;
     }
     // Send LE-encoded hello back

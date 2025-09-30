@@ -14,6 +14,51 @@ static val_status_t send_resume_response(val_session_t *s, val_resume_action_t a
     return val_internal_send_packet(s, VAL_PKT_RESUME_RESP, &resp, sizeof(resp), offset);
 }
 
+// --- Metadata validation helpers ---
+// Construct full target path using output_directory and a sanitized filename
+static val_status_t val_construct_target_path(val_session_t *session, const char *filename, char *target_path,
+                                              size_t target_path_size)
+{
+    if (!session || !target_path || target_path_size == 0)
+        return VAL_ERR_INVALID_ARG;
+    char sanitized[VAL_MAX_FILENAME + 1];
+    val_clean_filename(filename, sanitized, sizeof(sanitized));
+#ifdef _WIN32
+    int n = snprintf(target_path, target_path_size, "%s\\%s", session->output_directory, sanitized);
+#else
+    int n = snprintf(target_path, target_path_size, "%s/%s", session->output_directory, sanitized);
+#endif
+    if (n < 0 || n >= (int)target_path_size)
+        return VAL_ERR_INVALID_ARG;
+    return VAL_OK;
+}
+
+static val_validation_action_t val_validate_metadata(val_session_t *session, const val_meta_payload_t *meta,
+                                                     const char *target_path)
+{
+    if (!session)
+        return VAL_VALIDATION_ABORT;
+    if (!session->cfg.metadata_validation.validator)
+        return VAL_VALIDATION_ACCEPT; // default
+    return session->cfg.metadata_validation.validator(meta, target_path, session->cfg.metadata_validation.validator_context);
+}
+
+static val_status_t val_handle_validation_action(val_session_t *session, val_validation_action_t action, const char *filename)
+{
+    switch (action)
+    {
+    case VAL_VALIDATION_ACCEPT:
+        return VAL_OK;
+    case VAL_VALIDATION_SKIP:
+        return send_resume_response(session, VAL_RESUME_ACTION_SKIP_FILE, 0, 0, 0);
+    case VAL_VALIDATION_ABORT:
+        return send_resume_response(session, VAL_RESUME_ACTION_ABORT_FILE, 0, 0, 0);
+    default:
+        VAL_SET_PROTOCOL_ERROR(session, VAL_ERROR_DETAIL_INVALID_STATE);
+        return VAL_ERR_PROTOCOL;
+    }
+}
+
 static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resume_offset_expected, uint32_t expected_crc,
                                                  uint32_t verify_len)
 {
@@ -29,11 +74,20 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     val_status_t st = VAL_OK;
     for (;;)
     {
+        if (!val_internal_transport_is_connected(s))
+        {
+            VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+            return VAL_ERR_IO;
+        }
         st = val_internal_recv_packet(s, &t, buf, sizeof(buf), &len, &off, to);
         if (st != VAL_OK)
         {
             if (st != VAL_ERR_TIMEOUT || tries == 0)
+            {
+                if (st == VAL_ERR_TIMEOUT && tries == 0)
+                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
                 return st;
+            }
             VAL_LOG_DEBUG(s, "verify: waiting for sender CRC");
             if (backoff && s->config->system.delay_ms)
                 s->config->system.delay_ms(backoff);
@@ -61,7 +115,10 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     VAL_LOG_DEBUG(s, "verify: len check");
     VAL_LOG_DEBUG(s, "verify: len ok");
     if (len < sizeof(val_resume_resp_t))
+    {
+        VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
+    }
     VAL_LOG_DEBUGF(s, "verify: extracting crc from payload len=%u", (unsigned)len);
     // Extract verify_crc from payload (offset 12 in struct)
     uint32_t their_verify_crc;
@@ -411,11 +468,20 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
             for (;;)
             {
+                if (!val_internal_transport_is_connected(s))
+                {
+                    VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                    return VAL_ERR_IO;
+                }
                 st = val_internal_recv_packet(s, &t, tmp, (uint32_t)P, &len, &off, to_meta);
                 if (st == VAL_OK)
                     break;
                 if (st != VAL_ERR_TIMEOUT || tries == 0)
+                {
+                    if (st == VAL_ERR_TIMEOUT && tries == 0)
+                        VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_META);
                     return st;
+                }
                 VAL_LOG_DEBUG(s, "recv: waiting for metadata");
                 if (backoff && s->config->system.delay_ms)
                     s->config->system.delay_ms(backoff);
@@ -430,7 +496,10 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             return VAL_OK;
         }
         if (t != VAL_PKT_SEND_META || len < sizeof(val_meta_payload_t))
+        {
+            VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
             return VAL_ERR_PROTOCOL;
+        }
         val_meta_payload_t meta;
         memcpy(&meta, tmp, sizeof(meta));
         // Convert numeric fields from LE
@@ -455,22 +524,56 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             snprintf(full_output_path, sizeof(full_output_path), "%s", clean_name);
         }
 
-        // Handle resume negotiation
-        uint64_t resume_off = 0;
-        st = handle_file_resume(s, clean_name, meta.sender_path, meta.file_size, &resume_off);
-        if (st != VAL_OK)
+        // Perform optional metadata validation (ACCEPT/SKIP/ABORT)
+        int validation_skipped = 0;
+        uint64_t resume_off = 0; // may be set by validation skip path
         {
-            if (st == VAL_ERR_ABORTED)
+            char target_path[VAL_MAX_PATH * 2 + 8];
+            val_status_t pr = val_construct_target_path(s, clean_name, target_path, sizeof(target_path));
+            if (pr != VAL_OK)
             {
-                // Drain until DONE for protocol hygiene, then NAK with ERROR and continue (simple: send ERROR now)
-                (void)val_internal_send_error(s, VAL_ERR_ABORTED, 0);
+                // Treat as validation failure -> abort this file
+                (void)val_handle_validation_action(s, VAL_VALIDATION_ABORT, clean_name);
+                return VAL_ERR_INVALID_ARG;
             }
-            return st;
+            val_validation_action_t act = val_validate_metadata(s, &meta, target_path);
+            val_status_t hr = val_handle_validation_action(s, act, clean_name);
+            if (act == VAL_VALIDATION_ABORT)
+            {
+                // We informed sender to abort this file; stop processing
+                (void)hr; // hr is send status; even if send fails, abort
+                return VAL_ERR_ABORTED;
+            }
+            if (act == VAL_VALIDATION_SKIP)
+            {
+                // We informed sender to skip; set skip state and emulate resume skip behavior
+                validation_skipped = 1;
+                resume_off = meta.file_size; // treat as complete locally
+                if (s->config->callbacks.on_file_start)
+                    s->config->callbacks.on_file_start(clean_name, meta.sender_path, meta.file_size, meta.file_size);
+            }
         }
-        VAL_LOG_INFO(s, "recv: resume handled");
-
-        // If resume negotiation asked to skip, we should wait for DONE and ACK it without writing
-        int skipping = (resume_off >= meta.file_size) ? 1 : 0;
+        int skipping = 0;
+        if (!validation_skipped)
+        {
+            // Handle resume negotiation if not overridden by validation
+            st = handle_file_resume(s, clean_name, meta.sender_path, meta.file_size, &resume_off);
+            if (st != VAL_OK)
+            {
+                if (st == VAL_ERR_ABORTED)
+                {
+                    // Drain until DONE for protocol hygiene, then NAK with ERROR and continue (simple: send ERROR now)
+                    (void)val_internal_send_error(s, VAL_ERR_ABORTED, 0);
+                }
+                return st;
+            }
+            VAL_LOG_INFO(s, "recv: resume handled");
+            skipping = (resume_off >= meta.file_size) ? 1 : 0;
+        }
+        else
+        {
+            skipping = 1;
+        }
 
         // Open file for write unless we are skipping
         const char *mode = (resume_off == 0) ? "wb" : "ab";
@@ -479,7 +582,10 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
         {
             f = s->config->filesystem.fopen(s->config->filesystem.fs_context, full_output_path, mode);
             if (!f)
+            {
+                val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
                 return VAL_ERR_IO;
+            }
         }
 
         uint64_t total = meta.file_size;
@@ -541,6 +647,13 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
                 for (;;)
                 {
+                    if (!val_internal_transport_is_connected(s))
+                    {
+                        if (!skipping && f)
+                            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                        VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                        return VAL_ERR_IO;
+                    }
                     st = val_internal_recv_packet(s, &t, tmp, (uint32_t)P, &len, &off, to_data);
                     if (st == VAL_OK)
                     {
@@ -572,6 +685,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                         if (w != (int)len)
                         {
                             s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                            val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_DISK_FULL);
                             return VAL_ERR_IO;
                         }
                         crc_state = val_internal_crc32_update(s, crc_state, tmp, len);
@@ -611,6 +725,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     VAL_LOG_ERROR(s, "done: crc mismatch");
                     if (!skipping && f)
                         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_FILE);
                     return VAL_ERR_CRC;
                 }
                 // Acknowledge DONE explicitly
@@ -637,6 +752,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             {
                 // Unexpected new file; for simplicity, treat as protocol error for now
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_INVALID_STATE);
                 return VAL_ERR_PROTOCOL;
             }
             else

@@ -104,6 +104,18 @@ static int tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received
     return 0;
 }
 
+static int tp_is_connected(void *ctx)
+{
+    int fd = *(int *)ctx;
+    return tcp_is_connected(fd);
+}
+
+static void tp_flush(void *ctx)
+{
+    int fd = *(int *)ctx;
+    tcp_flush(fd);
+}
+
 int main(int argc, char **argv)
 {
     // Defaults
@@ -189,6 +201,8 @@ int main(int argc, char **argv)
     memset(&cfg, 0, sizeof(cfg));
     cfg.transport.send = tp_send;
     cfg.transport.recv = tp_recv;
+    cfg.transport.is_connected = tp_is_connected;
+    cfg.transport.flush = tp_flush;
     cfg.transport.io_context = &fd;
     cfg.buffers.send_buffer = send_buf;
     cfg.buffers.recv_buffer = recv_buf;
@@ -220,7 +234,18 @@ int main(int argc, char **argv)
     size_t nfiles = (size_t)(argc - argi);
     val_status_t st = val_send_files(tx, files, nfiles, NULL);
     if (st != VAL_OK)
-        fprintf(stderr, "send failed: %d\n", (int)st);
+    {
+        val_status_t lc = VAL_OK;
+        uint32_t det = 0;
+        (void)val_get_last_error(tx, &lc, &det);
+#ifdef VAL_HOST_UTILITIES
+        char buf[256];
+        val_format_error_report(lc, det, buf, sizeof(buf));
+        fprintf(stderr, "send failed: %s\n", buf);
+#else
+        fprintf(stderr, "send failed: code=%d detail=0x%08X\n", (int)lc, (unsigned)det);
+#endif
+    }
 
     val_session_destroy(tx);
     tcp_close(fd);

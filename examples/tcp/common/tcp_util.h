@@ -21,6 +21,12 @@ extern "C"
     // Recv exactly len bytes, unless timeout_ms elapses; returns 0 on success, -1 on error
     int tcp_recv_all(int fd, void *buf, size_t len, unsigned timeout_ms);
 
+    // Optional helpers used by examples for transport hooks
+    // Return 1 if connected, 0 if definitely disconnected, -1 if unknown
+    int tcp_is_connected(int fd);
+    // Best-effort flush pending send buffer (no-op on some platforms)
+    void tcp_flush(int fd);
+
 #ifdef __cplusplus
 }
 #endif

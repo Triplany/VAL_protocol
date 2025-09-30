@@ -511,17 +511,18 @@ void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t pa
     cfg->buffers.packet_size = packet_size;
     cfg->resume.mode = mode;
     cfg->resume.verify_bytes = verify;
-    // Conservative timeouts and bounded retries for tests
-    cfg->timeouts.handshake_ms = 2000;
-    cfg->timeouts.meta_ms = 5000;
-    cfg->timeouts.data_ms = 5000;
-    cfg->timeouts.ack_ms = 2000;
-    cfg->timeouts.idle_ms = 1000;
+    // Test-optimized timeouts and bounded retries: in-memory transport is fast and predictable,
+    // so we can use much lower values to keep total test time low while still exercising timeouts/retries.
+    cfg->timeouts.handshake_ms = 500; // was 2000
+    cfg->timeouts.meta_ms = 800;      // was 5000
+    cfg->timeouts.data_ms = 800;      // was 5000
+    cfg->timeouts.ack_ms = 300;       // was 2000
+    cfg->timeouts.idle_ms = 200;      // was 1000
     cfg->retries.handshake_retries = 3;
     cfg->retries.meta_retries = 2;
     cfg->retries.data_retries = 3;
     cfg->retries.ack_retries = 3;
-    cfg->retries.backoff_ms_base = 50;
+    cfg->retries.backoff_ms_base = 10; // was 50
 }
 
 static void ts_console_log(void *ctx, int level, const char *file, int line, const char *message)
@@ -655,4 +656,48 @@ uint32_t ts_file_crc32(const char *path)
     }
     fclose(f);
     return val_crc32_finalize_state(state);
+}
+
+size_t ts_env_size_bytes(const char *env_name, size_t default_value)
+{
+    if (!env_name || !*env_name)
+        return default_value;
+    char buf[64];
+#if defined(_WIN32)
+    DWORD n = GetEnvironmentVariableA(env_name, buf, (DWORD)sizeof(buf));
+    if (n == 0 || n >= sizeof(buf))
+        return default_value;
+#else
+    const char *v = getenv(env_name);
+    if (!v || !*v)
+        return default_value;
+    snprintf(buf, sizeof(buf), "%s", v);
+#endif
+    char *end = NULL;
+    unsigned long long base = strtoull(buf, &end, 10);
+    if (base == 0ULL)
+        return default_value;
+    // Skip spaces
+    while (end && *end == ' ')
+        ++end;
+    unsigned long long mul = 1ULL;
+    if (end && *end)
+    {
+        char c = *end;
+        if (c == 'k' || c == 'K')
+            mul = 1024ULL;
+        else if (c == 'm' || c == 'M')
+            mul = 1024ULL * 1024ULL;
+        else if (c == 'g' || c == 'G')
+            mul = 1024ULL * 1024ULL * 1024ULL;
+        else
+            mul = 1ULL; // unknown suffix, treat as bytes
+    }
+    unsigned long long res = base * mul;
+    if (res == 0ULL)
+        return default_value;
+    // Clamp to size_t
+    if (res > (unsigned long long)~(size_t)0)
+        res = (unsigned long long)~(size_t)0;
+    return (size_t)res;
 }

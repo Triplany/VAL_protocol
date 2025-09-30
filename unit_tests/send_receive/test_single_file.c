@@ -53,7 +53,7 @@ int main(void)
 {
     const size_t packet = 1024; // ensure multiple packets
     const size_t depth = 16;
-    const size_t file_size = 256 * 1024 + 123; // large enough to span many packets
+    const size_t file_size = ts_env_size_bytes("VAL_TEST_SINGLE_SIZE", 256 * 1024 + 123); // override with env if set
 
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);

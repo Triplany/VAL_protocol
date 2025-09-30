@@ -29,7 +29,8 @@ This document maps the end-to-end control flow and clarifies when each packet ty
 
 Notes
 - Endianness: All multi-byte integers on wire are little‑endian. Implementations must convert to/from host order.
-- Packet framing: fixed-length header (type/payload_len/seq/offset + header CRC) + variable-length data (0..N) + trailer CRC32. No zero padding; the last packet of a file can be shorter. CRC32 covers Header+Data.
+- Packet framing: fixed-length header (type, wire_version, payload_len, seq, offset + header CRC) + variable-length data (0..N) + trailer CRC32. No zero padding; the last packet of a file can be shorter. CRC32 covers Header+Data.
+- wire_version: a reserved byte immediately after type. It must be set to 0 by senders and validated as 0 by receivers. Non‑zero causes an incompatible version error (VAL_ERR_INCOMPATIBLE_VERSION with VAL_ERROR_DETAIL_VERSION_MAJOR). The field is reserved for future wire format changes and is not used for feature negotiation.
 - seq is monotonically increasing per file (currently informational; offset is normative for ordering/ACKing).
 - Strings (filename, sender_path) are UTF‑8 on the wire. Receivers should treat them as UTF‑8; sanitization preserves bytes but may truncate to fit size limits.
 
@@ -185,6 +186,10 @@ For field definitions and API details, see `DEVELOPMENT.md` and `include/val_pro
 
 Developer diagnostics
 - The library has compile-time gated logging to help analyze sequences like resume verify and ACK retries. Enable it by setting `VAL_LOG_LEVEL` at build time and provide a sink via `cfg.debug.log`.
+
+Transport integration notes
+- The library can consult an optional `transport.is_connected` hook before blocking waits/retransmits to fail fast on disconnects. If the hook is absent, it assumes connected.
+- After control packets (HELLO, DONE, EOT, ERROR), the library may call an optional `transport.flush` hook to reduce latency. Absent the hook, flush is a no‑op.
 
 
 ## Implemented pre‑1.0 changes (mid‑stream recovery)

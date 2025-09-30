@@ -84,6 +84,11 @@ extern "C"
     uint64_t ts_file_size(const char *path);
     uint32_t ts_file_crc32(const char *path);
 
+    // Optional: read a size in bytes from an environment variable.
+    // Accepts plain numbers or with k/m/g suffix (case-insensitive), e.g., "100k", "2M", "1g".
+    // Returns default_value if the variable is unset or invalid. Clamps to at least 1 byte.
+    size_t ts_env_size_bytes(const char *env_name, size_t default_value);
+
 #ifdef __cplusplus
 }
 #endif

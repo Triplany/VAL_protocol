@@ -1,6 +1,7 @@
 #ifndef VAL_INTERNAL_H
 #define VAL_INTERNAL_H
 
+#include "val_errors.h"
 #include "val_protocol.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -71,6 +72,9 @@ void val_internal_logf(val_session_t *s, int level, const char *file, int line, 
 #define VAL_LOG_ERROR(s, msg) VAL_LOG_CRIT((s), (msg))
 #define VAL_LOG_ERRORF(s, ...) VAL_LOG_CRITF((s), __VA_ARGS__)
 
+// Numeric-only error log helper (no strings)
+#define VAL_LOG_ERROR_CODE(s, code, detail) VAL_LOG_CRITF((s), "ERR:%d DET:0x%08X", (int)(code), (unsigned)(detail))
+
 // Packet Types
 typedef enum
 {
@@ -101,7 +105,8 @@ typedef enum
 typedef struct
 {
     uint8_t type; // val_packet_type_t
-    uint8_t reserved;
+    // Reserved wire version byte for future on-wire framing changes. Always 0 in base protocol.
+    uint8_t wire_version;
     uint16_t reserved2;
     uint32_t payload_len; // bytes valid in payload
     uint32_t seq;         // monotonically increasing per file
@@ -117,17 +122,7 @@ typedef struct
     uint32_t detail; // optional extra information (mask or extra code)
 } val_error_payload_t;
 
-// Shared payload structs
-typedef struct
-{
-    // Sanitized basename only (no directories). Sender strips paths and cleans unsafe chars.
-    char filename[VAL_MAX_FILENAME + 1];
-    // Reported/original path hint from the sender (sanitized). For receiver information only — do not trust for output paths.
-    // Receivers should decide their own output directory and must not concatenate this blindly to avoid path traversal.
-    char sender_path[VAL_MAX_PATH + 1];
-    uint64_t file_size;
-    uint32_t file_crc32; // whole-file CRC for integrity verification
-} val_meta_payload_t;
+// Shared payload structs are declared publicly in val_protocol.h
 
 typedef struct
 {
@@ -227,6 +222,29 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
 int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *payload_out, uint32_t payload_cap,
                              uint32_t *payload_len_out, uint64_t *offset_out, uint32_t timeout_ms);
 
+// Optional transport helpers (safe wrappers)
+static inline int val_internal_transport_is_connected(val_session_t *s)
+{
+    if (!s || !s->config)
+        return 0;
+    if (s->config->transport.is_connected)
+    {
+        int r = s->config->transport.is_connected(s->config->transport.io_context);
+        // Treat negative/unknown as connected to avoid false disconnects; only 0 is definite false
+        return (r == 0) ? 0 : 1;
+    }
+    // No hook -> assume connected
+    return 1;
+}
+
+static inline void val_internal_transport_flush(val_session_t *s)
+{
+    if (s && s->config && s->config->transport.flush)
+    {
+        s->config->transport.flush(s->config->transport.io_context);
+    }
+}
+
 // Resume helpers
 val_status_t val_internal_handle_file_resume(val_session_t *session, const char *filename, const char *sender_path,
                                              uint64_t file_size, uint64_t *out_resume_offset);
@@ -262,6 +280,23 @@ val_status_t val_internal_send_error(val_session_t *s, val_status_t code, uint32
 
 // Record last error in session
 void val_internal_set_last_error(val_session_t *s, val_status_t code, uint32_t detail);
+// New: detailed setter
+static inline void val_internal_set_error_detailed(val_session_t *s, val_status_t code, uint32_t detail)
+{
+    if (!s)
+        return;
+    val_internal_set_last_error(s, code, detail);
+    // Numeric-only logging; on MCU builds avoid string lookups
+    VAL_LOG_ERROR_CODE(s, code, detail);
+}
+
+// Convenience macros
+#define VAL_SET_NETWORK_ERROR(s, detail) val_internal_set_error_detailed((s), VAL_ERR_IO, (detail))
+#define VAL_SET_CRC_ERROR(s, detail) val_internal_set_error_detailed((s), VAL_ERR_CRC, (detail))
+#define VAL_SET_TIMEOUT_ERROR(s, detail) val_internal_set_error_detailed((s), VAL_ERR_TIMEOUT, (detail))
+#define VAL_SET_PROTOCOL_ERROR(s, detail) val_internal_set_error_detailed((s), VAL_ERR_PROTOCOL, (detail))
+#define VAL_SET_FEATURE_ERROR(s, missing_mask)                                                                                   \
+    val_internal_set_error_detailed((s), VAL_ERR_FEATURE_NEGOTIATION, VAL_SET_MISSING_FEATURE((missing_mask)))
 
 // Internal CRC incremental helpers (for file-level CRC)
 uint32_t val_crc32_init_state(void);

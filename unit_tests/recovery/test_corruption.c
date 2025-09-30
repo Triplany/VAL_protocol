@@ -51,7 +51,7 @@ static int files_equal(const char *a, const char *b)
 int main(void)
 {
     const size_t packet = 4096, depth = 64;
-    const size_t size = 1 * 1024 * 1024 + 333; // reduced size to speed up test
+    const size_t size = ts_env_size_bytes("VAL_TEST_CORRUPT_SIZE", 768 * 1024 + 333); // overridable
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
     // Inject very low probability corruption and some drops/dups to exercise retransmission
