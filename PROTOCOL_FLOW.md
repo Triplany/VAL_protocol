@@ -18,7 +18,7 @@ This document maps the end-to-end control flow and clarifies when each packet ty
 - HELLO: Handshake and negotiation (version, packet_size, features).
 - SEND_META: Per-file metadata: sanitized filename, sender_path hint, file_size, file_crc32.
 - RESUME_REQ: Sender asks receiver how to resume this file.
-- RESUME_RESP: Receiver tells sender to start at zero, at an offset, or perform CRC verify-first.
+- RESUME_RESP: Receiver tells sender to start at zero, at an offset, perform CRC verify-first, skip the file, or abort the file (policy-driven).
 - VERIFY: Two-stage CRC verify exchange used only when RESUME_RESP requested verify-first.
 - DATA: A chunk of file bytes; header.offset is the file offset for the first byte in this chunk.
 - DATA_ACK: Cumulative acknowledgement; header.offset is the next expected offset (total bytes durably written).
@@ -64,10 +64,12 @@ Notes
 Immediately after SEND_META, the sender issues a resume query:
 
 - Sender → RESUME_REQ
-- Receiver decides based on configured resume mode and any existing partial file:
-  - RESUME_ACTION_START_ZERO: start from offset 0.
-  - RESUME_ACTION_START_OFFSET: resume from existing_size (append mode).
-  - RESUME_ACTION_VERIFY_FIRST: verify trailing window before resuming.
+- Receiver decides based on configured resume mode/policy and any existing partial file:
+  - START_ZERO: start from offset 0.
+  - START_OFFSET: resume from existing_size (append mode).
+  - VERIFY_FIRST: verify trailing window before resuming.
+  - SKIP_FILE: receiver will not write this file; sender should skip sending data and proceed to DONE (receiver will ACK DONE).
+  - ABORT_FILE: receiver will not accept this file; sender should abort this file and continue with the next.
 - Receiver → RESUME_RESP: { action, resume_offset, verify_crc, verify_len }
 
 If action == VERIFY_FIRST:
@@ -81,6 +83,8 @@ If action == VERIFY_FIRST:
 
 If action == START_OFFSET: Sender seeks to resume_offset and starts streaming DATA from there.
 If action == START_ZERO: Sender starts streaming DATA from offset 0.
+If action == SKIP_FILE: Sender skips data and proceeds to DONE; receiver will ACK DONE.
+If action == ABORT_FILE: Sender aborts this file.
 
 
 ## Data path
@@ -177,7 +181,7 @@ Error on feature negotiation:
 
 ---
 
-For field definitions and API details, see `DEVELOPMENT.md` and `include/val_protocol.h`. For a working demonstration, build and run `examples/example_loopback.c`.
+For field definitions and API details, see `DEVELOPMENT.md` and `include/val_protocol.h`. For a working demonstration, build and run the TCP examples under `examples/tcp/`.
 
 Developer diagnostics
 - The library has compile-time gated logging to help analyze sequences like resume verify and ACK retries. Enable it by setting `VAL_LOG_LEVEL` at build time and provide a sink via `cfg.debug.log`.
