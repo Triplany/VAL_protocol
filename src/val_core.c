@@ -620,6 +620,12 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         *offset_out = val_letoh64(hdr->offset);
     if (payload_len_out)
         *payload_len_out = payload_len;
+    // If a CANCEL control packet was received, record it in session state so callers can observe it
+    if (hdr->type == (uint8_t)VAL_PKT_CANCEL)
+    {
+        val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
+        VAL_LOG_WARN(s, "recv_packet: observed CANCEL on wire");
+    }
     if (payload_out && payload_cap)
     {
         if (payload_len > payload_cap)
@@ -643,7 +649,55 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 }
 
 // The actual sending/receiving logic is implemented in separate compilation units
-extern val_status_t val_internal_send_file(val_session_t *session, const char *filepath, const char *sender_path);
+// progress_ctx is opaque to core; defined/used in sender implementation for batch progress
+extern val_status_t val_internal_send_file(val_session_t *session, const char *filepath, const char *sender_path,
+                                           void *progress_ctx);
+// Public: Emergency cancel (best-effort)
+val_status_t val_emergency_cancel(val_session_t *session)
+{
+    if (!session)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    // Send CANCEL a few times with tiny backoff
+    val_status_t last = VAL_ERR_IO;
+    uint32_t backoff = session->cfg.retries.backoff_ms_base ? session->cfg.retries.backoff_ms_base : 5u;
+    uint8_t tries = 3;
+    while (tries--)
+    {
+        val_status_t st = val_internal_send_packet(session, VAL_PKT_CANCEL, NULL, 0, 0);
+        fprintf(stdout, "[VAL] emergency_cancel: send CANCEL attempt=%u st=%d\n", (unsigned)(3 - tries), (int)st);
+        fflush(stdout);
+        if (st == VAL_OK)
+            last = VAL_OK;
+        if (session->cfg.system.delay_ms)
+            session->cfg.system.delay_ms(backoff);
+        if (backoff < 50u)
+            backoff <<= 1;
+    }
+    val_internal_transport_flush(session);
+    // Mark session aborted regardless of wire outcome so local loops can exit early
+    val_internal_set_last_error(session, VAL_ERR_ABORTED, 0);
+    fprintf(stdout, "[VAL] emergency_cancel: marked session aborted (last_error set)\n");
+    fflush(stdout);
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return last;
+}
+
+int val_check_for_cancel(val_session_t *session)
+{
+    if (!session)
+        return 0;
+    return (session->last_error_code == VAL_ERR_ABORTED) ? 1 : 0;
+}
+
 extern val_status_t val_internal_receive_files(val_session_t *session, const char *output_directory);
 
 // Single-file public sends are intentionally removed; use val_send_files with count=1.

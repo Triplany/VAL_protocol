@@ -18,6 +18,8 @@ extern "C"
 #define VAL_MAX_PACKET_SIZE 65536u
 #define VAL_MAX_FILENAME 127u
 #define VAL_MAX_PATH 127u
+// Emergency cancel (ASCII CAN)
+#define VAL_PKT_CANCEL 0x18u
     // Metadata payload shared with application callbacks (public)
     typedef struct
     {
@@ -29,6 +31,19 @@ extern "C"
         uint64_t file_size;
         uint32_t file_crc32; // whole-file CRC for integrity verification
     } val_meta_payload_t;
+
+    // Enhanced progress information for professional UX
+    typedef struct
+    {
+        uint64_t bytes_transferred;   // Total bytes transferred in this batch/session so far (cumulative)
+        uint64_t total_bytes;         // Total bytes expected in batch (0 if unknown)
+        uint64_t current_file_bytes;  // Bytes transferred for the current file
+        uint32_t files_completed;     // Files completed in the batch so far
+        uint32_t total_files;         // Total files in the batch (0 if unknown)
+        uint32_t transfer_rate_bps;   // Average transfer rate (bytes per second)
+        uint32_t eta_seconds;         // Estimated time remaining for batch (0 if unknown)
+        const char *current_filename; // Pointer to current filename (valid for duration of callback)
+    } val_progress_info_t;
 
     // Validation response actions
     typedef enum
@@ -211,7 +226,8 @@ extern "C"
             // but may truncate at a byte boundary to fit size limits. Applications should treat these as UTF-8 strings.
             void (*on_file_start)(const char *filename, const char *sender_path, uint64_t file_size, uint64_t resume_offset);
             void (*on_file_complete)(const char *filename, const char *sender_path, val_status_t result);
-            void (*on_progress)(uint64_t bytes_transferred, uint64_t total_bytes);
+            // Enhanced progress callback (replaces the previous 2-argument form)
+            void (*on_progress)(const val_progress_info_t *info);
         } callbacks;
 
         // Simple metadata validation configuration (optional)
@@ -256,6 +272,13 @@ extern "C"
 
     // Retrieve last error info recorded by the session (code and optional detail mask)
     val_status_t val_get_last_error(val_session_t *session, val_status_t *code, uint32_t *detail_mask);
+
+    // Emergency cancel API (best-effort, +0 RAM)
+    // Sends a CANCEL packet to the peer and marks the session as aborted.
+    // Returns VAL_OK if at least one send succeeded; VAL_ERR_IO if all sends failed.
+    val_status_t val_emergency_cancel(val_session_t *session);
+    // Convenience helper to query if session is in cancelled state (last_error_code == VAL_ERR_ABORTED)
+    int val_check_for_cancel(val_session_t *session);
 
     // Metadata validation helpers
     // Initialize with no validation (default - accept all files)

@@ -454,6 +454,11 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size;
     uint8_t *tmp = (uint8_t *)s->config->buffers.recv_buffer;
 
+    // Local batch progress context (no persistent RAM)
+    uint64_t batch_transferred = 0; // sum of completed file sizes
+    uint32_t files_completed = 0;
+    uint32_t start_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+
     // Handshake done upon public API entry; loop to receive files until EOT
     for (;;)
     {
@@ -472,6 +477,11 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 {
                     VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
                     return VAL_ERR_IO;
+                }
+                if (val_check_for_cancel(s))
+                {
+                    VAL_LOG_WARN(s, "recv: local cancel before metadata");
+                    return VAL_ERR_ABORTED;
                 }
                 st = val_internal_recv_packet(s, &t, tmp, (uint32_t)P, &len, &off, to_meta);
                 if (st == VAL_OK)
@@ -494,6 +504,14 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
         {
             (void)val_internal_send_packet(s, VAL_PKT_EOT_ACK, NULL, 0, 0);
             return VAL_OK;
+        }
+        if (t == VAL_PKT_CANCEL)
+        {
+            VAL_LOG_WARN(s, "recv: received CANCEL while waiting for metadata");
+            val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
+            fprintf(stdout, "[VAL][RX] CANCEL observed before metadata, setting last_error ABORTED\n");
+            fflush(stdout);
+            return VAL_ERR_ABORTED;
         }
         if (t != VAL_PKT_SEND_META || len < sizeof(val_meta_payload_t))
         {
@@ -654,6 +672,18 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
                         return VAL_ERR_IO;
                     }
+                    if (val_check_for_cancel(s))
+                    {
+                        VAL_LOG_WARN(s, "data: local cancel at receiver");
+                        if (!skipping && f)
+                            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                        if (s->config->callbacks.on_file_complete)
+                            s->config->callbacks.on_file_complete(clean_name, meta.sender_path, VAL_ERR_ABORTED);
+                        val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
+                        fprintf(stdout, "[VAL][RX] Local cancel detected in data loop, setting last_error ABORTED\n");
+                        fflush(stdout);
+                        return VAL_ERR_ABORTED;
+                    }
                     st = val_internal_recv_packet(s, &t, tmp, (uint32_t)P, &len, &off, to_data);
                     if (st == VAL_OK)
                     {
@@ -664,6 +694,14 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     if ((st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC) || tries == 0)
                     {
                         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                        if (st == VAL_ERR_TIMEOUT)
+                        {
+                            VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
+                        }
+                        else if (st == VAL_ERR_CRC)
+                        {
+                            VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
+                        }
                         return st;
                     }
                     if (backoff && s->config->system.delay_ms)
@@ -705,7 +743,43 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     VAL_LOG_DEBUG(s, "data: sender ahead, re-ACK current position");
                 }
                 if (s->config->callbacks.on_progress)
-                    s->config->callbacks.on_progress(written, total);
+                {
+                    val_progress_info_t info;
+                    // Cumulative across batch = completed bytes + current file bytes
+                    info.bytes_transferred = batch_transferred + written;
+                    info.total_bytes = 0; // unknown on receiver; protocol doesn't pre-announce batch size
+                    info.current_file_bytes = written;
+                    info.files_completed = files_completed;
+                    info.total_files = 0; // unknown on receiver
+                    // Rate/ETA
+                    uint32_t now = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+                    uint32_t elapsed_ms = (start_ms && now >= start_ms) ? (now - start_ms) : 0;
+                    if (elapsed_ms > 0)
+                    {
+                        uint64_t bps = (info.bytes_transferred * 1000ull) / (uint64_t)elapsed_ms;
+                        info.transfer_rate_bps = (uint32_t)(bps > 0xFFFFFFFFu ? 0xFFFFFFFFu : bps);
+                    }
+                    else
+                    {
+                        info.transfer_rate_bps = 0;
+                    }
+                    info.eta_seconds = 0; // unknown without total_bytes
+                    info.current_filename = clean_name;
+                    s->config->callbacks.on_progress(&info);
+                    // If progress callback triggered a local cancel (e.g., tests call val_emergency_cancel), abort now
+                    if (val_check_for_cancel(s))
+                    {
+                        VAL_LOG_WARN(s, "data: local cancel after progress, before ACK");
+                        if (!skipping && f)
+                            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                        if (s->config->callbacks.on_file_complete)
+                            s->config->callbacks.on_file_complete(clean_name, meta.sender_path, VAL_ERR_ABORTED);
+                        val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
+                        fprintf(stdout, "[VAL][RX] Local cancel after progress, not sending DATA_ACK, aborting\n");
+                        fflush(stdout);
+                        return VAL_ERR_ABORTED;
+                    }
+                }
                 // Ack cumulative next expected offset (written)
                 VAL_LOG_DEBUGF(s, "data: sending DATA_ACK off=%llu", (unsigned long long)written);
                 val_status_t st2 = val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
@@ -743,6 +817,18 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                 return VAL_ERR_PROTOCOL;
             }
+            else if (t == VAL_PKT_CANCEL)
+            {
+                VAL_LOG_WARN(s, "data: received CANCEL");
+                if (!skipping && f)
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(clean_name, meta.sender_path, VAL_ERR_ABORTED);
+                val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
+                fprintf(stdout, "[VAL][RX] CANCEL received during data, setting last_error ABORTED\n");
+                fflush(stdout);
+                return VAL_ERR_ABORTED;
+            }
             else if (t == VAL_PKT_DATA_ACK)
             {
                 // Receiver shouldn't get DATA_ACK during data receive; log and ignore
@@ -764,6 +850,9 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
         if (s->config->callbacks.on_file_complete)
             s->config->callbacks.on_file_complete(clean_name, meta.sender_path, skipping ? VAL_SKIPPED : VAL_OK);
+        // Update batch context after each file is fully handled
+        files_completed += 1;
+        batch_transferred += total;
         // Loop to wait for next file
     }
 }

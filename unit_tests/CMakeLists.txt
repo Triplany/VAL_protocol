@@ -14,6 +14,7 @@ endfunction()
 add_ctest_exe(ut_sr_check send_receive/suite_send_receive_check.c)
 add_ctest_exe(ut_recovery_check recovery/suite_recovery_check.c)
 add_ctest_exe(ut_resume_policies recovery/test_resume_policies.c)
+set_property(TEST ut_resume_policies PROPERTY LABELS "heavy")
 
 add_ctest_exe(ut_error_system core/test_error_system.c)
 add_ctest_exe(ut_transport_optional core/test_transport_optional.c)
@@ -21,3 +22,13 @@ add_ctest_exe(ut_packet_negotiation core/test_packet_negotiation.c)
 set_property(TEST ut_packet_negotiation PROPERTY LABELS "quick;heavy")
 add_ctest_exe(ut_metadata_validation core/test_metadata_validation.c)
 set_property(TEST ut_metadata_validation PROPERTY LABELS "quick")
+
+# Label heavier suites to allow selective runs
+set_property(TEST ut_sr_check PROPERTY LABELS "heavy")
+set_property(TEST ut_recovery_check PROPERTY LABELS "heavy")
+
+# Cancel tests
+add_ctest_exe(ut_cancel_mid_data_receiver send_receive/test_cancel_mid_data_receiver.c)
+set_property(TEST ut_cancel_mid_data_receiver PROPERTY LABELS "heavy")
+add_ctest_exe(ut_cancel_mid_data_sender send_receive/test_cancel_mid_data_sender.c)
+set_property(TEST ut_cancel_mid_data_sender PROPERTY LABELS "heavy")

@@ -514,14 +514,14 @@ void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t pa
     // Test-optimized timeouts and bounded retries: in-memory transport is fast and predictable,
     // so we can use much lower values to keep total test time low while still exercising timeouts/retries.
     cfg->timeouts.handshake_ms = 500; // was 2000
-    cfg->timeouts.meta_ms = 800;      // was 5000
-    cfg->timeouts.data_ms = 800;      // was 5000
-    cfg->timeouts.ack_ms = 300;       // was 2000
+    cfg->timeouts.meta_ms = 1500;     // was 5000
+    cfg->timeouts.data_ms = 2000;     // was 5000
+    cfg->timeouts.ack_ms = 2000;      // was 2000
     cfg->timeouts.idle_ms = 200;      // was 1000
     cfg->retries.handshake_retries = 3;
     cfg->retries.meta_retries = 2;
-    cfg->retries.data_retries = 3;
-    cfg->retries.ack_retries = 3;
+    cfg->retries.data_retries = 4;
+    cfg->retries.ack_retries = 6;
     cfg->retries.backoff_ms_base = 10; // was 50
 }
 

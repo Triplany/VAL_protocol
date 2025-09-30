@@ -179,6 +179,11 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
             --tries;
         }
     }
+    if (t == VAL_PKT_CANCEL)
+    {
+        VAL_LOG_WARN(s, "resume_req: received CANCEL");
+        return VAL_ERR_ABORTED;
+    }
     if (t != VAL_PKT_RESUME_RESP || len < sizeof(val_resume_resp_t))
     {
         VAL_LOG_ERRORF(s, "resume_req: protocol mismatch t=%d len=%u", (int)t, (unsigned)len);
@@ -245,11 +250,21 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                     VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
                     return VAL_ERR_IO;
                 }
+                if (val_check_for_cancel(s))
+                {
+                    VAL_LOG_WARN(s, "verify: local cancel detected");
+                    return VAL_ERR_ABORTED;
+                }
                 st = val_internal_recv_packet(s, &t, tmp, sizeof(tmp), &len, &off, to);
                 if (st == VAL_OK)
                 {
                     // Accept only VERIFY here; ignore duplicates/unexpected packets that may arrive mid-handshake
                     VAL_LOG_DEBUGF(s, "verify: received packet type=%d len=%u", (int)t, (unsigned)len);
+                    if (t == VAL_PKT_CANCEL)
+                    {
+                        VAL_LOG_WARN(s, "verify: received CANCEL");
+                        return VAL_ERR_ABORTED;
+                    }
                     if (t == VAL_PKT_VERIFY)
                         break; // proceed below
                     if (t == VAL_PKT_ERROR)
@@ -275,6 +290,11 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                     return st;
                 }
                 // Retransmit VERIFY on timeout
+                if (val_check_for_cancel(s))
+                {
+                    VAL_LOG_WARN(s, "verify: local cancel during timeout");
+                    return VAL_ERR_ABORTED;
+                }
                 val_status_t rs = val_internal_send_packet(s, VAL_PKT_VERIFY, &verify_le, sizeof(verify_le), 0);
                 if (rs != VAL_OK)
                 {
@@ -346,11 +366,63 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
     return VAL_OK;
 }
 
-val_status_t val_internal_send_file(val_session_t *s, const char *filepath, const char *sender_path)
+typedef struct
+{
+    // Accumulated across batch
+    uint64_t batch_total_bytes; // sum of all file sizes in batch
+    uint64_t batch_transferred; // cumulative bytes acknowledged
+    uint32_t total_files;       // number of files in batch
+    uint32_t files_completed;   // completed files
+    uint32_t start_ms;          // tick at batch start (if system.get_ticks_ms present)
+} val_send_progress_ctx_t;
+
+static void val_emit_progress_sender(val_session_t *s, val_send_progress_ctx_t *ctx, const char *filename,
+                                     uint64_t current_file_bytes, int include_current)
+{
+    if (!s || !s->config || !s->config->callbacks.on_progress)
+        return;
+    val_progress_info_t info;
+    if (ctx)
+        info.bytes_transferred = ctx->batch_transferred + (include_current ? current_file_bytes : 0);
+    else
+        info.bytes_transferred = current_file_bytes;
+    info.total_bytes = ctx ? ctx->batch_total_bytes : 0;
+    info.current_file_bytes = current_file_bytes;
+    info.files_completed = ctx ? ctx->files_completed : 0;
+    info.total_files = ctx ? ctx->total_files : 0;
+    // Compute rate/ETA if possible
+    uint32_t now = (s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0);
+    uint32_t elapsed_ms = (ctx && ctx->start_ms && now >= ctx->start_ms) ? (now - ctx->start_ms) : 0;
+    if (elapsed_ms > 0)
+    {
+        // bytes per second
+        uint64_t bps = (info.bytes_transferred * 1000ull) / (uint64_t)elapsed_ms;
+        info.transfer_rate_bps = (uint32_t)(bps > 0xFFFFFFFFu ? 0xFFFFFFFFu : bps);
+        if (info.total_bytes > info.bytes_transferred)
+        {
+            uint64_t remaining = info.total_bytes - info.bytes_transferred;
+            info.eta_seconds = (uint32_t)((bps == 0) ? 0 : (remaining / (bps ? bps : 1)));
+        }
+        else
+        {
+            info.eta_seconds = 0;
+        }
+    }
+    else
+    {
+        info.transfer_rate_bps = 0;
+        info.eta_seconds = 0;
+    }
+    info.current_filename = filename;
+    s->config->callbacks.on_progress(&info);
+}
+
+val_status_t val_internal_send_file(val_session_t *s, const char *filepath, const char *sender_path, void *progress_ctx)
 {
     // Gather meta
     uint64_t size = 0;
     char filename[VAL_MAX_FILENAME + 1];
+    VAL_LOG_INFOF(s, "send_file: begin filepath='%s'", filepath ? filepath : "<null>");
     val_status_t st = get_file_size_and_name(s, filepath, &size, filename);
     if (st != VAL_OK)
     {
@@ -380,6 +452,12 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
         chunk = s->config->buffers.packet_size;
     for (;;)
     {
+        if (val_check_for_cancel(s))
+        {
+            s->config->filesystem.fclose(s->config->filesystem.fs_context, fcrc);
+            VAL_LOG_WARN(s, "crc: local cancel detected");
+            return VAL_ERR_ABORTED;
+        }
         int r = s->config->filesystem.fread(s->config->filesystem.fs_context, buf, 1, chunk, fcrc);
         if (r <= 0)
             break;
@@ -393,6 +471,8 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
     if (st != VAL_OK)
     {
         VAL_LOG_ERRORF(s, "send_metadata failed %d", (int)st);
+        fprintf(stdout, "[VAL][TX] send_metadata failed st=%d\n", (int)st);
+        fflush(stdout);
         return st;
     }
     VAL_LOG_INFO(s, "send: sent SEND_META");
@@ -403,6 +483,8 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
     if (st != VAL_OK)
     {
         VAL_LOG_ERRORF(s, "request_resume_and_get_response failed %d", (int)st);
+        fprintf(stdout, "[VAL][TX] resume exchange failed st=%d\n", (int)st);
+        fflush(stdout);
         return st;
     }
 
@@ -424,6 +506,12 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
         val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
         return VAL_ERR_IO;
     }
+    if (val_check_for_cancel(s))
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        VAL_LOG_WARN(s, "data: local cancel before sending");
+        return VAL_ERR_ABORTED;
+    }
     if (resume_off != 0)
     {
         if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)resume_off, SEEK_SET) != 0)
@@ -438,6 +526,21 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
     // Notify start
     if (s->config->callbacks.on_file_start)
         s->config->callbacks.on_file_start(filename, reported_path ? reported_path : "", size, resume_off);
+
+    // Emit an initial progress snapshot at the resume offset so UIs/tests can react (e.g., trigger cancel)
+    if (progress_ctx)
+        val_emit_progress_sender(s, (val_send_progress_ctx_t *)progress_ctx, filename, resume_off, 1);
+    else
+        val_emit_progress_sender(s, NULL, filename, resume_off, 1);
+    // If cancel was requested by the progress callback, abort before sending any further data
+    if (val_check_for_cancel(s))
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        if (s->config->callbacks.on_file_complete)
+            s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+        VAL_LOG_WARN(s, "data: local cancel immediately after initial progress emission");
+        return VAL_ERR_ABORTED;
+    }
 
     // Send data packets
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size;
@@ -479,6 +582,14 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
         {
             while (have < to_read)
             {
+                if (val_check_for_cancel(s))
+                {
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    if (s->config->callbacks.on_file_complete)
+                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                    VAL_LOG_WARN(s, "data: local cancel during read");
+                    return VAL_ERR_ABORTED;
+                }
                 size_t need = to_read - have;
                 int r = s->config->filesystem.fread(s->config->filesystem.fs_context, payload_area + have, 1, need, f);
                 if (r <= 0)
@@ -536,11 +647,31 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
             {
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                 VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                fprintf(stdout, "[VAL][TX] DATA_ACK wait: transport disconnected -> IO error\n");
+                fflush(stdout);
                 return VAL_ERR_IO;
+            }
+            if (val_check_for_cancel(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                VAL_LOG_WARN(s, "recv DATA_ACK: local cancel");
+                return VAL_ERR_ABORTED;
             }
             st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to_ack);
             if (st == VAL_OK)
             {
+                if (t == VAL_PKT_CANCEL)
+                {
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    if (s->config->callbacks.on_file_complete)
+                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                    VAL_LOG_WARN(s, "recv DATA_ACK: received CANCEL");
+                    fprintf(stdout, "[VAL][TX] DATA_ACK wait: received CANCEL -> ABORT\n");
+                    fflush(stdout);
+                    return VAL_ERR_ABORTED;
+                }
                 if (t == VAL_PKT_ERROR)
                 {
                     s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
@@ -596,9 +727,19 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                 VAL_LOG_ERRORF(s, "recv DATA_ACK failed %d", (int)st);
                 if (st == VAL_ERR_TIMEOUT && tries == 0)
                     VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
+                fprintf(stdout, "[VAL][TX] DATA_ACK wait: giving up st=%d (tries=%u)\n", (int)st, (unsigned)tries);
+                fflush(stdout);
                 return st;
             }
             // Timeout: retransmit the same DATA chunk and backoff
+            if (val_check_for_cancel(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                VAL_LOG_WARN(s, "data: local cancel before retransmit");
+                return VAL_ERR_ABORTED;
+            }
             val_status_t rs = val_internal_send_packet(s, VAL_PKT_DATA, payload_area, (uint32_t)to_read, sent);
             if (rs != VAL_OK)
             {
@@ -613,8 +754,22 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
             --tries;
         }
         // Progress callback reflects receiver-accepted position
-        if (s->config->callbacks.on_progress)
-            s->config->callbacks.on_progress(sent, size);
+        if (progress_ctx)
+            val_emit_progress_sender(s, (val_send_progress_ctx_t *)progress_ctx, filename, sent, 1);
+        else
+            val_emit_progress_sender(s, NULL, filename, sent, 1);
+    }
+
+    // If a local cancel was requested right after the final DATA_ACK, honor it before sending DONE
+    if (val_check_for_cancel(s))
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        if (s->config->callbacks.on_file_complete)
+            s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+        VAL_LOG_WARN(s, "data: local cancel after last DATA_ACK, before DONE");
+        fprintf(stdout, "[VAL][TX] local CANCEL detected after last DATA_ACK before DONE -> ABORT\n");
+        fflush(stdout);
+        return VAL_ERR_ABORTED;
     }
 
     // Signal done and wait for DONE_ACK
@@ -626,6 +781,8 @@ send_done:
         if (s->config->callbacks.on_file_complete)
             s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", st);
         VAL_LOG_ERRORF(s, "send DONE failed %d", (int)st);
+        fprintf(stdout, "[VAL][TX] send DONE failed st=%d\n", (int)st);
+        fflush(stdout);
         return st;
     }
     {
@@ -643,9 +800,20 @@ send_done:
                 VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
                 return VAL_ERR_IO;
             }
+            if (val_check_for_cancel(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                VAL_LOG_WARN(s, "recv DONE_ACK: local cancel while waiting");
+                return VAL_ERR_ABORTED;
+            }
             st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
             if (st == VAL_OK)
             {
+                fprintf(stdout, "[VAL][TX] DONE_ACK wait: got pkt t=%d len=%u off=%llu\n", (int)t, (unsigned)len,
+                        (unsigned long long)off);
+                fflush(stdout);
                 if (t == VAL_PKT_ERROR)
                 {
                     s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
@@ -656,6 +824,16 @@ send_done:
                 }
                 if (t == VAL_PKT_DONE_ACK)
                     break;
+                if (t == VAL_PKT_CANCEL)
+                {
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    if (s->config->callbacks.on_file_complete)
+                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                    VAL_LOG_WARN(s, "recv DONE_ACK: received CANCEL");
+                    fprintf(stdout, "[VAL][TX] DONE_ACK wait: received CANCEL -> ABORT\n");
+                    fflush(stdout);
+                    return VAL_ERR_ABORTED;
+                }
             }
             if (st != VAL_OK && st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
             {
@@ -663,6 +841,8 @@ send_done:
                 if (s->config->callbacks.on_file_complete)
                     s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", st);
                 VAL_LOG_ERRORF(s, "recv DONE_ACK failed %d", (int)st);
+                fprintf(stdout, "[VAL][TX] DONE_ACK wait: error st=%d -> returning\n", (int)st);
+                fflush(stdout);
                 return st;
             }
             if (tries == 0)
@@ -672,6 +852,8 @@ send_done:
                     s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_TIMEOUT);
                 VAL_LOG_ERROR(s, "recv DONE_ACK: retries exhausted");
                 VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
+                fprintf(stdout, "[VAL][TX] DONE_ACK wait: retries exhausted -> TIMEOUT\n");
+                fflush(stdout);
                 return VAL_ERR_TIMEOUT;
             }
             // Retransmit DONE on timeout or wrong packet
@@ -682,6 +864,8 @@ send_done:
                 if (s->config->callbacks.on_file_complete)
                     s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", rs);
                 VAL_LOG_ERRORF(s, "retransmit DONE failed %d", (int)rs);
+                fprintf(stdout, "[VAL][TX] DONE retransmit failed rs=%d\n", (int)rs);
+                fflush(stdout);
                 return rs;
             }
             VAL_LOG_DEBUG(s, "done: ack timeout, retransmitting");
@@ -695,6 +879,21 @@ send_done:
     s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
     if (s->config->callbacks.on_file_complete)
         s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", st);
+    fprintf(stdout, "[VAL][TX] file complete callback with st=%d\n", (int)st);
+    fflush(stdout);
+    // Update batch context on completion
+    if (progress_ctx)
+    {
+        val_send_progress_ctx_t *ctx = (val_send_progress_ctx_t *)progress_ctx;
+        if (st == VAL_OK)
+        {
+            ctx->files_completed += 1;
+            // Add full file size to batch transferred
+            ctx->batch_transferred += size;
+            // Emit a final batch progress snapshot post-completion
+            val_emit_progress_sender(s, ctx, filename, size, 0);
+        }
+    }
     return st;
 
 send_done_no_file:
@@ -733,6 +932,13 @@ send_done_no_file:
                 }
                 if (t == VAL_PKT_DONE_ACK)
                     break;
+                if (t == VAL_PKT_CANCEL)
+                {
+                    if (s->config->callbacks.on_file_complete)
+                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                    VAL_LOG_WARN(s, "recv DONE_ACK (skip): received CANCEL");
+                    return VAL_ERR_ABORTED;
+                }
             }
             if (st != VAL_OK && st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
             {
@@ -768,6 +974,13 @@ send_done_no_file:
     }
     if (s->config->callbacks.on_file_complete)
         s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_SKIPPED);
+    if (progress_ctx)
+    {
+        val_send_progress_ctx_t *ctx = (val_send_progress_ctx_t *)progress_ctx;
+        ctx->files_completed += 1;
+        ctx->batch_transferred += size;
+        val_emit_progress_sender(s, ctx, filename, size, 0);
+    }
     return VAL_OK;
 }
 
@@ -797,9 +1010,25 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
 #endif
         return hs;
     }
+    // Prepare batch progress context locally (no additional persistent RAM in session)
+    val_send_progress_ctx_t prog;
+    memset(&prog, 0, sizeof(prog));
+    prog.total_files = (uint32_t)file_count;
+    // Pre-scan sizes to compute total_bytes; if any file missing size, we best-effort compute
     for (size_t i = 0; i < file_count; ++i)
     {
-        val_status_t st = val_internal_send_file(s, filepaths[i], sender_path);
+        uint64_t sz = 0;
+        char tmpname[VAL_MAX_FILENAME + 1];
+        if (get_file_size_and_name(s, filepaths[i], &sz, tmpname) == VAL_OK)
+            prog.batch_total_bytes += sz;
+    }
+    prog.start_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+    for (size_t i = 0; i < file_count; ++i)
+    {
+        VAL_LOG_INFOF(s, "send_files: sending [%u/%u] '%s'", (unsigned)(i + 1), (unsigned)file_count,
+                      filepaths[i] ? filepaths[i] : "<null>");
+        val_status_t st = val_internal_send_file(s, filepaths[i], sender_path, &prog);
+        VAL_LOG_INFOF(s, "send_files: result for '%s' = %d", filepaths[i] ? filepaths[i] : "<null>", (int)st);
         if (st != VAL_OK)
         {
             VAL_LOG_ERRORF(s, "send_file failed %d", (int)st);
@@ -831,9 +1060,24 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
     for (;;)
     {
+        if (val_check_for_cancel(s))
+        {
+            VAL_LOG_WARN(s, "wait EOT_ACK: local cancel while waiting");
+            fprintf(stdout, "[VAL][TX] EOT_ACK wait: local CANCEL -> ABORT\n");
+            fflush(stdout);
+#if defined(_WIN32)
+            LeaveCriticalSection(&s->lock);
+#else
+            pthread_mutex_unlock(&s->lock);
+#endif
+            return VAL_ERR_ABORTED;
+        }
         st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
         if (st == VAL_OK)
         {
+            fprintf(stdout, "[VAL][TX] EOT_ACK wait: got pkt t=%d len=%u off=%llu\n", (int)t, (unsigned)len,
+                    (unsigned long long)off);
+            fflush(stdout);
             if (t == VAL_PKT_ERROR)
             {
 #if defined(_WIN32)
@@ -845,6 +1089,18 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
             }
             if (t == VAL_PKT_EOT_ACK)
                 break;
+            if (t == VAL_PKT_CANCEL)
+            {
+                VAL_LOG_WARN(s, "wait EOT_ACK: received CANCEL");
+                fprintf(stdout, "[VAL][TX] EOT_ACK wait: received CANCEL -> ABORT\n");
+                fflush(stdout);
+#if defined(_WIN32)
+                LeaveCriticalSection(&s->lock);
+#else
+                pthread_mutex_unlock(&s->lock);
+#endif
+                return VAL_ERR_ABORTED;
+            }
         }
         if (st != VAL_OK && st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
         {
@@ -859,6 +1115,8 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
         if (tries == 0)
         {
             VAL_LOG_ERROR(s, "wait EOT_ACK: retries exhausted");
+            fprintf(stdout, "[VAL][TX] EOT_ACK wait: retries exhausted -> TIMEOUT\n");
+            fflush(stdout);
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
 #else
@@ -871,6 +1129,8 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
         if (rs != VAL_OK)
         {
             VAL_LOG_ERRORF(s, "retransmit EOT failed %d", (int)rs);
+            fprintf(stdout, "[VAL][TX] EOT retransmit failed rs=%d\n", (int)rs);
+            fflush(stdout);
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
 #else
