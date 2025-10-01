@@ -1,3 +1,4 @@
+#include "../../src/val_internal.h"
 #include "val_protocol.h"
 #ifdef VAL_HOST_UTILITIES
 #include "val_error_strings.h"
@@ -30,10 +31,12 @@ int main(void)
     cfg.transport.send = (int (*)(void *, const void *, size_t))0x1;
     cfg.transport.recv = (int (*)(void *, void *, size_t, size_t *, uint32_t))0x1;
     cfg.system.get_ticks_ms = ut_ticks;
-    val_session_t *s = val_session_create(&cfg);
-    if (!s)
+    val_session_t *s = NULL;
+    uint32_t d = 0;
+    val_status_t rc = val_session_create(&cfg, &s, &d);
+    if (rc != VAL_OK || !s)
     {
-        printf("create failed\n");
+        printf("create failed rc=%d d=0x%08X\n", (int)rc, (unsigned)d);
         return 1;
     }
     // Set and get a feature negotiation error with missing features context

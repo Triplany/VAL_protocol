@@ -66,18 +66,18 @@ int main(void)
         return 1;
     }
 #if defined(_WIN32)
-    char outdir[1024];
+    char outdir[2048];
     snprintf(outdir, sizeof(outdir), "%s\\corrupt\\out", artroot);
-    char in[1024];
+    char in[2048];
     snprintf(in, sizeof(in), "%s\\corrupt\\corrupt.bin", artroot);
-    char out[1024];
+    char out[2048];
     snprintf(out, sizeof(out), "%s\\corrupt\\out\\corrupt.bin", artroot);
 #else
-    char outdir[1024];
+    char outdir[2048];
     snprintf(outdir, sizeof(outdir), "%s/corrupt/out", artroot);
-    char in[1024];
+    char in[2048];
     snprintf(in, sizeof(in), "%s/corrupt/corrupt.bin", artroot);
-    char out[1024];
+    char out[2048];
     snprintf(out, sizeof(out), "%s/corrupt/out/corrupt.bin", artroot);
 #endif
     if (ts_ensure_dir(outdir) != 0)
@@ -102,11 +102,21 @@ int main(void)
     ts_set_console_logger(&cfg_tx);
     ts_set_console_logger(&cfg_rx);
 
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx || !rx)
+    val_session_t *tx = NULL;
+    uint32_t dtx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    if (rctx != VAL_OK || !tx)
     {
-        fprintf(stderr, "session create failed\n");
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx);
+        return 2;
+    }
+    val_session_t *rx = NULL;
+    uint32_t drx = 0;
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
+    {
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                (unsigned)drx);
         return 1;
     }
 

@@ -60,18 +60,18 @@ int main(void)
         return 1;
     }
 #if defined(_WIN32)
-    char outdir[1024];
+    char outdir[2048];
     snprintf(outdir, sizeof(outdir), "%s\\multi\\out", artroot);
-    char in1[1024];
+    char in1[2048];
     snprintf(in1, sizeof(in1), "%s\\multi\\a.bin", artroot);
-    char in2[1024];
+    char in2[2048];
     snprintf(in2, sizeof(in2), "%s\\multi\\b.bin", artroot);
 #else
-    char outdir[1024];
+    char outdir[2048];
     snprintf(outdir, sizeof(outdir), "%s/multi/out", artroot);
-    char in1[1024];
+    char in1[2048];
     snprintf(in1, sizeof(in1), "%s/multi/a.bin", artroot);
-    char in2[1024];
+    char in2[2048];
     snprintf(in2, sizeof(in2), "%s/multi/b.bin", artroot);
 #endif
     if (ts_ensure_dir(outdir) != 0)
@@ -103,11 +103,15 @@ int main(void)
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_APPEND, 2048);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_APPEND, 2048);
 
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx || !rx)
+    val_session_t *tx = NULL;
+    val_session_t *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
     {
-        fprintf(stderr, "session create failed\n");
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                (unsigned)drx);
         return 1;
     }
 
@@ -128,8 +132,8 @@ int main(void)
     free(buf2);
 
     // Check outputs
-    char out1[1024];
-    char out2[1024];
+    char out1[2048];
+    char out2[2048];
 #if defined(_WIN32)
     snprintf(out1, sizeof(out1), "%s\\multi\\out\\a.bin", artroot);
     snprintf(out2, sizeof(out2), "%s\\multi\\out\\b.bin", artroot);

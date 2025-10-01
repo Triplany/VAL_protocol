@@ -168,9 +168,7 @@ extern "C"
 
         struct
         {
-            // Monotonic millisecond clock. Required in default builds (VAL_REQUIRE_CLOCK=1).
-            // If your build disables enforcement, the library will fall back to using
-            // a conservative fixed timeout of timeouts.max_timeout_ms and will not sample RTTs.
+            // Monotonic millisecond clock. Always required by VAL; no built-in defaults.
             uint32_t (*get_ticks_ms)(void);
             // Optional delay helper for backoff/sleeps between retries. When NULL, the
             // implementation uses a minimal spin/yield or platform fallback where applicable.
@@ -259,7 +257,10 @@ extern "C"
     } val_config_t;
 
     // API
-    val_session_t *val_session_create(const val_config_t *config);
+    // Create a session. On success, returns VAL_OK and writes a session pointer to out_session.
+    // On failure, returns a specific error code (e.g., VAL_ERR_INVALID_ARG, VAL_ERR_NO_MEMORY).
+    // If out_detail is provided, a 32-bit detail mask is written to indicate the specific init issue(s).
+    val_status_t val_session_create(const val_config_t *config, val_session_t **out_session, uint32_t *out_detail);
     void val_session_destroy(val_session_t *session);
 
     // Send multiple files; array of paths (you can pass 1 or many). Stops on first error.
@@ -289,6 +290,33 @@ extern "C"
     void val_config_validation_disabled(val_config_t *config);
     // Set custom validator with context
     void val_config_set_validator(val_config_t *config, val_metadata_validator_t validator, void *context);
+
+#if VAL_ENABLE_METRICS
+    // Optional compile-time metrics collection (enabled when VAL_ENABLE_METRICS=1 at build time)
+    typedef struct
+    {
+        // Packets and bytes on wire
+        uint64_t packets_sent;
+        uint64_t packets_recv;
+        uint64_t bytes_sent;
+        uint64_t bytes_recv;
+        // Reliability/timing
+        uint32_t timeouts;
+        uint32_t retransmits;
+        uint32_t crc_errors;
+        // Handshake and session
+        uint32_t handshakes;
+        uint32_t files_sent;
+        uint32_t files_recv;
+        // Adaptive timeout samples
+        uint32_t rtt_samples;
+    } val_metrics_t;
+
+    // Get a snapshot of current session metrics. Returns VAL_OK and writes to out if enabled.
+    val_status_t val_get_metrics(val_session_t *session, val_metrics_t *out);
+    // Reset all counters to zero.
+    val_status_t val_reset_metrics(val_session_t *session);
+#endif // VAL_ENABLE_METRICS
 
 #ifdef __cplusplus
 }

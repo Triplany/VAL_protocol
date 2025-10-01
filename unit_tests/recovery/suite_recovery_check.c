@@ -108,16 +108,18 @@ static int test_resume_crc_verify_check(void)
     val_config_t cfg_tx, cfg_rx;
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_VERIFY, 8192);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_VERIFY, 8192);
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx)
+    val_session_t *tx = NULL, *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || !tx)
     {
-        fprintf(stderr, "val_session_create tx failed\n");
+        fprintf(stderr, "val_session_create tx failed rc=%d d=0x%08X\n", (int)rctx, (unsigned)dtx);
         return 1;
     }
-    if (!rx)
+    if (rcrx != VAL_OK || !rx)
     {
-        fprintf(stderr, "val_session_create rx failed\n");
+        fprintf(stderr, "val_session_create rx failed rc=%d d=0x%08X\n", (int)rcrx, (unsigned)drx);
         val_session_destroy(tx);
         return 1;
     }
@@ -187,16 +189,18 @@ static int test_corruption_recovery_check(void)
     val_config_t cfg_tx, cfg_rx;
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_VERIFY, 16384);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_VERIFY, 16384);
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx)
+    val_session_t *tx = NULL, *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || !tx)
     {
-        fprintf(stderr, "val_session_create tx failed\n");
+        fprintf(stderr, "val_session_create tx failed rc=%d d=0x%08X\n", (int)rctx, (unsigned)dtx);
         return 1;
     }
-    if (!rx)
+    if (rcrx != VAL_OK || !rx)
     {
-        fprintf(stderr, "val_session_create rx failed\n");
+        fprintf(stderr, "val_session_create rx failed rc=%d d=0x%08X\n", (int)rcrx, (unsigned)drx);
         val_session_destroy(tx);
         return 1;
     }

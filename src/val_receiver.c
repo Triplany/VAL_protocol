@@ -72,7 +72,7 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
     val_status_t st = VAL_OK;
-    uint32_t t0v = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+    uint32_t t0v = s->config->system.get_ticks_ms();
     s->timing.in_retransmit = 0;
     for (;;)
     {
@@ -91,6 +91,7 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
                 return st;
             }
             VAL_LOG_DEBUG(s, "verify: waiting for sender CRC");
+            val_metrics_inc_timeout(s);
             if (backoff && s->config->system.delay_ms)
                 s->config->system.delay_ms(backoff);
             if (backoff)
@@ -110,7 +111,7 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
             VAL_LOG_DEBUG(s, "verify: ignoring unexpected packet during verify wait");
             continue;
         }
-        if (t0v && s->config->system.get_ticks_ms && !s->timing.in_retransmit)
+        if (t0v && !s->timing.in_retransmit)
         {
             uint32_t now = s->config->system.get_ticks_ms();
             val_internal_record_rtt(s, now - t0v);
@@ -464,7 +465,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
     // Local batch progress context (no persistent RAM)
     uint64_t batch_transferred = 0; // sum of completed file sizes
     uint32_t files_completed = 0;
-    uint32_t start_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+    uint32_t start_ms = s->config->system.get_ticks_ms();
 
     // Handshake done upon public API entry; loop to receive files until EOT
     for (;;)
@@ -500,6 +501,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     return st;
                 }
                 VAL_LOG_DEBUG(s, "recv: waiting for metadata");
+                val_metrics_inc_timeout(s);
                 if (backoff && s->config->system.delay_ms)
                     s->config->system.delay_ms(backoff);
                 if (backoff)
@@ -711,6 +713,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                         }
                         return st;
                     }
+                    if (st == VAL_ERR_TIMEOUT)
+                        val_metrics_inc_timeout(s);
                     if (backoff && s->config->system.delay_ms)
                         s->config->system.delay_ms(backoff);
                     if (backoff)
@@ -759,7 +763,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     info.files_completed = files_completed;
                     info.total_files = 0; // unknown on receiver
                     // Rate/ETA
-                    uint32_t now = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+                    uint32_t now = s->config->system.get_ticks_ms();
                     uint32_t elapsed_ms = (start_ms && now >= start_ms) ? (now - start_ms) : 0;
                     if (elapsed_ms > 0)
                     {
@@ -857,6 +861,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
         if (s->config->callbacks.on_file_complete)
             s->config->callbacks.on_file_complete(clean_name, meta.sender_path, skipping ? VAL_SKIPPED : VAL_OK);
+        val_metrics_inc_files_recv(s);
         // Update batch context after each file is fully handled
         files_completed += 1;
         batch_transferred += total;

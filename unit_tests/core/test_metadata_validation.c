@@ -1,7 +1,60 @@
 #include "../../src/val_internal.h"
 #include "test_support.h"
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+// Simple helpers to build paths dynamically without fixed-size buffers
+static char *dyn_sprintf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    va_list ap2;
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+    {
+        va_end(ap2);
+        return NULL;
+    }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf)
+    {
+        va_end(ap2);
+        return NULL;
+    }
+    vsnprintf(buf, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
+    return buf;
+}
+
+static char *join_path2(const char *a, const char *b)
+{
+#if defined(_WIN32)
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    int need_sep = (la > 0 && a[la - 1] != sep) ? 1 : 0;
+    // If b already starts with sep, don't add another
+    if (lb > 0 && b[0] == sep)
+        need_sep = 0;
+    size_t len = la + (size_t)need_sep + lb;
+    char *out = (char *)malloc(len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, a, la);
+    size_t pos = la;
+    if (need_sep)
+        out[pos++] = sep;
+    memcpy(out + pos, b, lb);
+    out[len] = '\0';
+    return out;
+}
 
 static val_validation_action_t accept_validator(const val_meta_payload_t *meta, const char *target_path, void *ctx)
 {
@@ -38,38 +91,47 @@ static int write_file(const char *path, size_t n)
 
 static int run_case(val_metadata_validator_t validator, const char *tag, int expect_skip, int expect_abort)
 {
+    (void)expect_skip;
+    (void)expect_abort;
     const size_t packet = 1024, depth = 8, size = 64 * 1024 + 7;
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
 
-    char artroot[1024];
+    char artroot[2048];
     if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
         return 1;
-#if defined(_WIN32)
-    char basedir[1024];
-    snprintf(basedir, sizeof(basedir), "%s\\meta_%s", artroot, tag);
-    char outdir[1024];
-    snprintf(outdir, sizeof(outdir), "%s\\out", basedir);
-    char inpath[1024];
-    snprintf(inpath, sizeof(inpath), "%s\\in.bin", basedir);
-    char outpath[1024];
-    snprintf(outpath, sizeof(outpath), "%s\\in.bin", outdir);
-#else
-    char basedir[1024];
-    snprintf(basedir, sizeof(basedir), "%s/meta_%s", artroot, tag);
-    char outdir[1024];
-    snprintf(outdir, sizeof(outdir), "%s/out", basedir);
-    char inpath[1024];
-    snprintf(inpath, sizeof(inpath), "%s/in.bin", basedir);
-    char outpath[1024];
-    snprintf(outpath, sizeof(outpath), "%s/in.bin", outdir);
-#endif
-    if (ts_ensure_dir(basedir) != 0 || ts_ensure_dir(outdir) != 0)
+    char *meta_seg = dyn_sprintf("meta_%s", tag);
+    char *basedir = meta_seg ? join_path2(artroot, meta_seg) : NULL;
+    free(meta_seg);
+    char *outdir = basedir ? join_path2(basedir, "out") : NULL;
+    char *inpath = basedir ? join_path2(basedir, "in.bin") : NULL;
+    char *outpath = outdir ? join_path2(outdir, "in.bin") : NULL;
+    if (!basedir || !outdir || !inpath || !outpath)
+    {
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
+    }
+    if (ts_ensure_dir(basedir) != 0 || ts_ensure_dir(outdir) != 0)
+    {
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
+        return 1;
+    }
     (void)remove(inpath);
     (void)remove(outpath);
     if (write_file(inpath, size) != 0)
+    {
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
+    }
 
     uint8_t *sb_a = (uint8_t *)calloc(1, packet), *rb_a = (uint8_t *)calloc(1, packet);
     uint8_t *sb_b = (uint8_t *)calloc(1, packet), *rb_b = (uint8_t *)calloc(1, packet);
@@ -84,10 +146,20 @@ static int run_case(val_metadata_validator_t validator, const char *tag, int exp
     cfg_rx.metadata_validation.validator = validator;
     cfg_rx.metadata_validation.validator_context = NULL;
 
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx || !rx)
+    val_session_t *tx = NULL, *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
+    {
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X, rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                (unsigned)drx);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
+    }
 
     ts_thread_t th = ts_start_receiver(rx, outdir);
     const char *files[1] = {inpath};
@@ -115,6 +187,10 @@ static int run_case(val_metadata_validator_t validator, const char *tag, int exp
     free(sb_b);
     free(rb_b);
     test_duplex_free(&d);
+    free(basedir);
+    free(outdir);
+    free(inpath);
+    free(outpath);
     return ok ? 0 : 1;
 }
 

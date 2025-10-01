@@ -5,6 +5,57 @@
 // Peek into session internals to validate negotiated effective_packet_size
 #include "../../src/val_internal.h"
 
+#include <stdarg.h>
+
+static char *dyn_sprintf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    va_list ap2;
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+    {
+        va_end(ap2);
+        return NULL;
+    }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf)
+    {
+        va_end(ap2);
+        return NULL;
+    }
+    vsnprintf(buf, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
+    return buf;
+}
+
+static char *join_path2(const char *a, const char *b)
+{
+#if defined(_WIN32)
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    int need_sep = (la > 0 && a[la - 1] != sep) ? 1 : 0;
+    if (lb > 0 && b[0] == sep)
+        need_sep = 0;
+    size_t len = la + (size_t)need_sep + lb;
+    char *out = (char *)malloc(len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, a, la);
+    size_t pos = la;
+    if (need_sep)
+        out[pos++] = sep;
+    memcpy(out + pos, b, lb);
+    out[len] = '\0';
+    return out;
+}
+
 static int write_pattern_file(const char *path, size_t size)
 {
     FILE *f = fopen(path, "wb");
@@ -53,38 +104,42 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     test_duplex_t d;
     test_duplex_init(&d, maxp, depth);
 
-    char artroot[1024];
+    char artroot[2048];
     if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
     {
         fprintf(stderr, "artifacts root failed\n");
         return 1;
     }
-#if defined(_WIN32)
-    char basedir[1024];
-    snprintf(basedir, sizeof(basedir), "%s\\pktneg_%zu_%zu", artroot, (size_t)sender_pkt, (size_t)receiver_pkt);
-    char outdir[1024];
-    snprintf(outdir, sizeof(outdir), "%s\\out", basedir);
-    char inpath[1024];
-    snprintf(inpath, sizeof(inpath), "%s\\in.bin", basedir);
-    char outpath[1024];
-    snprintf(outpath, sizeof(outpath), "%s\\in.bin", outdir);
-#else
-    char basedir[1024];
-    snprintf(basedir, sizeof(basedir), "%s/pktneg_%zu_%zu", artroot, (size_t)sender_pkt, (size_t)receiver_pkt);
-    char outdir[1024];
-    snprintf(outdir, sizeof(outdir), "%s/out", basedir);
-    char inpath[1024];
-    snprintf(inpath, sizeof(inpath), "%s/in.bin", basedir);
-    char outpath[1024];
-    snprintf(outpath, sizeof(outpath), "%s/in.bin", outdir);
-#endif
+    char *case_seg = dyn_sprintf("pktneg_%zu_%zu", (size_t)sender_pkt, (size_t)receiver_pkt);
+    char *basedir = case_seg ? join_path2(artroot, case_seg) : NULL;
+    free(case_seg);
+    char *outdir = basedir ? join_path2(basedir, "out") : NULL;
+    char *inpath = basedir ? join_path2(basedir, "in.bin") : NULL;
+    char *outpath = outdir ? join_path2(outdir, "in.bin") : NULL;
+    if (!basedir || !outdir || !inpath || !outpath)
+    {
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
+        fprintf(stderr, "path alloc failed\n");
+        return 1;
+    }
     if (ts_ensure_dir(basedir) != 0 || ts_ensure_dir(outdir) != 0)
     {
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         fprintf(stderr, "mkdirs failed\n");
         return 1;
     }
     if (write_pattern_file(inpath, file_size) != 0)
     {
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         fprintf(stderr, "write input failed\n");
         return 1;
     }
@@ -101,14 +156,25 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     ts_make_config(&cfg_tx, sb_tx, rb_tx, sender_pkt, &end_tx, VAL_RESUME_APPEND, 1024);
     ts_make_config(&cfg_rx, sb_rx, rb_rx, receiver_pkt, &end_rx, VAL_RESUME_APPEND, 1024);
 
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx || !rx)
+    val_session_t *tx = NULL, *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
     {
-        fprintf(stderr, "session create failed\n");
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X, rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                (unsigned)drx);
+        free(sb_tx);
+        free(rb_tx);
+        free(sb_rx);
+        free(rb_rx);
+        test_duplex_free(&d);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
-
     ts_thread_t th = ts_start_receiver(rx, outdir);
     const char *files[1] = {inpath};
     val_status_t st = val_send_files(tx, files, 1, NULL);
@@ -118,11 +184,19 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     if (st != VAL_OK)
     {
         fprintf(stderr, "send failed %d\n", (int)st);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
     if (!files_equal(inpath, outpath))
     {
         fprintf(stderr, "file mismatch under pkt neg case %zu/%zu\n", (size_t)sender_pkt, (size_t)receiver_pkt);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
 
@@ -133,33 +207,51 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     if (eff_tx != expected || eff_rx != expected)
     {
         fprintf(stderr, "negotiation mismatch: expected %zu got tx=%zu rx=%zu\n", expected, eff_tx, eff_rx);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
 
     // Now perform reverse-direction transfer (previous receiver becomes sender)
-#if defined(_WIN32)
-    char outdir2[1024];
-    snprintf(outdir2, sizeof(outdir2), "%s\\out2", basedir);
-    char inpath2[1024];
-    snprintf(inpath2, sizeof(inpath2), "%s\\in2.bin", basedir);
-    char outpath2[1024];
-    snprintf(outpath2, sizeof(outpath2), "%s\\in2.bin", outdir2);
-#else
-    char outdir2[1024];
-    snprintf(outdir2, sizeof(outdir2), "%s/out2", basedir);
-    char inpath2[1024];
-    snprintf(inpath2, sizeof(inpath2), "%s/in2.bin", basedir);
-    char outpath2[1024];
-    snprintf(outpath2, sizeof(outpath2), "%s/in2.bin", outdir2);
-#endif
+    char *outdir2 = join_path2(basedir, "out2");
+    char *inpath2 = join_path2(basedir, "in2.bin");
+    char *outpath2 = outdir2 ? join_path2(outdir2, "in2.bin") : NULL;
+    if (!outdir2 || !inpath2 || !outpath2)
+    {
+        free(outdir2);
+        free(inpath2);
+        free(outpath2);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
+        fprintf(stderr, "path2 alloc failed\n");
+        return 1;
+    }
     if (ts_ensure_dir(outdir2) != 0)
     {
         fprintf(stderr, "mkdir outdir2 failed\n");
+        free(outdir2);
+        free(inpath2);
+        free(outpath2);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
     if (write_pattern_file(inpath2, file_size + 11) != 0)
     {
         fprintf(stderr, "write input2 failed\n");
+        free(outdir2);
+        free(inpath2);
+        free(outpath2);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
 
@@ -175,11 +267,33 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     test_duplex_t end_rx2 = end_tx;
     ts_make_config(&cfg_tx2, sb_tx2, rb_tx2, receiver_pkt, &end_tx2, VAL_RESUME_APPEND, 1024);
     ts_make_config(&cfg_rx2, sb_rx2, rb_rx2, sender_pkt, &end_rx2, VAL_RESUME_APPEND, 1024);
-    val_session_t *tx2 = val_session_create(&cfg_tx2);
-    val_session_t *rx2 = val_session_create(&cfg_rx2);
-    if (!tx2 || !rx2)
+    val_session_t *tx2 = NULL, *rx2 = NULL;
+    uint32_t dtx2 = 0, drx2 = 0;
+    val_status_t rctx2 = val_session_create(&cfg_tx2, &tx2, &dtx2);
+    val_status_t rcrx2 = val_session_create(&cfg_rx2, &rx2, &drx2);
+    if (rctx2 != VAL_OK || rcrx2 != VAL_OK || !tx2 || !rx2)
     {
-        fprintf(stderr, "session create 2 failed\n");
+        fprintf(stderr, "session create 2 failed (tx rc=%d d=0x%08X, rx rc=%d d=0x%08X)\n", (int)rctx2, (unsigned)dtx2,
+                (int)rcrx2, (unsigned)drx2);
+        // Cleanup everything allocated so far
+        free(outdir2);
+        free(inpath2);
+        free(outpath2);
+        val_session_destroy(tx);
+        val_session_destroy(rx);
+        free(sb_tx);
+        free(rb_tx);
+        free(sb_rx);
+        free(rb_rx);
+        free(sb_tx2);
+        free(rb_tx2);
+        free(sb_rx2);
+        free(rb_rx2);
+        test_duplex_free(&d);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
     ts_thread_t th2 = ts_start_receiver(rx2, outdir2);
@@ -189,11 +303,25 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     if (st2 != VAL_OK)
     {
         fprintf(stderr, "reverse send failed %d\n", (int)st2);
+        free(outdir2);
+        free(inpath2);
+        free(outpath2);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
     if (!files_equal(inpath2, outpath2))
     {
         fprintf(stderr, "reverse transfer mismatch\n");
+        free(outdir2);
+        free(inpath2);
+        free(outpath2);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
     // Validate negotiation again (min of original sizes)
@@ -202,6 +330,13 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     if (eff_tx2 != expected || eff_rx2 != expected)
     {
         fprintf(stderr, "reverse negotiation mismatch: expected %zu got tx=%zu rx=%zu\n", expected, eff_tx2, eff_rx2);
+        free(outdir2);
+        free(inpath2);
+        free(outpath2);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
         return 1;
     }
 
@@ -219,6 +354,13 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     free(sb_rx2);
     free(rb_rx2);
     test_duplex_free(&d);
+    free(basedir);
+    free(outdir);
+    free(inpath);
+    free(outpath);
+    free(outdir2);
+    free(inpath2);
+    free(outpath2);
     return 0;
 }
 

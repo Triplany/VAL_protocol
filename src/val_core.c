@@ -5,17 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Compile-time diagnostic: encourage providing a monotonic clock for adaptive timeouts
-#if !defined(VAL_REQUIRE_CLOCK)
-#define VAL_REQUIRE_CLOCK 0
-#endif
-#if VAL_REQUIRE_CLOCK == 0
-#if defined(_MSC_VER)
-#pragma message("VAL: get_ticks_ms is optional; define VAL_REQUIRE_CLOCK=1 to enforce clock requirement at build-time.")
-#elif defined(__clang__) || defined(__GNUC__)
-#warning "VAL: get_ticks_ms is optional; define VAL_REQUIRE_CLOCK=1 to enforce clock requirement at build-time."
-#endif
-#endif
+// A monotonic millisecond clock is required via config.system.get_ticks_ms; no built-in defaults.
 
 // Internal logging implementation. If compile-time logging is enabled and a sink is provided in config,
 // forward messages; otherwise, drop them. This function itself is a tiny call and will be removed by
@@ -303,37 +293,42 @@ val_status_t val_get_last_error(val_session_t *session, val_status_t *code, uint
     return VAL_OK;
 }
 
-static int validate_config(const val_config_t *cfg)
+static uint32_t validate_config_details(const val_config_t *cfg)
 {
+    uint32_t detail = 0;
     if (!cfg)
-        return 0;
+        return VAL_ERROR_DETAIL_INVALID_STATE; // generic invalid
     if (!cfg->transport.send || !cfg->transport.recv)
-        return 0;
+        detail |= VAL_ERROR_DETAIL_CONNECTION; // use transport-related code as proxy
     if (!cfg->filesystem.fopen || !cfg->filesystem.fread || !cfg->filesystem.fwrite || !cfg->filesystem.fseek ||
         !cfg->filesystem.ftell || !cfg->filesystem.fclose)
-        return 0;
+        detail |= VAL_ERROR_DETAIL_PERMISSION; // filesystem hooks missing
     if (!cfg->buffers.send_buffer || !cfg->buffers.recv_buffer)
-        return 0;
+        detail |= VAL_ERROR_DETAIL_PAYLOAD_SIZE; // buffers missing
     if (cfg->buffers.packet_size < VAL_MIN_PACKET_SIZE || cfg->buffers.packet_size > VAL_MAX_PACKET_SIZE)
-        return 0;
-    return 1;
+        detail |= VAL_ERROR_DETAIL_PACKET_SIZE;
+    if (!cfg->system.get_ticks_ms)
+        detail |= VAL_ERROR_DETAIL_TIMEOUT_HELLO; // indicate required clock missing
+    return detail;
 }
 
-val_session_t *val_session_create(const val_config_t *config)
+val_status_t val_session_create(const val_config_t *config, val_session_t **out_session, uint32_t *out_detail)
 {
-    if (!validate_config(config))
-        return NULL;
-#if VAL_REQUIRE_CLOCK
-    // Enforce presence of a monotonic clock when required at build time
-    if (!config->system.get_ticks_ms)
+    if (out_detail)
+        *out_detail = 0;
+    if (!out_session)
+        return VAL_ERR_INVALID_ARG;
+    *out_session = NULL;
+    uint32_t detail = validate_config_details(config);
+    if (detail != 0)
     {
-        // Cannot log because session doesn't exist yet; fail fast
-        return NULL;
+        if (out_detail)
+            *out_detail = detail;
+        return VAL_ERR_INVALID_ARG;
     }
-#endif
     val_session_t *s = (val_session_t *)calloc(1, sizeof(val_session_t));
     if (!s)
-        return NULL;
+        return VAL_ERR_NO_MEMORY;
     // store by value to decouple from caller mutability, but keep pointer for callbacks
     s->cfg = *config;
     s->config = &s->cfg;
@@ -344,6 +339,9 @@ val_session_t *val_session_create(const val_config_t *config)
     s->peer_features = 0;
     s->last_error_code = VAL_OK;
     s->last_error_detail = 0;
+#if VAL_ENABLE_METRICS
+    memset(&s->metrics, 0, sizeof(s->metrics));
+#endif
     // Initialize adaptive timing state
     // Clamp/sanitize config bounds: if invalid, swap, and default when zero.
     uint32_t min_to = config->timeouts.min_timeout_ms ? config->timeouts.min_timeout_ms : 200u;
@@ -364,17 +362,7 @@ val_session_t *val_session_create(const val_config_t *config)
     s->timing.rttvar_ms = max_to / 4u; // initial variance heuristic
     s->timing.samples_taken = 0;
     s->timing.in_retransmit = 0;
-    // Warn at runtime if no clock is provided only when not strictly required
-    if (!s->cfg.system.get_ticks_ms)
-    {
-#if VAL_REQUIRE_CLOCK
-        // Should be unreachable due to early return, but keep defensive check in case of future refactors
-        VAL_LOG_CRIT(s, "system.get_ticks_ms is required but missing; session is invalid.");
-#else
-        VAL_LOG_WARN(
-            s, "No system.get_ticks_ms provided; using max_timeout_ms as fixed timeout (define VAL_REQUIRE_CLOCK=1 to enforce).");
-#endif
-    }
+    // Clock presence is guaranteed by validate_config(); no runtime fallback paths.
     // Fill in sane defaults for newly added resume policy fields if caller left them zero.
     // Important: If policy==NONE, we preserve legacy resume.mode behavior; do not override to SAFE_DEFAULT here.
     if (s->cfg.resume.verify_algo == 0)
@@ -419,7 +407,8 @@ val_session_t *val_session_create(const val_config_t *config)
     pthread_mutex_init(&s->lock, &attr);
     pthread_mutexattr_destroy(&attr);
 #endif
-    return s;
+    *out_session = s;
+    return VAL_OK;
 }
 // --- Adaptive timeout helpers (RFC 6298-inspired, integer math) ---
 void val_internal_init_timing(val_session_t *s)
@@ -467,6 +456,7 @@ void val_internal_record_rtt(val_session_t *s, uint32_t measured_rtt_ms)
         s->timing.srtt_ms = rtt;
         s->timing.rttvar_ms = rtt / 2u;
         s->timing.samples_taken = 1;
+        val_metrics_inc_rtt_sample(s);
         return;
     }
     // Subsequent samples: RTTVAR = (1 - beta)*RTTVAR + beta*|SRTT - RTT|, beta=1/4
@@ -482,17 +472,13 @@ void val_internal_record_rtt(val_session_t *s, uint32_t measured_rtt_ms)
     s->timing.srtt_ms = srtt;
     if (s->timing.samples_taken < 0xFF)
         s->timing.samples_taken++;
+    val_metrics_inc_rtt_sample(s);
 }
 
 uint32_t val_internal_get_timeout(val_session_t *s, val_operation_type_t op)
 {
     if (!s)
         return 1000u;
-    // If no tick provider is available, fall back to ceiling
-    if (!s->config->system.get_ticks_ms)
-    {
-        return s->timing.max_timeout_ms ? s->timing.max_timeout_ms : 8000u;
-    }
     // Compute base RTO = SRTT + 4*RTTVAR
     uint64_t base = (uint64_t)s->timing.srtt_ms + (4ull * (uint64_t)s->timing.rttvar_ms);
     // Per-operation multiplier
@@ -629,6 +615,8 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
         VAL_LOG_ERROR(s, "send_packet: transport send failed");
         return VAL_ERR_IO;
     }
+    // Metrics: count one packet and bytes on successful low-level send
+    val_metrics_add_sent(s, total_len);
     // Best-effort flush after control packets where timely delivery matters
     if (type == VAL_PKT_DONE || type == VAL_PKT_EOT || type == VAL_PKT_HELLO || type == VAL_PKT_ERROR)
     {
@@ -671,6 +659,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #else
         pthread_mutex_unlock(&s->lock);
 #endif
+        val_metrics_inc_timeout(s);
         return VAL_ERR_TIMEOUT;
     }
     // Validate header CRC using a zeroed copy of header_crc
@@ -688,7 +677,16 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #else
         pthread_mutex_unlock(&s->lock);
 #endif
-        return VAL_ERR_CRC;
+        val_status_t st = VAL_ERR_CRC;
+#if VAL_ENABLE_METRICS
+        s->metrics.crc_errors++;
+#endif
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return st;
     }
     val_packet_header_t *hdr = (val_packet_header_t *)buf; // original header bytes remain for trailer CRC
     // Verify wire_version is zero (reserved for future use)
@@ -741,6 +739,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #else
             pthread_mutex_unlock(&s->lock);
 #endif
+            val_metrics_inc_timeout(s);
             return VAL_ERR_TIMEOUT;
         }
     }
@@ -768,6 +767,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #else
         pthread_mutex_unlock(&s->lock);
 #endif
+        val_metrics_inc_timeout(s);
         return VAL_ERR_TIMEOUT;
     }
     // Verify trailer CRC over header+payload
@@ -781,7 +781,16 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #else
         pthread_mutex_unlock(&s->lock);
 #endif
-        return VAL_ERR_CRC;
+        val_status_t st = VAL_ERR_CRC;
+#if VAL_ENABLE_METRICS
+        s->metrics.crc_errors++;
+#endif
+#if defined(_WIN32)
+        LeaveCriticalSection(&s->lock);
+#else
+        pthread_mutex_unlock(&s->lock);
+#endif
+        return st;
     }
     if (type)
         *type = (val_packet_type_t)hdr->type;
@@ -814,6 +823,8 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #else
     pthread_mutex_unlock(&s->lock);
 #endif
+    // Metrics: count one packet and total bytes received for this packet (hdr+payload+trailer)
+    val_metrics_add_recv(s, (size_t)(sizeof(val_packet_header_t) + payload_len + sizeof(uint32_t)));
     return VAL_OK;
 }
 
@@ -1054,6 +1065,9 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     }
     // Optionally adjust behavior based on requested ∧ peer.features later
     s->handshake_done = 1;
+#if VAL_ENABLE_METRICS
+    s->metrics.handshakes++;
+#endif
     // features compatibility: ensure required features supported. For now, just note the peer features; could gate behavior
     // later.
     (void)peer;
@@ -1165,7 +1179,12 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     VAL_LOG_TRACE(s, "handshake(receiver): sending HELLO response");
     st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le2, sizeof(hello_le2), 0);
     if (st == VAL_OK)
+    {
         s->handshake_done = 1;
+#if VAL_ENABLE_METRICS
+        s->metrics.handshakes++;
+#endif
+    }
     return st;
 }
 
@@ -1179,3 +1198,42 @@ val_status_t val_internal_send_error(val_session_t *s, val_status_t code, uint32
     p.detail = val_htole32(detail);
     return val_internal_send_packet(s, VAL_PKT_ERROR, &p, sizeof(p), 0);
 }
+
+#if VAL_ENABLE_METRICS
+#include <string.h>
+val_status_t val_get_metrics(val_session_t *session, val_metrics_t *out)
+{
+    if (!session || !out)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    *out = session->metrics;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
+val_status_t val_reset_metrics(val_session_t *session)
+{
+    if (!session)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    memset(&session->metrics, 0, sizeof(session->metrics));
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+#endif // VAL_ENABLE_METRICS

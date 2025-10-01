@@ -41,7 +41,12 @@ static val_session_t *make_session_with_bounds(uint32_t min_ms, uint32_t max_ms,
         cfg.system.get_ticks_ms = ut_ticks;
     cfg.timeouts.min_timeout_ms = min_ms;
     cfg.timeouts.max_timeout_ms = max_ms;
-    return val_session_create(&cfg);
+    val_session_t *s = NULL;
+    uint32_t d = 0;
+    val_status_t rc = val_session_create(&cfg, &s, &d);
+    (void)rc;
+    (void)d;
+    return s;
 }
 
 int main(void)
@@ -100,23 +105,7 @@ int main(void)
         val_session_destroy(s);
     }
 
-    // Case 5: No clock fallback uses max_timeout_ms (only when clock is optional at build-time)
-#if !VAL_REQUIRE_CLOCK
-    {
-        val_session_t *s = make_session_with_bounds(50, 2000, 0 /* no clock */);
-        if (!s)
-            return 3;
-        // With no tick provider, all operations should return max bound
-        uint32_t ops[] = {VAL_OP_HANDSHAKE, VAL_OP_META,    VAL_OP_DATA_ACK, VAL_OP_VERIFY,
-                          VAL_OP_DONE_ACK,  VAL_OP_EOT_ACK, VAL_OP_DATA_RECV};
-        for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); ++i)
-        {
-            uint32_t to = val_internal_get_timeout(s, (val_operation_type_t)ops[i]);
-            ok &= expect_eq_u32("no clock fallback", to, 2000);
-        }
-        val_session_destroy(s);
-    }
-#endif
+    // No no-clock fallback: a clock is always required in VAL builds.
 
     return ok ? 0 : 10;
 }

@@ -1,3 +1,8 @@
+// Enable required POSIX features on non-Windows before any system headers
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "tcp_util.h"
 #include <string.h>
 
@@ -92,9 +97,12 @@ void tcp_sleep_ms(unsigned ms)
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h> // TCP_NODELAY
+#include <sys/ioctl.h>   // ioctl, FIONREAD
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h> // clock_gettime, nanosleep
 #include <unistd.h>
 static void ensure_wsa(void)
 {

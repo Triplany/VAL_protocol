@@ -76,18 +76,20 @@ static int test_single_file_check(void)
     val_config_t cfg_tx, cfg_rx;
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_APPEND, 1024);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_APPEND, 1024);
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx)
+    val_session_t *tx = NULL, *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
     {
-        fprintf(stderr, "val_session_create tx failed\n");
-        return 1;
-    }
-    if (!rx)
-    {
-        fprintf(stderr, "val_session_create rx failed\n");
-        val_session_destroy(tx);
-        return 1;
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                (unsigned)drx);
+        free(sb_a);
+        free(rb_a);
+        free(sb_b);
+        free(rb_b);
+        test_duplex_free(&d);
+        return 2;
     }
     ts_thread_t th = ts_start_receiver(rx, outdir);
     const char *files[1] = {inpath};
@@ -96,11 +98,25 @@ static int test_single_file_check(void)
     if (st != VAL_OK)
     {
         fprintf(stderr, "val_send_files failed: %d\n", st);
+        val_session_destroy(tx);
+        val_session_destroy(rx);
+        free(sb_a);
+        free(rb_a);
+        free(sb_b);
+        free(rb_b);
+        test_duplex_free(&d);
         return 1;
     }
     if (!files_equal(inpath, outpath))
     {
         fprintf(stderr, "file contents differ for %s vs %s\n", inpath, outpath);
+        val_session_destroy(tx);
+        val_session_destroy(rx);
+        free(sb_a);
+        free(rb_a);
+        free(sb_b);
+        free(rb_b);
+        test_duplex_free(&d);
         return 1;
     }
     val_session_destroy(tx);
@@ -166,18 +182,20 @@ static int test_multi_file_check(void)
     val_config_t cfg_tx, cfg_rx;
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_APPEND, 2048);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_APPEND, 2048);
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx)
+    val_session_t *tx = NULL, *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
     {
-        fprintf(stderr, "val_session_create tx failed\n");
-        return 1;
-    }
-    if (!rx)
-    {
-        fprintf(stderr, "val_session_create rx failed\n");
-        val_session_destroy(tx);
-        return 1;
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                (unsigned)drx);
+        free(sb_a);
+        free(rb_a);
+        free(sb_b);
+        free(rb_b);
+        test_duplex_free(&d);
+        return 2;
     }
     ts_thread_t th = ts_start_receiver(rx, outdir);
     const char *files[2] = {in1, in2};
@@ -186,16 +204,37 @@ static int test_multi_file_check(void)
     if (st != VAL_OK)
     {
         fprintf(stderr, "val_send_files failed: %d\n", st);
+        val_session_destroy(tx);
+        val_session_destroy(rx);
+        free(sb_a);
+        free(rb_a);
+        free(sb_b);
+        free(rb_b);
+        test_duplex_free(&d);
         return 1;
     }
     if (!files_equal(in1, out1))
     {
         fprintf(stderr, "file a mismatch\n");
+        val_session_destroy(tx);
+        val_session_destroy(rx);
+        free(sb_a);
+        free(rb_a);
+        free(sb_b);
+        free(rb_b);
+        test_duplex_free(&d);
         return 1;
     }
     if (!files_equal(in2, out2))
     {
         fprintf(stderr, "file b mismatch\n");
+        val_session_destroy(tx);
+        val_session_destroy(rx);
+        free(sb_a);
+        free(rb_a);
+        free(sb_b);
+        free(rb_b);
+        test_duplex_free(&d);
         return 1;
     }
     val_session_destroy(tx);
@@ -264,18 +303,20 @@ static int test_packet_size_sweep(void)
         uint32_t verify = (uint32_t)(packet * 2);
         ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_VERIFY, verify);
         ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_VERIFY, verify);
-        val_session_t *tx = val_session_create(&cfg_tx);
-        val_session_t *rx = val_session_create(&cfg_rx);
-        if (!tx)
+        val_session_t *tx = NULL, *rx = NULL;
+        uint32_t dtx = 0, drx = 0;
+        val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+        val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+        if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
         {
-            fprintf(stderr, "val_session_create tx failed\n");
-            return 1;
-        }
-        if (!rx)
-        {
-            fprintf(stderr, "val_session_create rx failed\n");
-            val_session_destroy(tx);
-            return 1;
+            fprintf(stderr, "session create failed (tx rc=%d d=0x%08X rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                    (unsigned)drx);
+            free(sb_a);
+            free(rb_a);
+            free(sb_b);
+            free(rb_b);
+            test_duplex_free(&d);
+            return 2;
         }
         ts_thread_t th = ts_start_receiver(rx, outdir);
         const char *files[1] = {inpath};
@@ -284,11 +325,25 @@ static int test_packet_size_sweep(void)
         if (st != VAL_OK)
         {
             fprintf(stderr, "val_send_files failed: %d\n", st);
+            val_session_destroy(tx);
+            val_session_destroy(rx);
+            free(sb_a);
+            free(rb_a);
+            free(sb_b);
+            free(rb_b);
+            test_duplex_free(&d);
             return 1;
         }
         if (!files_equal(inpath, outpath))
         {
             fprintf(stderr, "file mismatch in packet sweep for packet %zu\n", packet);
+            val_session_destroy(tx);
+            val_session_destroy(rx);
+            free(sb_a);
+            free(rb_a);
+            free(sb_b);
+            free(rb_b);
+            test_duplex_free(&d);
             return 1;
         }
         val_session_destroy(tx);

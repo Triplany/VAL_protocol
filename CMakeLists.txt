@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Build options
 option(VAL_BUILD_HOST_UTILS "Build host-only error string utilities" ON)
 option(VAL_MCU_BUILD "Enable MCU-optimized build (no host utilities, optimize for size)" OFF)
+option(VAL_ENABLE_METRICS "Enable compile-time protocol metrics counters and timing" OFF)
 
 # Platform-specific settings
 if(WIN32)
@@ -24,10 +25,14 @@ add_library(val_protocol STATIC
     src/val_receiver.c
 )
 target_include_directories(val_protocol PUBLIC include)
-# Enforce clock and enable maximum logging in the core so examples/tests can see detailed traces
-target_compile_definitions(val_protocol PUBLIC VAL_REQUIRE_CLOCK=1 VAL_LOG_LEVEL=5)
+# Enable maximum compile-time logging in the core so examples/tests can see detailed traces
+target_compile_definitions(val_protocol PUBLIC VAL_LOG_LEVEL=5)
 # Enable maximum runtime logging (TRACE) in Debug builds so deep diagnostics are available
 target_compile_definitions(val_protocol PUBLIC $<$<CONFIG:Debug>:VAL_LOG_LEVEL=5>)
+
+if(VAL_ENABLE_METRICS)
+    target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_METRICS=1)
+endif()
 
 if(VAL_MCU_BUILD)
     target_compile_definitions(val_protocol PUBLIC VAL_MCU_OPTIMIZED=1)

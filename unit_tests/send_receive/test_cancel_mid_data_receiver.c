@@ -51,22 +51,22 @@ int main(void)
         return 1;
     }
 #if defined(_WIN32)
-    char tmpdir[1024];
+    char tmpdir[2048];
     snprintf(tmpdir, sizeof(tmpdir), "%s\\cancel_rx", artroot);
-    char outdir[1024];
+    char outdir[2048];
     snprintf(outdir, sizeof(outdir), "%s\\cancel_rx\\out", artroot);
-    char inpath[1024];
+    char inpath[2048];
     snprintf(inpath, sizeof(inpath), "%s\\cancel_rx\\input.bin", artroot);
-    char outpath[1024];
+    char outpath[2048];
     snprintf(outpath, sizeof(outpath), "%s\\cancel_rx\\out\\input.bin", artroot);
 #else
-    char tmpdir[1024];
+    char tmpdir[2048];
     snprintf(tmpdir, sizeof(tmpdir), "%s/cancel_rx", artroot);
-    char outdir[1024];
+    char outdir[2048];
     snprintf(outdir, sizeof(outdir), "%s/cancel_rx/out", artroot);
-    char inpath[1024];
+    char inpath[2048];
     snprintf(inpath, sizeof(inpath), "%s/cancel_rx/input.bin", artroot);
-    char outpath[1024];
+    char outpath[2048];
     snprintf(outpath, sizeof(outpath), "%s/cancel_rx/out/input.bin", artroot);
 #endif
     if (ts_ensure_dir(tmpdir) != 0 || ts_ensure_dir(outdir) != 0)
@@ -104,11 +104,14 @@ int main(void)
 
     // Install a progress callback on receiver to cancel once data starts flowing
     cfg_rx.callbacks.on_progress = on_progress_cancel_rx;
-    val_session_t *tx = val_session_create(&cfg_tx);
-    val_session_t *rx = val_session_create(&cfg_rx);
-    if (!tx || !rx)
+    val_session_t *tx = NULL, *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
     {
-        fprintf(stderr, "session create failed\n");
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                (unsigned)drx);
         return 2;
     }
 

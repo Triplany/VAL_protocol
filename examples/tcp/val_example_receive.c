@@ -167,17 +167,17 @@ static int parse_level(const char *s)
             v = 5;
         return v;
     }
-    if (_stricmp(s, "off") == 0)
+    if (strieq(s, "off"))
         return 0;
-    if (_stricmp(s, "crit") == 0 || _stricmp(s, "critical") == 0)
+    if (strieq(s, "crit") || strieq(s, "critical"))
         return 1;
-    if (_stricmp(s, "warn") == 0 || _stricmp(s, "warning") == 0)
+    if (strieq(s, "warn") || strieq(s, "warning"))
         return 2;
-    if (_stricmp(s, "info") == 0)
+    if (strieq(s, "info"))
         return 3;
-    if (_stricmp(s, "debug") == 0)
+    if (strieq(s, "debug"))
         return 4;
-    if (_stricmp(s, "trace") == 0 || _stricmp(s, "verbose") == 0)
+    if (strieq(s, "trace") || strieq(s, "verbose"))
         return 5;
     return 0;
 }
@@ -225,7 +225,7 @@ static val_validation_action_t example_validator(const val_meta_payload_t *meta,
         return VAL_VALIDATION_SKIP;
     }
     const char *ext = strrchr(meta->filename, '.');
-    if (ext && (_stricmp(ext, ".exe") == 0 || _stricmp(ext, ".bat") == 0))
+    if (ext && (strieq(ext, ".exe") || strieq(ext, ".bat")))
     {
         printf("Aborting session - blocked file type: %s -> %s\n", meta->filename, target_path);
         return VAL_VALIDATION_ABORT;
@@ -361,7 +361,8 @@ int main(int argc, char **argv)
     memset(&cfg, 0, sizeof(cfg));
     cfg.transport.send = tp_send;
     cfg.transport.recv = tp_recv;
-    // Leave is_connected NULL to let core assume connection until I/O fails
+    // Provide is_connected to reduce spurious polling when connection breaks
+    cfg.transport.is_connected = tp_is_connected;
     cfg.transport.flush = tp_flush;
     cfg.transport.io_context = &fd;
     cfg.filesystem.fopen = fs_fopen;
@@ -427,10 +428,12 @@ int main(int argc, char **argv)
         printf("Metadata validation disabled\n");
     }
 
-    val_session_t *rx = val_session_create(&cfg);
-    if (!rx)
+    val_session_t *rx = NULL;
+    uint32_t init_detail = 0;
+    val_status_t init_rc = val_session_create(&cfg, &rx, &init_detail);
+    if (init_rc != VAL_OK || !rx)
     {
-        fprintf(stderr, "session create failed\n");
+        fprintf(stderr, "session create failed (rc=%d detail=0x%08X)\n", (int)init_rc, (unsigned)init_detail);
         return 5;
     }
 
@@ -448,6 +451,22 @@ int main(int argc, char **argv)
         fprintf(stderr, "receive failed: code=%d detail=0x%08X\n", (int)lc, (unsigned)det);
 #endif
     }
+
+#if VAL_ENABLE_METRICS
+    {
+        val_metrics_t m;
+        if (val_get_metrics(rx, &m) == VAL_OK)
+        {
+            fprintf(stdout,
+                    "[VAL][RX][metrics] pkts_sent=%llu pkts_recv=%llu bytes_sent=%llu bytes_recv=%llu timeouts=%u retrans=%u "
+                    "crc_err=%u handshakes=%u files_recv=%u rtt_samples=%u\n",
+                    (unsigned long long)m.packets_sent, (unsigned long long)m.packets_recv, (unsigned long long)m.bytes_sent,
+                    (unsigned long long)m.bytes_recv, (unsigned)m.timeouts, (unsigned)m.retransmits, (unsigned)m.crc_errors,
+                    (unsigned)m.handshakes, (unsigned)m.files_recv, (unsigned)m.rtt_samples);
+            fflush(stdout);
+        }
+    }
+#endif
 
     val_session_destroy(rx);
     tcp_close(fd);

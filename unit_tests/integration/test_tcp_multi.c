@@ -33,13 +33,10 @@ static void dirname_of(const char *path, char *out, size_t outsz)
     }
     size_t n = strlen(path);
     size_t i = n;
-    while (i > 0)
-    {
-        char c = path[i - 1];
-        if (c == '/' || c == '\\')
-            break;
-        --i;
-    }
+    while (i > 0 && (path[i - 1] == '/' || path[i - 1] == '\\'))
+        --i; // trim trailing separators
+    while (i > 0 && !(path[i - 1] == '/' || path[i - 1] == '\\'))
+        --i; // go to previous separator
     if (i == 0)
     {
         snprintf(out, outsz, ".");
@@ -52,21 +49,26 @@ static void dirname_of(const char *path, char *out, size_t outsz)
 
 static int find_example_bins(char *rx_path, size_t rx_sz, char *tx_path, size_t tx_sz)
 {
-    char art[1024];
+    char art[2048];
     if (!ts_get_artifacts_root(art, sizeof(art)))
         return 0;
-    char exe_dir[1024];
+    char exe_dir[2048];
     dirname_of(art, exe_dir, sizeof(exe_dir));
-    char parent1[1024];
+    char parent1[2048];
     dirname_of(exe_dir, parent1, sizeof(parent1));
-    char build_root[1024];
+    char build_root[2048];
     dirname_of(parent1, build_root, sizeof(build_root));
 
-    char c_debug_rx[1024], c_debug_tx[1024], c_sc_rx[1024], c_sc_tx[1024], c_rel1_rx[1024], c_rel1_tx[1024];
+    char c_debug_rx[4096], c_debug_tx[4096], c_sc_rx[4096], c_sc_tx[4096], c_sc2_rx[4096], c_sc2_tx[4096], c_cwd_rx[64],
+        c_cwd_tx[64], c_rel1_rx[4096], c_rel1_tx[4096];
+    snprintf(c_cwd_rx, sizeof(c_cwd_rx), "val_example_receive" EXE_EXT);
+    snprintf(c_cwd_tx, sizeof(c_cwd_tx), "val_example_send" EXE_EXT);
     snprintf(c_debug_rx, sizeof(c_debug_rx), "%s" PATH_SEP "Debug" PATH_SEP "val_example_receive" EXE_EXT, build_root);
     snprintf(c_debug_tx, sizeof(c_debug_tx), "%s" PATH_SEP "Debug" PATH_SEP "val_example_send" EXE_EXT, build_root);
     snprintf(c_sc_rx, sizeof(c_sc_rx), "%s" PATH_SEP "val_example_receive" EXE_EXT, build_root);
     snprintf(c_sc_tx, sizeof(c_sc_tx), "%s" PATH_SEP "val_example_send" EXE_EXT, build_root);
+    snprintf(c_sc2_rx, sizeof(c_sc2_rx), "%s" PATH_SEP "val_example_receive" EXE_EXT, parent1);
+    snprintf(c_sc2_tx, sizeof(c_sc2_tx), "%s" PATH_SEP "val_example_send" EXE_EXT, parent1);
     snprintf(c_rel1_rx, sizeof(c_rel1_rx),
              "%s" PATH_SEP ".." PATH_SEP ".." PATH_SEP "Debug" PATH_SEP "val_example_receive" EXE_EXT, exe_dir);
     snprintf(c_rel1_tx, sizeof(c_rel1_tx), "%s" PATH_SEP ".." PATH_SEP ".." PATH_SEP "Debug" PATH_SEP "val_example_send" EXE_EXT,
@@ -83,6 +85,16 @@ static int find_example_bins(char *rx_path, size_t rx_sz, char *tx_path, size_t 
         rx = c_sc_rx;
         tx = c_sc_tx;
     }
+    else if (file_exists(c_sc2_rx) && file_exists(c_sc2_tx))
+    {
+        rx = c_sc2_rx;
+        tx = c_sc2_tx;
+    }
+    else if (file_exists(c_cwd_rx) && file_exists(c_cwd_tx))
+    {
+        rx = c_cwd_rx;
+        tx = c_cwd_tx;
+    }
     else if (file_exists(c_rel1_rx) && file_exists(c_rel1_tx))
     {
         rx = c_rel1_rx;
@@ -90,8 +102,8 @@ static int find_example_bins(char *rx_path, size_t rx_sz, char *tx_path, size_t 
     }
     else
     {
-        fprintf(stderr, "candidates tried:\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n", c_debug_rx, c_debug_tx, c_sc_rx, c_sc_tx,
-                c_rel1_rx, c_rel1_tx);
+        fprintf(stderr, "candidates tried:\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n", c_debug_rx, c_debug_tx,
+                c_sc_rx, c_sc_tx, c_sc2_rx, c_sc2_tx, c_cwd_rx, c_cwd_tx, c_rel1_rx, c_rel1_tx);
         return 0;
     }
     snprintf(rx_path, rx_sz, "%s", rx);
@@ -214,32 +226,93 @@ static int run_sender(const char *tx_path, const char *host, unsigned short port
 #endif
 }
 
+// Join a directory and filename with exactly one path separator, returning a newly allocated string.
+// Caller must free the returned pointer.
+static char *join_path(const char *dir, const char *filename)
+{
+    if (!dir)
+        dir = "";
+    if (!filename)
+        filename = "";
+    size_t ld = strlen(dir);
+    size_t lf = strlen(filename);
+    int need_sep = 1;
+    if (ld == 0)
+        need_sep = 0;
+    else
+    {
+        char last = dir[ld - 1];
+        if (last == '/' || last == '\\')
+            need_sep = 0;
+    }
+    size_t total = ld + (size_t)need_sep + lf + 1;
+    char *out = (char *)malloc(total);
+    if (!out)
+        return NULL;
+    size_t pos = 0;
+    if (ld)
+    {
+        memcpy(out + pos, dir, ld);
+        pos += ld;
+    }
+    if (need_sep)
+        out[pos++] = PATH_SEP[0];
+    if (lf)
+    {
+        memcpy(out + pos, filename, lf);
+        pos += lf;
+    }
+    out[pos] = '\0';
+    return out;
+}
+
 int main(void)
 {
-    char rx_path[1024], tx_path[1024];
+    char rx_path[4096], tx_path[4096];
     if (!find_example_bins(rx_path, sizeof(rx_path), tx_path, sizeof(tx_path)))
     {
         fprintf(stderr, "could not locate example binaries\n");
         return 1;
     }
 
-    char art[1024];
+    char art[2048];
     if (!ts_get_artifacts_root(art, sizeof(art)))
         return 2;
-    char root[1024], outdir[1024];
-    snprintf(root, sizeof(root), "%s" PATH_SEP "tcp_multi", art);
-    char rx_log[1024], tx_log[1024];
-    snprintf(rx_log, sizeof(rx_log), "%s" PATH_SEP "rx.log", root);
-    snprintf(tx_log, sizeof(tx_log), "%s" PATH_SEP "tx.log", root);
-    snprintf(outdir, sizeof(outdir), "%s" PATH_SEP "out", root);
-    if (ts_ensure_dir(root) != 0 || ts_ensure_dir(outdir) != 0)
+    char *root = join_path(art, "tcp_multi");
+    if (!root)
         return 3;
+    char *rx_log = join_path(root, "rx.log");
+    char *tx_log = join_path(root, "tx.log");
+    char *outdir = join_path(root, "out");
+    if (!rx_log || !tx_log || !outdir)
+    {
+        free(root);
+        free(rx_log);
+        free(tx_log);
+        free(outdir);
+        return 3;
+    }
+    if (ts_ensure_dir(root) != 0 || ts_ensure_dir(outdir) != 0)
+    {
+        free(root);
+        free(rx_log);
+        free(tx_log);
+        free(outdir);
+        return 3;
+    }
 
     // Create 3 files: tiny, small, larger
-    char f1[1024], f2[1024], f3[1024];
-    snprintf(f1, sizeof(f1), "%s" PATH_SEP "tiny.txt", root);
-    snprintf(f2, sizeof(f2), "%s" PATH_SEP "small.bin", root);
-    snprintf(f3, sizeof(f3), "%s" PATH_SEP "big.bin", root);
+    char *f1 = join_path(root, "tiny.txt");
+    char *f2 = join_path(root, "small.bin");
+    char *f3 = join_path(root, "big.bin");
+    if (!f1 || !f2 || !f3)
+    {
+        free(f1);
+        free(f2);
+        free(f3);
+        fprintf(stderr, "out of memory building input paths\n");
+        return 3;
+    }
     const char *t1 = "hello world\n";
     write_file(f1, (const uint8_t *)t1, strlen(t1));
     size_t s_small = ts_env_size_bytes("VAL_IT_TCP_MULTI_SMALL", 80 * 1024 + 3);
@@ -261,7 +334,7 @@ int main(void)
         return 4;
 #else
     pid_t rx_pid;
-    if (!run_receiver(rx_path, port, outdir, &rx_pid))
+    if (!run_receiver(rx_path, port, outdir, rx_log, &rx_pid))
         return 4;
 #endif
 
@@ -269,6 +342,9 @@ int main(void)
     int rc = run_sender(tx_path, "127.0.0.1", port, files, 3, tx_log);
     if (rc != 0)
     {
+        free(f1);
+        free(f2);
+        free(f3);
         fprintf(stderr, "sender failed rc=%d\n", rc);
         FILE *lf = fopen(rx_log, "rb");
         if (lf)
@@ -296,32 +372,103 @@ int main(void)
             }
             fclose(lf);
         }
+        free(buf2);
+        free(buf3);
+        free(root);
+        free(rx_log);
+        free(tx_log);
+        free(outdir);
         return 5;
     }
 
     // Verify all outputs exist and match size+CRC
-    char o1[1024], o2[1024], o3[1024];
-    snprintf(o1, sizeof(o1), "%s" PATH_SEP "tiny.txt", outdir);
-    snprintf(o2, sizeof(o2), "%s" PATH_SEP "small.bin", outdir);
-    snprintf(o3, sizeof(o3), "%s" PATH_SEP "big.bin", outdir);
+    char *o1 = join_path(outdir, "tiny.txt");
+    char *o2 = join_path(outdir, "small.bin");
+    char *o3 = join_path(outdir, "big.bin");
+    if (!o1 || !o2 || !o3)
+    {
+        free(o1);
+        free(o2);
+        free(o3);
+        fprintf(stderr, "out of memory building output paths\n");
+        free(buf2);
+        free(buf3);
+        free(f1);
+        free(f2);
+        free(f3);
+        free(root);
+        free(rx_log);
+        free(tx_log);
+        free(outdir);
+        return 6;
+    }
     if (ts_file_size(f1) != ts_file_size(o1) || ts_file_crc32(f1) != ts_file_crc32(o1))
     {
         fprintf(stderr, "mismatch tiny\n");
+        free(o1);
+        free(o2);
+        free(o3);
+        free(buf2);
+        free(buf3);
+        free(f1);
+        free(f2);
+        free(f3);
+        free(root);
+        free(rx_log);
+        free(tx_log);
+        free(outdir);
         return 6;
     }
     if (ts_file_size(f2) != ts_file_size(o2) || ts_file_crc32(f2) != ts_file_crc32(o2))
     {
         fprintf(stderr, "mismatch small\n");
+        free(o1);
+        free(o2);
+        free(o3);
+        free(buf2);
+        free(buf3);
+        free(f1);
+        free(f2);
+        free(f3);
+        free(root);
+        free(rx_log);
+        free(tx_log);
+        free(outdir);
         return 7;
     }
     if (ts_file_size(f3) != ts_file_size(o3) || ts_file_crc32(f3) != ts_file_crc32(o3))
     {
         fprintf(stderr, "mismatch big\n");
+        free(o1);
+        free(o2);
+        free(o3);
+        free(buf2);
+        free(buf3);
+        free(f1);
+        free(f2);
+        free(f3);
+        free(root);
+        free(rx_log);
+        free(tx_log);
+        free(outdir);
         return 8;
     }
 
+    free(o1);
+    free(o2);
+    free(o3);
+
     free(buf2);
     free(buf3);
+
+    free(f1);
+    free(f2);
+    free(f3);
+
+    free(root);
+    free(rx_log);
+    free(tx_log);
+    free(outdir);
 
 #if defined(_WIN32)
     WaitForSingleObject(rx_pi.hProcess, 2000);

@@ -168,17 +168,17 @@ static int parse_level(const char *s)
             v = 5;
         return v;
     }
-    if (_stricmp(s, "off") == 0)
+    if (strieq(s, "off"))
         return 0;
-    if (_stricmp(s, "crit") == 0 || _stricmp(s, "critical") == 0)
+    if (strieq(s, "crit") || strieq(s, "critical"))
         return 1;
-    if (_stricmp(s, "warn") == 0 || _stricmp(s, "warning") == 0)
+    if (strieq(s, "warn") || strieq(s, "warning"))
         return 2;
-    if (_stricmp(s, "info") == 0)
+    if (strieq(s, "info"))
         return 3;
-    if (_stricmp(s, "debug") == 0)
+    if (strieq(s, "debug"))
         return 4;
-    if (_stricmp(s, "trace") == 0 || _stricmp(s, "verbose") == 0)
+    if (strieq(s, "trace") || strieq(s, "verbose"))
         return 5;
     return 0;
 }
@@ -324,7 +324,8 @@ int main(int argc, char **argv)
     memset(&cfg, 0, sizeof(cfg));
     cfg.transport.send = tp_send;
     cfg.transport.recv = tp_recv;
-    // Leave is_connected NULL so core assumes connected; avoids false negatives on some stacks
+    // Provide is_connected callback to help detect disconnections promptly
+    cfg.transport.is_connected = tp_is_connected;
     cfg.transport.flush = tp_flush;
     cfg.transport.io_context = &fd;
     cfg.filesystem.fopen = fs_fopen;
@@ -369,10 +370,12 @@ int main(int argc, char **argv)
     cfg.resume.verify_bytes = 16384;
     cfg.resume.policy = policy;
 
-    val_session_t *tx = val_session_create(&cfg);
-    if (!tx)
+    val_session_t *tx = NULL;
+    uint32_t init_detail = 0;
+    val_status_t init_rc = val_session_create(&cfg, &tx, &init_detail);
+    if (init_rc != VAL_OK || !tx)
     {
-        fprintf(stderr, "session create failed\n");
+        fprintf(stderr, "session create failed (rc=%d detail=0x%08X)\n", (int)init_rc, (unsigned)init_detail);
         return 4;
     }
 
@@ -392,6 +395,22 @@ int main(int argc, char **argv)
         fprintf(stderr, "send failed: code=%d detail=0x%08X\n", (int)lc, (unsigned)det);
 #endif
     }
+
+#if VAL_ENABLE_METRICS
+    {
+        val_metrics_t m;
+        if (val_get_metrics(tx, &m) == VAL_OK)
+        {
+            fprintf(stdout,
+                    "[VAL][TX][metrics] pkts_sent=%llu pkts_recv=%llu bytes_sent=%llu bytes_recv=%llu timeouts=%u retrans=%u "
+                    "crc_err=%u handshakes=%u files_sent=%u rtt_samples=%u\n",
+                    (unsigned long long)m.packets_sent, (unsigned long long)m.packets_recv, (unsigned long long)m.bytes_sent,
+                    (unsigned long long)m.bytes_recv, (unsigned)m.timeouts, (unsigned)m.retransmits, (unsigned)m.crc_errors,
+                    (unsigned)m.handshakes, (unsigned)m.files_sent, (unsigned)m.rtt_samples);
+            fflush(stdout);
+        }
+    }
+#endif
 
     val_session_destroy(tx);
     tcp_close(fd);

@@ -91,10 +91,14 @@ static void make_cfgs(val_config_t *cfg_tx, val_config_t *cfg_rx, test_duplex_t 
 
 static int run_send_recv(const char *in, const char *outdir, val_config_t *cfg_tx, val_config_t *cfg_rx, val_status_t *st_out)
 {
-    val_session_t *tx = val_session_create(cfg_tx);
-    val_session_t *rx = val_session_create(cfg_rx);
-    if (!tx || !rx)
+    val_session_t *tx = NULL, *rx = NULL;
+    uint32_t dtx = 0, drx = 0;
+    val_status_t rctx = val_session_create(cfg_tx, &tx, &dtx);
+    val_status_t rcrx = val_session_create(cfg_rx, &rx, &drx);
+    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
     {
+        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
+                (unsigned)drx);
         if (tx)
             val_session_destroy(tx);
         if (rx)

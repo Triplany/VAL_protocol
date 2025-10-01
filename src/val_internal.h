@@ -157,6 +157,23 @@ struct val_session_s
     // last error info
     val_status_t last_error_code;
     uint32_t last_error_detail;
+#if VAL_ENABLE_METRICS
+    // Metrics counters (zeroed at session create)
+    struct
+    {
+        uint64_t packets_sent;
+        uint64_t packets_recv;
+        uint64_t bytes_sent;
+        uint64_t bytes_recv;
+        uint32_t timeouts;
+        uint32_t retransmits;
+        uint32_t crc_errors;
+        uint32_t handshakes;
+        uint32_t files_sent;
+        uint32_t files_recv;
+        uint32_t rtt_samples;
+    } metrics;
+#endif
     // thread-safety primitive (coarse serialization per session)
 #if defined(_WIN32)
     CRITICAL_SECTION lock;
@@ -250,6 +267,100 @@ typedef enum
 void val_internal_init_timing(val_session_t *s);
 void val_internal_record_rtt(val_session_t *s, uint32_t measured_rtt_ms);
 uint32_t val_internal_get_timeout(val_session_t *s, val_operation_type_t op);
+
+#if VAL_ENABLE_METRICS
+// Internal helpers to update metrics; compile to no-ops when disabled
+static inline void val_metrics_inc_timeout(val_session_t *s)
+{
+    if (s)
+        s->metrics.timeouts++;
+}
+static inline void val_metrics_inc_retrans(val_session_t *s)
+{
+    if (s)
+        s->metrics.retransmits++;
+}
+static inline void val_metrics_inc_crcerr(val_session_t *s)
+{
+    if (s)
+        s->metrics.crc_errors++;
+}
+static inline void val_metrics_inc_rtt_sample(val_session_t *s)
+{
+    if (s)
+        s->metrics.rtt_samples++;
+}
+static inline void val_metrics_note_handshake(val_session_t *s)
+{
+    if (s)
+        s->metrics.handshakes++;
+}
+static inline void val_metrics_inc_files_sent(val_session_t *s)
+{
+    if (s)
+        s->metrics.files_sent++;
+}
+static inline void val_metrics_inc_files_recv(val_session_t *s)
+{
+    if (s)
+        s->metrics.files_recv++;
+}
+static inline void val_metrics_add_sent(val_session_t *s, size_t bytes)
+{
+    if (s)
+    {
+        s->metrics.packets_sent++;
+        s->metrics.bytes_sent += (uint64_t)bytes;
+    }
+}
+static inline void val_metrics_add_recv(val_session_t *s, size_t bytes)
+{
+    if (s)
+    {
+        s->metrics.packets_recv++;
+        s->metrics.bytes_recv += (uint64_t)bytes;
+    }
+}
+#else
+static inline void val_metrics_inc_timeout(val_session_t *s)
+{
+    (void)s;
+}
+static inline void val_metrics_inc_retrans(val_session_t *s)
+{
+    (void)s;
+}
+static inline void val_metrics_inc_crcerr(val_session_t *s)
+{
+    (void)s;
+}
+static inline void val_metrics_inc_rtt_sample(val_session_t *s)
+{
+    (void)s;
+}
+static inline void val_metrics_note_handshake(val_session_t *s)
+{
+    (void)s;
+}
+static inline void val_metrics_inc_files_sent(val_session_t *s)
+{
+    (void)s;
+}
+static inline void val_metrics_inc_files_recv(val_session_t *s)
+{
+    (void)s;
+}
+static inline void val_metrics_add_sent(val_session_t *s, size_t bytes)
+{
+    (void)s;
+    (void)bytes;
+}
+static inline void val_metrics_add_recv(val_session_t *s, size_t bytes)
+{
+    (void)s;
+    (void)bytes;
+}
+#endif
 
 // Optional transport helpers (safe wrappers)
 static inline int val_internal_transport_is_connected(val_session_t *s)
