@@ -389,13 +389,39 @@ int ts_fclose(void *ctx, void *file)
 #endif
 }
 
+// Cross-platform monotonic millisecond clock and delay for tests
+// See test_support.h for policy notes. These are used as defaults by
+// ts_make_config() when the caller doesn't provide their own hooks.
 uint32_t ts_ticks(void)
 {
-    return 0;
+#if defined(_WIN32)
+    // GetTickCount64 is monotonic since boot; convert to 32-bit (wrap is acceptable for tests)
+    ULONGLONG t = GetTickCount64();
+    return (uint32_t)(t & 0xFFFFFFFFu);
+#else
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+    {
+        uint64_t ms = (uint64_t)ts.tv_sec * 1000ull + (uint64_t)(ts.tv_nsec / 1000000ull);
+        return (uint32_t)(ms & 0xFFFFFFFFu);
+    }
+#endif
+    // Fallback: coarse time()
+    time_t now = time(NULL);
+    return (uint32_t)((uint64_t)now * 1000ull);
+#endif
 }
 void ts_delay(uint32_t ms)
 {
-    (void)ms;
+#if defined(_WIN32)
+    Sleep(ms);
+#else
+    struct timespec req;
+    req.tv_sec = (time_t)(ms / 1000u);
+    req.tv_nsec = (long)((ms % 1000u) * 1000000L);
+    nanosleep(&req, NULL);
+#endif
 }
 
 static void ts_path_dirname(const char *path, char *out, size_t outsz)
@@ -504,20 +530,19 @@ void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t pa
     cfg->filesystem.fseek = ts_fseek;
     cfg->filesystem.ftell = ts_ftell;
     cfg->filesystem.fclose = ts_fclose;
-    cfg->system.get_ticks_ms = ts_ticks;
-    cfg->system.delay_ms = ts_delay;
+    // Provide default system clock/delay only if caller hasn't supplied their own
+    if (!cfg->system.get_ticks_ms)
+        cfg->system.get_ticks_ms = ts_ticks;
+    if (!cfg->system.delay_ms)
+        cfg->system.delay_ms = ts_delay;
     cfg->buffers.send_buffer = send_buf;
     cfg->buffers.recv_buffer = recv_buf;
     cfg->buffers.packet_size = packet_size;
     cfg->resume.mode = mode;
     cfg->resume.verify_bytes = verify;
-    // Test-optimized timeouts and bounded retries: in-memory transport is fast and predictable,
-    // so we can use much lower values to keep total test time low while still exercising timeouts/retries.
-    cfg->timeouts.handshake_ms = 500; // was 2000
-    cfg->timeouts.meta_ms = 1500;     // was 5000
-    cfg->timeouts.data_ms = 2000;     // was 5000
-    cfg->timeouts.ack_ms = 2000;      // was 2000
-    cfg->timeouts.idle_ms = 200;      // was 1000
+    // Adaptive timeout bounds (tests run in-memory; keep low to speed up failures while allowing retries)
+    cfg->timeouts.min_timeout_ms = 50;   // floor for RTO
+    cfg->timeouts.max_timeout_ms = 2000; // ceiling for RTO
     cfg->retries.handshake_retries = 3;
     cfg->retries.meta_retries = 2;
     cfg->retries.data_retries = 4;

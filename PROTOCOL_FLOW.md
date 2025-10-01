@@ -123,10 +123,9 @@ DONE handling
 
 ## Timeouts and retries (high-level)
 
-- Handshake wait: default 5s each way (configurable) with bounded retries.
-- Metadata wait: default 60s with optional retry/backoff policy.
-- Data wait/ACKs: sender waits per configured ack_ms; on timeout, retry with exponential backoff (backoff base doubles each attempt).
-- VERIFY exchanges use the configured ack timeout with bounded retries; timeout causes fallback to offset 0 (no hang).
+- Timeouts are adaptive and derived from measured RTT using RFC 6298 (SRTT/RTTVAR) with Karn’s rule, then clamped to [`min_timeout_ms`, `max_timeout_ms`].
+- On timeout, operations retry with exponential backoff (base doubles each attempt) up to the configured retry count for that operation.
+- A monotonic clock is required in default builds. If enforcement is disabled and no clock is provided, a conservative fixed timeout of `max_timeout_ms` is used for all waits.
 
 
 ## Edge cases and protocol invariants

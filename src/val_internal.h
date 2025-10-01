@@ -133,6 +133,17 @@ typedef struct
 } val_resume_resp_t;
 
 // Minimal session struct
+// Adaptive timing state (RFC 6298-inspired)
+typedef struct
+{
+    uint32_t srtt_ms;        // smoothed RTT (ms)
+    uint32_t rttvar_ms;      // RTT variance (ms)
+    uint32_t min_timeout_ms; // floor
+    uint32_t max_timeout_ms; // ceiling
+    uint8_t samples_taken;   // number of valid samples incorporated
+    uint8_t in_retransmit;   // Karn's algorithm flag (do not sample when set)
+} val_timing_t;
+
 struct val_session_s
 {
     val_config_t cfg;
@@ -142,6 +153,7 @@ struct val_session_s
     size_t effective_packet_size; // negotiated packet size after handshake
     uint8_t handshake_done;       // handshake completed once per session
     uint32_t peer_features;       // features advertised by peer during handshake
+    val_timing_t timing;
     // last error info
     val_status_t last_error_code;
     uint32_t last_error_detail;
@@ -221,6 +233,23 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
                              uint64_t offset);
 int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *payload_out, uint32_t payload_cap,
                              uint32_t *payload_len_out, uint64_t *offset_out, uint32_t timeout_ms);
+
+// Operation kinds for timeout selection
+typedef enum
+{
+    VAL_OP_HANDSHAKE = 1,
+    VAL_OP_META = 2,
+    VAL_OP_DATA_ACK = 3,
+    VAL_OP_VERIFY = 4,
+    VAL_OP_DONE_ACK = 5,
+    VAL_OP_EOT_ACK = 6,
+    VAL_OP_DATA_RECV = 7
+} val_operation_type_t;
+
+// Adaptive timeout API (RFC6298)
+void val_internal_init_timing(val_session_t *s);
+void val_internal_record_rtt(val_session_t *s, uint32_t measured_rtt_ms);
+uint32_t val_internal_get_timeout(val_session_t *s, val_operation_type_t op);
 
 // Optional transport helpers (safe wrappers)
 static inline int val_internal_transport_is_connected(val_session_t *s)

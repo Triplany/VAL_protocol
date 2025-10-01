@@ -32,18 +32,27 @@ static int closesock(int fd)
 
 int tcp_is_connected(int fd)
 {
-    // Use getsockopt to check SO_ERROR and a non-blocking peek
-    char buf;
-    int r = recv((SOCKET)fd, &buf, 1, MSG_PEEK);
-    if (r == 0)
-        return 0; // orderly shutdown
-    if (r < 0)
+    // Non-blocking connectivity check: SO_ERROR + select + MSG_PEEK
+    int err = 0;
+    int len = (int)sizeof(err);
+    if (getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char *)&err, &len) != 0)
+        return -1;
+    if (err != 0)
+        return 0; // socket has error
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET((SOCKET)fd, &rfds);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    int r = select(0 /* ignored on Winsock */, &rfds, NULL, NULL, &tv);
+    if (r > 0)
     {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK)
-            return 1; // connected but no data
-        // For other transient errors, assume connected
-        return 1;
+        // If readable, peek to detect orderly shutdown
+        char ch;
+        int n = recv((SOCKET)fd, &ch, 1, MSG_PEEK);
+        if (n == 0)
+            return 0; // closed by peer
     }
     return 1;
 }
@@ -53,6 +62,29 @@ void tcp_flush(int fd)
     // Winsock has no explicit flush; disable Nagle to reduce latency
     int yes = 1;
     setsockopt((SOCKET)fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&yes, sizeof(yes));
+}
+
+uint32_t tcp_now_ms(void)
+{
+    static LARGE_INTEGER freq = {0}, start = {0};
+    if (freq.QuadPart == 0)
+    {
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&start);
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double elapsed = (double)(now.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    if (elapsed < 0)
+        elapsed = 0;
+    if (elapsed > 4294967295.0)
+        elapsed = fmod(elapsed, 4294967296.0);
+    return (uint32_t)(elapsed + 0.5);
+}
+
+void tcp_sleep_ms(unsigned ms)
+{
+    Sleep(ms);
 }
 #else
 #include <arpa/inet.h>
@@ -118,6 +150,26 @@ void tcp_flush(int fd)
     // Nothing to do on POSIX for stream sockets; disabling Nagle might help
     int yes = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+}
+
+uint32_t tcp_now_ms(void)
+{
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts);
+#endif
+    uint64_t ms = (uint64_t)ts.tv_sec * 1000ull + (uint64_t)(ts.tv_nsec / 1000000ull);
+    return (uint32_t)(ms & 0xFFFFFFFFu);
+}
+
+void tcp_sleep_ms(unsigned ms)
+{
+    struct timespec req;
+    req.tv_sec = ms / 1000;
+    req.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&req, NULL);
 }
 #endif
 
@@ -250,4 +302,107 @@ int tcp_recv_all(int fd, void *buf, size_t len, unsigned timeout_ms)
         left -= (size_t)n;
     }
     return 0;
+}
+
+int tcp_recv_up_to(int fd, void *buf, size_t len, size_t *out_got, unsigned timeout_ms)
+{
+    if (out_got)
+        *out_got = 0;
+    char *p = (char *)buf;
+    size_t got = 0;
+    uint32_t start = tcp_now_ms();
+    for (;;)
+    {
+        // Compute remaining time budget
+        uint32_t now = tcp_now_ms();
+        unsigned remaining = timeout_ms;
+        if (timeout_ms)
+        {
+            unsigned elapsed = (now >= start) ? (now - start) : 0;
+            remaining = (elapsed >= timeout_ms) ? 0 : (timeout_ms - elapsed);
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        struct timeval tv;
+        tv.tv_sec = remaining / 1000;
+        tv.tv_usec = (remaining % 1000) * 1000;
+        int r = select(fd + 1, &rfds, NULL, NULL, timeout_ms ? &tv : NULL);
+        if (r <= 0)
+            break; // timeout or error; treat as partial
+#if defined(_WIN32)
+        int n = recv((SOCKET)fd, p, (int)(len - got), 0);
+#else
+        ssize_t n = recv(fd, p, (len - got), 0);
+#endif
+        if (n <= 0)
+            break; // error or disconnect; treat as partial
+        p += n;
+        got += (size_t)n;
+        if (got >= len)
+            break;
+    }
+    if (out_got)
+        *out_got = got;
+    return 0;
+}
+
+int tcp_recv_exact(int fd, void *buf, size_t len, unsigned timeout_ms)
+{
+    if (len == 0)
+        return 0;
+    uint32_t start = tcp_now_ms();
+    for (;;)
+    {
+        unsigned remaining = timeout_ms;
+        if (timeout_ms)
+        {
+            uint32_t now = tcp_now_ms();
+            unsigned elapsed = (now >= start) ? (now - start) : 0;
+            if (elapsed >= timeout_ms)
+                return -1; // timeout
+            remaining = timeout_ms - elapsed;
+        }
+#if defined(_WIN32)
+        u_long avail = 0;
+        if (ioctlsocket((SOCKET)fd, FIONREAD, &avail) != 0)
+            return -1;
+        if (avail < (u_long)len)
+        {
+            // Wait for readability or timeout
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET((SOCKET)fd, &rfds);
+            struct timeval tv;
+            tv.tv_sec = remaining / 1000;
+            tv.tv_usec = (remaining % 1000) * 1000;
+            int r = select(0, &rfds, NULL, NULL, timeout_ms ? &tv : NULL);
+            if (r <= 0)
+                return -1; // timeout or error
+            continue;      // re-check avail
+        }
+        // Enough bytes available; read them atomically with MSG_WAITALL
+        int n = recv((SOCKET)fd, (char *)buf, (int)len, MSG_WAITALL);
+        return (n == (int)len) ? 0 : -1;
+#else
+        // POSIX: use FIONREAD when available; otherwise select + MSG_WAITALL
+        int avail = 0;
+        (void)ioctl(fd, FIONREAD, &avail);
+        if (avail < (int)len)
+        {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(fd, &rfds);
+            struct timeval tv;
+            tv.tv_sec = remaining / 1000;
+            tv.tv_usec = (remaining % 1000) * 1000;
+            int r = select(fd + 1, &rfds, NULL, NULL, timeout_ms ? &tv : NULL);
+            if (r <= 0)
+                return -1;
+            continue;
+        }
+        ssize_t n = recv(fd, (char *)buf, len, MSG_WAITALL);
+        return (n == (ssize_t)len) ? 0 : -1;
+#endif
+    }
 }

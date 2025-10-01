@@ -55,6 +55,20 @@ extern "C"
     int ts_fclose(void *ctx, void *file);
 
     // System hooks
+    //
+    // Test clock policy:
+    // - By default, ts_make_config() will install a real, monotonic millisecond clock
+    //   and delay function if the caller leaves cfg->system.get_ticks_ms or
+    //   cfg->system.delay_ms as NULL. This keeps tests working when
+    //   VAL_REQUIRE_CLOCK=1 is enabled in the core library.
+    // - Platform implementations:
+    //     * Windows: GetTickCount64() for ticks; Sleep(ms) for delay
+    //     * POSIX: clock_gettime(CLOCK_MONOTONIC) for ticks; nanosleep() for delay
+    //       (with a coarse time() fallback if CLOCK_MONOTONIC is unavailable)
+    // - Deterministic tests (e.g., adaptive timeout unit tests) can override the
+    //   defaults by assigning cfg->system.get_ticks_ms (and optionally delay_ms)
+    //   before calling val_session_create(). ts_make_config() only fills these
+    //   hooks when they are NULL, so explicit assignments are preserved.
     uint32_t ts_ticks(void);
     void ts_delay(uint32_t ms);
 

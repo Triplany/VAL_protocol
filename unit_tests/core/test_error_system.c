@@ -5,8 +5,15 @@
 #include <stdio.h>
 #include <string.h>
 
+// Minimal monotonic clock stub for environments requiring a clock
+static uint32_t ut_ticks(void)
+{
+    return 0u;
+}
+
 int main(void)
 {
+
     // Build a minimal config with dummy pointers just to create a session object
     uint8_t buf[1024];
     val_config_t cfg;
@@ -22,6 +29,7 @@ int main(void)
     cfg.filesystem.fclose = (int (*)(void *, void *))0x1;
     cfg.transport.send = (int (*)(void *, const void *, size_t))0x1;
     cfg.transport.recv = (int (*)(void *, void *, size_t, size_t *, uint32_t))0x1;
+    cfg.system.get_ticks_ms = ut_ticks;
     val_session_t *s = val_session_create(&cfg);
     if (!s)
     {

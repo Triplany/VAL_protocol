@@ -144,9 +144,11 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
     uint64_t off = 0;
     val_packet_type_t t = 0;
     {
-        uint32_t to = s->config->timeouts.ack_ms ? s->config->timeouts.ack_ms : 10000u;
+        uint32_t to = val_internal_get_timeout(s, VAL_OP_VERIFY);
         uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+        uint32_t t0 = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+        s->timing.in_retransmit = 0;
         for (;;)
         {
             if (!val_internal_transport_is_connected(s))
@@ -156,7 +158,14 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
             }
             st = val_internal_recv_packet(s, &t, tmp, sizeof(tmp), &len, &off, to);
             if (st == VAL_OK)
+            {
+                if (t == VAL_PKT_RESUME_RESP && t0 && s->config->system.get_ticks_ms && !s->timing.in_retransmit)
+                {
+                    uint32_t now = s->config->system.get_ticks_ms();
+                    val_internal_record_rtt(s, now - t0);
+                }
                 break;
+            }
             if (st != VAL_ERR_TIMEOUT || tries == 0)
             {
                 VAL_LOG_ERRORF(s, "resume_req: recv failed %d (tries=%u)", (int)st, (unsigned)tries);
@@ -165,6 +174,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                 return st;
             }
             // Retransmit RESUME_REQ and backoff
+            s->timing.in_retransmit = 1; // Karn's algorithm
             val_status_t rs = val_internal_send_packet(s, VAL_PKT_RESUME_REQ, NULL, 0, 0);
             if (rs != VAL_OK)
             {
@@ -240,9 +250,11 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
         VAL_LOG_DEBUG(s, "send: sent VERIFY");
         // Wait for verification result (ACK via VERIFY packet with action field reused as status)
         {
-            uint32_t to = s->config->timeouts.ack_ms ? s->config->timeouts.ack_ms : 10000u;
+            uint32_t to = val_internal_get_timeout(s, VAL_OP_VERIFY);
             uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
             uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+            uint32_t t0v = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+            s->timing.in_retransmit = 0;
             for (;;)
             {
                 if (!val_internal_transport_is_connected(s))
@@ -266,7 +278,14 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                         return VAL_ERR_ABORTED;
                     }
                     if (t == VAL_PKT_VERIFY)
+                    {
+                        if (t0v && s->config->system.get_ticks_ms && !s->timing.in_retransmit)
+                        {
+                            uint32_t now = s->config->system.get_ticks_ms();
+                            val_internal_record_rtt(s, now - t0v);
+                        }
                         break; // proceed below
+                    }
                     if (t == VAL_PKT_ERROR)
                     {
                         VAL_LOG_ERROR(s, "verify: received ERROR packet");
@@ -295,6 +314,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                     VAL_LOG_WARN(s, "verify: local cancel during timeout");
                     return VAL_ERR_ABORTED;
                 }
+                s->timing.in_retransmit = 1; // Karn's algorithm
                 val_status_t rs = val_internal_send_packet(s, VAL_PKT_VERIFY, &verify_le, sizeof(verify_le), 0);
                 if (rs != VAL_OK)
                 {
@@ -638,9 +658,11 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
         uint32_t len = 0;
         uint64_t off = 0;
         val_packet_type_t t = 0;
-        uint32_t to_ack = s->config->timeouts.ack_ms ? s->config->timeouts.ack_ms : 10000u;
+        uint32_t to_ack = val_internal_get_timeout(s, VAL_OP_DATA_ACK);
         uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+        uint32_t t0 = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+        s->timing.in_retransmit = 0;
         for (;;)
         {
             if (!val_internal_transport_is_connected(s))
@@ -686,6 +708,11 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                     return VAL_ERR_PROTOCOL;
                 }
                 VAL_LOG_DEBUGF(s, "data: got DATA_ACK off=%llu", (unsigned long long)off);
+                if (t0 && s->config->system.get_ticks_ms && !s->timing.in_retransmit)
+                {
+                    uint32_t now = s->config->system.get_ticks_ms();
+                    val_internal_record_rtt(s, now - t0);
+                }
                 // Cumulative semantics: off == receiver's next expected offset
                 if (off > sent + to_read)
                 {
@@ -740,6 +767,7 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                 VAL_LOG_WARN(s, "data: local cancel before retransmit");
                 return VAL_ERR_ABORTED;
             }
+            s->timing.in_retransmit = 1; // Karn's algorithm
             val_status_t rs = val_internal_send_packet(s, VAL_PKT_DATA, payload_area, (uint32_t)to_read, sent);
             if (rs != VAL_OK)
             {
@@ -789,9 +817,11 @@ send_done:
         val_packet_type_t t = 0;
         uint32_t len = 0;
         uint64_t off = 0;
-        uint32_t to = s->config->timeouts.ack_ms ? s->config->timeouts.ack_ms : 10000u;
+        uint32_t to = val_internal_get_timeout(s, VAL_OP_DONE_ACK);
         uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+        uint32_t t0done = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+        s->timing.in_retransmit = 0;
         for (;;)
         {
             if (!val_internal_transport_is_connected(s))
@@ -823,7 +853,14 @@ send_done:
                     return VAL_ERR_PROTOCOL;
                 }
                 if (t == VAL_PKT_DONE_ACK)
+                {
+                    if (t0done && s->config->system.get_ticks_ms && !s->timing.in_retransmit)
+                    {
+                        uint32_t now = s->config->system.get_ticks_ms();
+                        val_internal_record_rtt(s, now - t0done);
+                    }
                     break;
+                }
                 if (t == VAL_PKT_CANCEL)
                 {
                     s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
@@ -857,6 +894,7 @@ send_done:
                 return VAL_ERR_TIMEOUT;
             }
             // Retransmit DONE on timeout or wrong packet
+            s->timing.in_retransmit = 1; // Karn's algorithm
             val_status_t rs = val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
             if (rs != VAL_OK)
             {
@@ -910,7 +948,7 @@ send_done_no_file:
         val_packet_type_t t = 0;
         uint32_t len = 0;
         uint64_t off = 0;
-        uint32_t to = s->config->timeouts.ack_ms ? s->config->timeouts.ack_ms : 10000u;
+        uint32_t to = val_internal_get_timeout(s, VAL_OP_DONE_ACK);
         uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         for (;;)
@@ -1055,9 +1093,11 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
     val_packet_type_t t = 0;
     uint32_t len = 0;
     uint64_t off = 0;
-    uint32_t to = s->config->timeouts.ack_ms ? s->config->timeouts.ack_ms : 10000u;
+    uint32_t to = val_internal_get_timeout(s, VAL_OP_EOT_ACK);
     uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+    uint32_t t0eot = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+    s->timing.in_retransmit = 0;
     for (;;)
     {
         if (val_check_for_cancel(s))
@@ -1088,7 +1128,14 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
                 return VAL_ERR_PROTOCOL;
             }
             if (t == VAL_PKT_EOT_ACK)
+            {
+                if (t0eot && s->config->system.get_ticks_ms && !s->timing.in_retransmit)
+                {
+                    uint32_t now = s->config->system.get_ticks_ms();
+                    val_internal_record_rtt(s, now - t0eot);
+                }
                 break;
+            }
             if (t == VAL_PKT_CANCEL)
             {
                 VAL_LOG_WARN(s, "wait EOT_ACK: received CANCEL");
@@ -1125,6 +1172,7 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
             return VAL_ERR_TIMEOUT;
         }
         // Retransmit EOT and backoff
+        s->timing.in_retransmit = 1; // Karn's algorithm
         val_status_t rs = val_internal_send_packet(s, VAL_PKT_EOT, NULL, 0, 0);
         if (rs != VAL_OK)
         {

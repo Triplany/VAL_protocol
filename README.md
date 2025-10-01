@@ -87,13 +87,23 @@ On Linux/WSL, use the provided `linux-*` presets in `CMakePresets.json` and run 
 - Errors on the wire are compact: `val_status_t code` + `detail mask` (both little‑endian in ERROR payload).
 
 Resilience and timeouts:
-- All blocking waits are bounded with configurable timeouts and retries (exponential backoff).
-- Handshake uses `timeouts.handshake_ms` with `retries.handshake_retries`.
-- Sender waits for DATA_ACK, DONE_ACK, EOT_ACK with `ack_ms` and `ack_retries`.
-- VERIFY timeouts are handled robustly; receiver won’t hang.
+- All blocking waits use adaptive timeouts derived from round-trip time (RFC 6298 style) with Karn’s algorithm, clamped between `timeouts.min_timeout_ms` and `timeouts.max_timeout_ms`.
+- A monotonic clock via `cfg.system.get_ticks_ms` is required in default builds (clock enforcement is ON). When explicitly disabled at build time, the library falls back to using `max_timeout_ms` as a fixed timeout and will not sample RTTs.
+- Retries use exponential backoff (`retries.*` + `backoff_ms_base`).
 
 Diagnostics:
 - Logging is compile-time gated. Provide `cfg.debug.log` to capture logs (unit tests use a simple console logger).
+
+### Choosing adaptive timeout bounds
+
+As a starting point, consider these conservative values for `timeouts.{min,max}_timeout_ms`:
+
+- Localhost/LAN or USB/UART (low jitter): min=50–100 ms, max=2,000–5,000 ms
+- Typical Wi‑Fi/LAN across switches: min=100–200 ms, max=5,000–10,000 ms
+- Internet/WAN or cellular: min=200–500 ms, max=10,000–30,000 ms
+- High‑latency links (satellite, long‑haul): min=500–1,000 ms, max=30,000–60,000 ms
+
+Pick a floor that’s above your median RTT to avoid spurious timeouts, and a ceiling that tolerates occasional pauses. If clock enforcement is disabled and no clock is provided, the library will use `max_timeout_ms` for all waits.
 
 ### Transport hooks (optional)
 

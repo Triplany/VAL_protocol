@@ -24,6 +24,10 @@ add_library(val_protocol STATIC
     src/val_receiver.c
 )
 target_include_directories(val_protocol PUBLIC include)
+# Enforce clock and enable maximum logging in the core so examples/tests can see detailed traces
+target_compile_definitions(val_protocol PUBLIC VAL_REQUIRE_CLOCK=1 VAL_LOG_LEVEL=5)
+# Enable maximum runtime logging (TRACE) in Debug builds so deep diagnostics are available
+target_compile_definitions(val_protocol PUBLIC $<$<CONFIG:Debug>:VAL_LOG_LEVEL=5>)
 
 if(VAL_MCU_BUILD)
     target_compile_definitions(val_protocol PUBLIC VAL_MCU_OPTIMIZED=1)
@@ -53,6 +57,15 @@ target_link_libraries(val_example_send PRIVATE val_protocol example_tcp_common)
 if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
     target_link_libraries(val_example_send PRIVATE val_error_strings)
 endif()
+# Always compile the examples with maximum VAL_LOG_LEVEL so core logs are not compiled out
+target_compile_definitions(val_example_send PRIVATE VAL_LOG_LEVEL=5)
+# Build examples lean even in Debug: optimize and define NDEBUG to avoid full debug noise
+if (MSVC)
+    target_compile_options(val_example_send PRIVATE $<$<NOT:$<CONFIG:Debug>>:/O2>)
+else()
+    target_compile_options(val_example_send PRIVATE $<$<NOT:$<CONFIG:Debug>>:-O2>)
+endif()
+target_compile_definitions(val_example_send PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
 
 add_executable(val_example_receive examples/tcp/val_example_receive.c)
 target_include_directories(val_example_receive PRIVATE examples/tcp/common include)
@@ -60,6 +73,14 @@ target_link_libraries(val_example_receive PRIVATE val_protocol example_tcp_commo
 if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
     target_link_libraries(val_example_receive PRIVATE val_error_strings)
 endif()
+# Always compile the examples with maximum VAL_LOG_LEVEL so core logs are not compiled out
+target_compile_definitions(val_example_receive PRIVATE VAL_LOG_LEVEL=5)
+if (MSVC)
+    target_compile_options(val_example_receive PRIVATE $<$<NOT:$<CONFIG:Debug>>:/O2>)
+else()
+    target_compile_options(val_example_receive PRIVATE $<$<NOT:$<CONFIG:Debug>>:-O2>)
+endif()
+target_compile_definitions(val_example_receive PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
 
 if (WIN32)
     target_link_libraries(example_tcp_common PUBLIC ws2_32)

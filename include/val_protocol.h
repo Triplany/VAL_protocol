@@ -168,18 +168,22 @@ extern "C"
 
         struct
         {
+            // Monotonic millisecond clock. Required in default builds (VAL_REQUIRE_CLOCK=1).
+            // If your build disables enforcement, the library will fall back to using
+            // a conservative fixed timeout of timeouts.max_timeout_ms and will not sample RTTs.
             uint32_t (*get_ticks_ms)(void);
+            // Optional delay helper for backoff/sleeps between retries. When NULL, the
+            // implementation uses a minimal spin/yield or platform fallback where applicable.
             void (*delay_ms)(uint32_t ms);
         } system;
 
-        // Timeouts (ms). Zero values pick sensible defaults.
+        // Adaptive timeout bounds (ms). Required.
+        // The protocol computes per-operation timeouts adaptively using RFC6298-like RTT estimation,
+        // clamped to [min_timeout_ms, max_timeout_ms].
         struct
         {
-            uint32_t handshake_ms; // initial hello exchange
-            uint32_t meta_ms;      // metadata send/receive
-            uint32_t data_ms;      // data packet receive
-            uint32_t ack_ms;       // ack wait per chunk
-            uint32_t idle_ms;      // idle wait between files
+            uint32_t min_timeout_ms; // Minimum allowed timeout (floor)
+            uint32_t max_timeout_ms; // Maximum allowed timeout (ceiling)
         } timeouts;
 
         // Feature requirements and requests (used during handshake)

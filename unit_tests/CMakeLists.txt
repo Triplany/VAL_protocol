@@ -23,6 +23,14 @@ set_property(TEST ut_packet_negotiation PROPERTY LABELS "quick;heavy")
 add_ctest_exe(ut_metadata_validation core/test_metadata_validation.c)
 set_property(TEST ut_metadata_validation PROPERTY LABELS "quick")
 
+# Adaptive timeout behavior
+add_ctest_exe(ut_adaptive_timeouts core/test_adaptive_timeouts.c)
+set_property(TEST ut_adaptive_timeouts PROPERTY LABELS "quick")
+
+# Clock requirement behavior
+add_ctest_exe(ut_clock_requirement core/test_clock_requirement.c)
+set_property(TEST ut_clock_requirement PROPERTY LABELS "quick")
+
 # Label heavier suites to allow selective runs
 set_property(TEST ut_sr_check PROPERTY LABELS "heavy")
 set_property(TEST ut_recovery_check PROPERTY LABELS "heavy")
@@ -32,3 +40,9 @@ add_ctest_exe(ut_cancel_mid_data_receiver send_receive/test_cancel_mid_data_rece
 set_property(TEST ut_cancel_mid_data_receiver PROPERTY LABELS "heavy")
 add_ctest_exe(ut_cancel_mid_data_sender send_receive/test_cancel_mid_data_sender.c)
 set_property(TEST ut_cancel_mid_data_sender PROPERTY LABELS "heavy")
+
+# Integration tests using TCP example binaries over localhost
+add_ctest_exe(it_tcp_single integration/test_tcp_single.c)
+set_property(TEST it_tcp_single PROPERTY LABELS "heavy")
+add_ctest_exe(it_tcp_multi integration/test_tcp_multi.c)
+set_property(TEST it_tcp_multi PROPERTY LABELS "heavy")

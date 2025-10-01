@@ -5,6 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Compile-time diagnostic: encourage providing a monotonic clock for adaptive timeouts
+#if !defined(VAL_REQUIRE_CLOCK)
+#define VAL_REQUIRE_CLOCK 0
+#endif
+#if VAL_REQUIRE_CLOCK == 0
+#if defined(_MSC_VER)
+#pragma message("VAL: get_ticks_ms is optional; define VAL_REQUIRE_CLOCK=1 to enforce clock requirement at build-time.")
+#elif defined(__clang__) || defined(__GNUC__)
+#warning "VAL: get_ticks_ms is optional; define VAL_REQUIRE_CLOCK=1 to enforce clock requirement at build-time."
+#endif
+#endif
+
 // Internal logging implementation. If compile-time logging is enabled and a sink is provided in config,
 // forward messages; otherwise, drop them. This function itself is a tiny call and will be removed by
 // the compiler entirely when VAL_LOG_LEVEL==0 because no callers remain.
@@ -311,6 +323,14 @@ val_session_t *val_session_create(const val_config_t *config)
 {
     if (!validate_config(config))
         return NULL;
+#if VAL_REQUIRE_CLOCK
+    // Enforce presence of a monotonic clock when required at build time
+    if (!config->system.get_ticks_ms)
+    {
+        // Cannot log because session doesn't exist yet; fail fast
+        return NULL;
+    }
+#endif
     val_session_t *s = (val_session_t *)calloc(1, sizeof(val_session_t));
     if (!s)
         return NULL;
@@ -324,6 +344,37 @@ val_session_t *val_session_create(const val_config_t *config)
     s->peer_features = 0;
     s->last_error_code = VAL_OK;
     s->last_error_detail = 0;
+    // Initialize adaptive timing state
+    // Clamp/sanitize config bounds: if invalid, swap, and default when zero.
+    uint32_t min_to = config->timeouts.min_timeout_ms ? config->timeouts.min_timeout_ms : 200u;
+    uint32_t max_to = config->timeouts.max_timeout_ms ? config->timeouts.max_timeout_ms : 8000u;
+    if (min_to == 0)
+        min_to = 200u;
+    if (max_to == 0)
+        max_to = 8000u;
+    if (min_to > max_to)
+    {
+        uint32_t tmp = min_to;
+        min_to = max_to;
+        max_to = tmp;
+    }
+    s->timing.min_timeout_ms = min_to;
+    s->timing.max_timeout_ms = max_to;
+    s->timing.srtt_ms = max_to / 2u;   // conservative initial SRTT
+    s->timing.rttvar_ms = max_to / 4u; // initial variance heuristic
+    s->timing.samples_taken = 0;
+    s->timing.in_retransmit = 0;
+    // Warn at runtime if no clock is provided only when not strictly required
+    if (!s->cfg.system.get_ticks_ms)
+    {
+#if VAL_REQUIRE_CLOCK
+        // Should be unreachable due to early return, but keep defensive check in case of future refactors
+        VAL_LOG_CRIT(s, "system.get_ticks_ms is required but missing; session is invalid.");
+#else
+        VAL_LOG_WARN(
+            s, "No system.get_ticks_ms provided; using max_timeout_ms as fixed timeout (define VAL_REQUIRE_CLOCK=1 to enforce).");
+#endif
+    }
     // Fill in sane defaults for newly added resume policy fields if caller left them zero.
     // Important: If policy==NONE, we preserve legacy resume.mode behavior; do not override to SAFE_DEFAULT here.
     if (s->cfg.resume.verify_algo == 0)
@@ -369,6 +420,124 @@ val_session_t *val_session_create(const val_config_t *config)
     pthread_mutexattr_destroy(&attr);
 #endif
     return s;
+}
+// --- Adaptive timeout helpers (RFC 6298-inspired, integer math) ---
+void val_internal_init_timing(val_session_t *s)
+{
+    if (!s)
+        return;
+    uint32_t min_to = s->config->timeouts.min_timeout_ms ? s->config->timeouts.min_timeout_ms : 200u;
+    uint32_t max_to = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : 8000u;
+    if (min_to > max_to)
+    {
+        uint32_t t = min_to;
+        min_to = max_to;
+        max_to = t;
+    }
+    s->timing.min_timeout_ms = min_to;
+    s->timing.max_timeout_ms = max_to;
+    s->timing.srtt_ms = max_to / 2u;
+    s->timing.rttvar_ms = max_to / 4u;
+    s->timing.samples_taken = 0;
+    s->timing.in_retransmit = 0;
+}
+
+static inline uint32_t val__clamp_u32(uint32_t v, uint32_t lo, uint32_t hi)
+{
+    if (v < lo)
+        return lo;
+    if (v > hi)
+        return hi;
+    return v;
+}
+
+void val_internal_record_rtt(val_session_t *s, uint32_t measured_rtt_ms)
+{
+    if (!s)
+        return;
+    // If retransmission occurred, skip sampling (Karn's algorithm)
+    if (s->timing.in_retransmit)
+        return;
+    uint32_t rtt = measured_rtt_ms;
+    if (rtt == 0)
+        rtt = 1; // avoid zeros
+    // First sample initialization per RFC6298
+    if (s->timing.samples_taken == 0)
+    {
+        s->timing.srtt_ms = rtt;
+        s->timing.rttvar_ms = rtt / 2u;
+        s->timing.samples_taken = 1;
+        return;
+    }
+    // Subsequent samples: RTTVAR = (1 - beta)*RTTVAR + beta*|SRTT - RTT|, beta=1/4
+    // SRTT = (1 - alpha)*SRTT + alpha*RTT, alpha=1/8
+    uint32_t srtt = s->timing.srtt_ms;
+    uint32_t rttvar = s->timing.rttvar_ms;
+    uint32_t diff = (srtt > rtt) ? (srtt - rtt) : (rtt - srtt);
+    // rttvar = 3/4*rttvar + 1/4*diff
+    rttvar = (uint32_t)((3u * (uint64_t)rttvar + diff) >> 2);
+    // srtt = 7/8*srtt + 1/8*rtt
+    srtt = (uint32_t)((7u * (uint64_t)srtt + rtt) >> 3);
+    s->timing.rttvar_ms = rttvar;
+    s->timing.srtt_ms = srtt;
+    if (s->timing.samples_taken < 0xFF)
+        s->timing.samples_taken++;
+}
+
+uint32_t val_internal_get_timeout(val_session_t *s, val_operation_type_t op)
+{
+    if (!s)
+        return 1000u;
+    // If no tick provider is available, fall back to ceiling
+    if (!s->config->system.get_ticks_ms)
+    {
+        return s->timing.max_timeout_ms ? s->timing.max_timeout_ms : 8000u;
+    }
+    // Compute base RTO = SRTT + 4*RTTVAR
+    uint64_t base = (uint64_t)s->timing.srtt_ms + (4ull * (uint64_t)s->timing.rttvar_ms);
+    // Per-operation multiplier
+    uint32_t mul = 1;
+    switch (op)
+    {
+    case VAL_OP_HANDSHAKE:
+        mul = 5; // more conservative
+        break;
+    case VAL_OP_META:
+        mul = 4;
+        break;
+    case VAL_OP_DATA_ACK:
+        mul = 3;
+        break;
+    case VAL_OP_VERIFY:
+        mul = 3;
+        break;
+    case VAL_OP_DONE_ACK:
+        mul = 4;
+        break;
+    case VAL_OP_EOT_ACK:
+        mul = 4;
+        break;
+    case VAL_OP_DATA_RECV:
+        mul = 6; // watchdog for inbound data
+        break;
+    default:
+        mul = 3;
+        break;
+    }
+    uint64_t rto = base * (uint64_t)mul;
+    if (rto > 0xFFFFFFFFull)
+        rto = 0xFFFFFFFFull;
+    uint32_t rto32 = (uint32_t)rto;
+    // Clamp to [min,max]
+    uint32_t min_to = s->timing.min_timeout_ms ? s->timing.min_timeout_ms : 200u;
+    uint32_t max_to = s->timing.max_timeout_ms ? s->timing.max_timeout_ms : 8000u;
+    if (min_to > max_to)
+    {
+        uint32_t t = min_to;
+        min_to = max_to;
+        max_to = t;
+    }
+    return val__clamp_u32(rto32, min_to, max_to);
 }
 
 void val_session_destroy(val_session_t *session)
@@ -805,6 +974,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     hello_le.features = val_htole32(hello_le.features);
     hello_le.required = val_htole32(hello_le.required);
     hello_le.requested = val_htole32(hello_le.requested);
+    VAL_LOG_TRACE(s, "handshake(sender): sending HELLO");
     val_status_t st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
     if (st != VAL_OK)
         return st;
@@ -812,11 +982,12 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     uint64_t off = 0;
     val_packet_type_t t = 0;
     val_handshake_t peer;
-    uint32_t to = def_or(s->config->timeouts.handshake_ms, 5000u);
+    uint32_t to = val_internal_get_timeout(s, VAL_OP_HANDSHAKE);
     uint8_t tries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
     for (;;)
     {
+        VAL_LOG_TRACEF(s, "handshake(sender): waiting for HELLO (to=%u ms, tries=%u)", (unsigned)to, (unsigned)tries);
         st = val_internal_recv_packet(s, &t, &peer, sizeof(peer), &len, &off, to);
         if (st == VAL_OK)
             break;
@@ -826,18 +997,21 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
             {
                 VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_HELLO);
             }
+            VAL_LOG_DEBUGF(s, "handshake(sender): wait failed st=%d tries=%u", (int)st, (unsigned)tries);
             return st;
         }
         // Retransmit HELLO and backoff
         val_status_t rs = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
         if (rs != VAL_OK)
             return rs;
+        VAL_LOG_DEBUG(s, "handshake(sender): timeout -> retransmit HELLO");
         if (backoff && s->config->system.delay_ms)
             s->config->system.delay_ms(backoff);
         if (backoff)
             backoff <<= 1;
         --tries;
     }
+    VAL_LOG_TRACEF(s, "handshake(sender): got pkt t=%u len=%u", (unsigned)t, (unsigned)len);
     if (t != VAL_PKT_HELLO || len < sizeof(peer))
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
@@ -898,7 +1072,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     uint64_t off = 0;
     val_packet_type_t t = 0;
     val_handshake_t peer;
-    uint32_t to = def_or(s->config->timeouts.handshake_ms, 5000u);
+    uint32_t to = val_internal_get_timeout(s, VAL_OP_HANDSHAKE);
     uint8_t tries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
     val_status_t st = VAL_OK;
@@ -988,6 +1162,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     hello_le2.features = val_htole32(hello_le2.features);
     hello_le2.required = val_htole32(hello_le2.required);
     hello_le2.requested = val_htole32(hello_le2.requested);
+    VAL_LOG_TRACE(s, "handshake(receiver): sending HELLO response");
     st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le2, sizeof(hello_le2), 0);
     if (st == VAL_OK)
         s->handshake_done = 1;

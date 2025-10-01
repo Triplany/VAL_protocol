@@ -62,16 +62,19 @@ Header: `include/val_protocol.h` (source of truth for public constants and types
   - Thin wrappers: `fopen/fread/fwrite/fseek/ftell/fclose`
 - CRC provider (optional)
   - One‑shot and streaming hooks; if any pointer is NULL, built‑in software implementation is used.
-- System (optional)
+- System
   - `uint32_t (*get_ticks_ms)(void)`, `void (*delay_ms)(uint32_t)`
+  - A monotonic millisecond clock is required in default builds (enforcement ON). When enforcement is explicitly disabled, the clock becomes optional and adaptive timeouts degrade to fixed `max_timeout_ms`.
 - Buffers (caller‑owned)
   - `void* send_buffer`, `void* recv_buffer`, `size_t packet_size` (MTU; validated to [`VAL_MIN_PACKET_SIZE`, `VAL_MAX_PACKET_SIZE`])
 - Resume
   - Legacy modes: `VAL_RESUME_NONE | VAL_RESUME_APPEND | VAL_RESUME_CRC_VERIFY` (+ `verify_bytes`)
   - Policies (preferred): `val_resume_policy_t policy` and defaults for `on_verify_mismatch`, `on_fs_anomaly`, `verify_algo`
   - If `policy == VAL_RESUME_POLICY_NONE`, legacy mode applies unchanged and is not overridden.
-- Timeouts
-  - `handshake_ms`, `meta_ms`, `data_ms`, `ack_ms`, `idle_ms` — Zero picks sensible defaults internally.
+- Timeouts (adaptive)
+  - Adaptive RTT-based timeouts with Karn’s algorithm. Configure only bounds:
+    - `min_timeout_ms` (floor), `max_timeout_ms` (ceiling)
+  - A monotonic clock is required in default builds to sample RTT and compute RTO. If enforcement is disabled and no clock is provided, the library uses `max_timeout_ms` as a conservative fixed timeout.
 - Retries & backoff
   - `handshake_retries`, `meta_retries`, `data_retries`, `ack_retries`, `backoff_ms_base` (exponential: base, 2×base, …)
 - Features (handshake policy)

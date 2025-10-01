@@ -4,11 +4,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--mtu N] [--policy NAME|ID] [--no-validation] <port> <outdir>\n"
+            "Usage: %s [--mtu N] [--policy NAME|ID] [--no-validation] [--log-level L] [--log-file PATH] <port> <outdir>\n"
             "  --mtu N        Packet size/MTU (default 4096; min %u, max %u)\n"
             "  --policy P     Resume policy name or numeric ID:\n"
             "                 none(0), safe(1), start_zero(2), skip_if_exists(3),\n"
@@ -94,11 +95,11 @@ static int tp_send(void *ctx, const void *data, size_t len)
 static int tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received, uint32_t timeout_ms)
 {
     int fd = *(int *)ctx;
-    if (tcp_recv_all(fd, buffer, buffer_size, timeout_ms) != 0)
+    if (tcp_recv_exact(fd, buffer, buffer_size, timeout_ms) != 0)
     {
         if (received)
-            *received = 0;
-        return -1;
+            *received = 0; // timeout -> short read
+        return 0;
     }
     if (received)
         *received = buffer_size;
@@ -115,6 +116,102 @@ static void tp_flush(void *ctx)
 {
     int fd = *(int *)ctx;
     tcp_flush(fd);
+}
+
+// ---------- Simple logging sink ----------
+static FILE *g_logf = NULL;
+static const char *lvl_name(int lvl)
+{
+    switch (lvl)
+    {
+    case 1:
+        return "CRIT";
+    case 2:
+        return "WARN";
+    case 3:
+        return "INFO";
+    case 4:
+        return "DEBUG";
+    case 5:
+        return "TRACE";
+    default:
+        return "OFF";
+    }
+}
+static void console_logger(void *ctx, int level, const char *file, int line, const char *message)
+{
+    (void)ctx;
+    FILE *out = g_logf ? g_logf : stderr;
+    time_t t = time(NULL);
+    struct tm tmv;
+#if defined(_WIN32)
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    char ts[32];
+    strftime(ts, sizeof(ts), "%H:%M:%S", &tmv);
+    fprintf(out, "[%s][RX][%s] %s:%d: %s\n", ts, lvl_name(level), file, line, message ? message : "");
+    fflush(out);
+}
+static int parse_level(const char *s)
+{
+    if (!s)
+        return 0;
+    if (isdigit((unsigned char)s[0]))
+    {
+        int v = atoi(s);
+        if (v < 0)
+            v = 0;
+        if (v > 5)
+            v = 5;
+        return v;
+    }
+    if (_stricmp(s, "off") == 0)
+        return 0;
+    if (_stricmp(s, "crit") == 0 || _stricmp(s, "critical") == 0)
+        return 1;
+    if (_stricmp(s, "warn") == 0 || _stricmp(s, "warning") == 0)
+        return 2;
+    if (_stricmp(s, "info") == 0)
+        return 3;
+    if (_stricmp(s, "debug") == 0)
+        return 4;
+    if (_stricmp(s, "trace") == 0 || _stricmp(s, "verbose") == 0)
+        return 5;
+    return 0;
+}
+
+// Minimal filesystem adapters using stdio
+static void *fs_fopen(void *ctx, const char *path, const char *mode)
+{
+    (void)ctx;
+    return (void *)fopen(path, mode);
+}
+static int fs_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
+{
+    (void)ctx;
+    return (int)fread(buffer, size, count, (FILE *)file);
+}
+static int fs_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file)
+{
+    (void)ctx;
+    return (int)fwrite(buffer, size, count, (FILE *)file);
+}
+static int fs_fseek(void *ctx, void *file, long offset, int whence)
+{
+    (void)ctx;
+    return fseek((FILE *)file, offset, whence);
+}
+static long fs_ftell(void *ctx, void *file)
+{
+    (void)ctx;
+    return ftell((FILE *)file);
+}
+static int fs_fclose(void *ctx, void *file)
+{
+    (void)ctx;
+    return fclose((FILE *)file);
 }
 
 // Example metadata validator: basic size/type filtering
@@ -147,6 +244,8 @@ int main(int argc, char **argv)
     // Defaults
     size_t packet = 4096;                                // example MTU
     val_resume_policy_t policy = VAL_RESUME_POLICY_NONE; // legacy unless specified
+    int log_level = -1;
+    const char *log_file_path = NULL;
 
     // Parse optional flags
     int argi = 1;
@@ -190,6 +289,28 @@ int main(int argc, char **argv)
         else if (strcmp(arg, "--no-validation") == 0)
         {
             // marker handled later; nothing to parse here
+        }
+        else if (strcmp(arg, "--log-level") == 0)
+        {
+            if (argi >= argc)
+            {
+                usage(argv[0]);
+                return 1;
+            }
+            log_level = parse_level(argv[argi++]);
+        }
+        else if (strcmp(arg, "--log-file") == 0)
+        {
+            if (argi >= argc)
+            {
+                usage(argv[0]);
+                return 1;
+            }
+            log_file_path = argv[argi++];
+        }
+        else if (strcmp(arg, "--verbose") == 0)
+        {
+            log_level = 4;
         }
         else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0)
         {
@@ -240,18 +361,41 @@ int main(int argc, char **argv)
     memset(&cfg, 0, sizeof(cfg));
     cfg.transport.send = tp_send;
     cfg.transport.recv = tp_recv;
-    cfg.transport.is_connected = tp_is_connected;
+    // Leave is_connected NULL to let core assume connection until I/O fails
     cfg.transport.flush = tp_flush;
     cfg.transport.io_context = &fd;
+    cfg.filesystem.fopen = fs_fopen;
+    cfg.filesystem.fread = fs_fread;
+    cfg.filesystem.fwrite = fs_fwrite;
+    cfg.filesystem.fseek = fs_fseek;
+    cfg.filesystem.ftell = fs_ftell;
+    cfg.filesystem.fclose = fs_fclose;
     cfg.buffers.send_buffer = send_buf;
     cfg.buffers.recv_buffer = recv_buf;
     cfg.buffers.packet_size = packet;
-    // Minimal timeouts/backoff
-    cfg.timeouts.handshake_ms = 5000;
-    cfg.timeouts.meta_ms = 10000;
-    cfg.timeouts.data_ms = 10000;
-    cfg.timeouts.ack_ms = 5000;
-    cfg.timeouts.idle_ms = 1000;
+    cfg.system.get_ticks_ms = tcp_now_ms;
+    cfg.system.delay_ms = tcp_sleep_ms;
+    // Optional debug logger setup
+    if (log_level < 0)
+    {
+        const char *lvl_env = getenv("VAL_LOG_LEVEL");
+        if (lvl_env)
+            log_level = parse_level(lvl_env);
+    }
+    if (!log_file_path)
+    {
+        log_file_path = getenv("VAL_LOG_FILE");
+    }
+    if (log_file_path && log_file_path[0])
+    {
+        g_logf = fopen(log_file_path, "a");
+    }
+    cfg.debug.log = console_logger;
+    cfg.debug.min_level = (log_level >= 0 ? log_level : 3);
+
+    // Adaptive timeout bounds (RFC6298-based): min/max clamp for computed RTO
+    cfg.timeouts.min_timeout_ms = 100;   // floor for timeouts
+    cfg.timeouts.max_timeout_ms = 10000; // ceiling for timeouts
     cfg.retries.handshake_retries = 3;
     cfg.retries.meta_retries = 2;
     cfg.retries.data_retries = 2;

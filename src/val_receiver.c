@@ -68,10 +68,12 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     uint32_t len = 0;
     uint64_t off = 0;
     val_packet_type_t t = 0;
-    uint32_t to = s->config->timeouts.ack_ms ? s->config->timeouts.ack_ms : 10000u;
+    uint32_t to = val_internal_get_timeout(s, VAL_OP_VERIFY);
     uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
     val_status_t st = VAL_OK;
+    uint32_t t0v = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0;
+    s->timing.in_retransmit = 0;
     for (;;)
     {
         if (!val_internal_transport_is_connected(s))
@@ -107,6 +109,11 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
         {
             VAL_LOG_DEBUG(s, "verify: ignoring unexpected packet during verify wait");
             continue;
+        }
+        if (t0v && s->config->system.get_ticks_ms && !s->timing.in_retransmit)
+        {
+            uint32_t now = s->config->system.get_ticks_ms();
+            val_internal_record_rtt(s, now - t0v);
         }
         break;
     }
@@ -466,7 +473,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
         val_packet_type_t t = 0;
         uint32_t len = 0;
         uint64_t off = 0;
-        uint32_t to_meta = s->config->timeouts.meta_ms ? s->config->timeouts.meta_ms : 60000u;
+        uint32_t to_meta = val_internal_get_timeout(s, VAL_OP_META);
         val_status_t st = VAL_OK;
         {
             uint8_t tries = s->config->retries.meta_retries ? s->config->retries.meta_retries : 0;
@@ -659,7 +666,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             t = 0;
             len = 0;
             off = 0;
-            uint32_t to_data = s->config->timeouts.data_ms ? s->config->timeouts.data_ms : 60000u;
+            uint32_t to_data = val_internal_get_timeout(s, VAL_OP_DATA_RECV);
             {
                 uint8_t tries = s->config->retries.data_retries ? s->config->retries.data_retries : 0;
                 uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
