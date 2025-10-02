@@ -2,51 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32)
-#include <direct.h>
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#include <sys/types.h>
-#endif
-
-static int write_pattern(const char *path, size_t size)
-{
-    FILE *f = fopen(path, "wb");
-    if (!f)
-        return -1;
-    for (size_t i = 0; i < size; ++i)
-        fputc((int)(i * 13 & 0xFF), f);
-    fclose(f);
-    return 0;
-}
-static int files_equal(const char *a, const char *b)
-{
-    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
-    if (!fa || !fb)
-    {
-        if (fa)
-            fclose(fa);
-        if (fb)
-            fclose(fb);
-        return 0;
-    }
-    int eq = 1;
-    int ca, cb;
-    do
-    {
-        ca = fgetc(fa);
-        cb = fgetc(fb);
-        if (ca != cb)
-        {
-            eq = 0;
-            break;
-        }
-    } while (ca != EOF && cb != EOF);
-    fclose(fa);
-    fclose(fb);
-    return eq;
-}
+// Using shared helpers from test_support
 
 int main(void)
 {
@@ -59,36 +15,24 @@ int main(void)
     d.faults.drop_frame_per_million = 800; // ~0.08% frames dropped
     d.faults.dup_frame_per_million = 800;  // ~0.08% frames duplicated
 
-    char artroot[1024];
-    if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
-    {
-        fprintf(stderr, "failed to determine artifacts root\n");
-        return 1;
-    }
-#if defined(_WIN32)
+    char basedir[2048];
     char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s\\corrupt\\out", artroot);
-    char in[2048];
-    snprintf(in, sizeof(in), "%s\\corrupt\\corrupt.bin", artroot);
-    char out[2048];
-    snprintf(out, sizeof(out), "%s\\corrupt\\out\\corrupt.bin", artroot);
-#else
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s/corrupt/out", artroot);
-    char in[2048];
-    snprintf(in, sizeof(in), "%s/corrupt/corrupt.bin", artroot);
-    char out[2048];
-    snprintf(out, sizeof(out), "%s/corrupt/out/corrupt.bin", artroot);
-#endif
-    if (ts_ensure_dir(outdir) != 0)
+    if (ts_build_case_dirs("corrupt", basedir, sizeof(basedir), outdir, sizeof(outdir)) != 0)
     {
         fprintf(stderr, "failed to create artifacts dir\n");
         return 1;
     }
+    char in[2048];
+    if (ts_path_join(in, sizeof(in), basedir, "corrupt.bin") != 0)
+        return 1;
+    char out[2048];
+    if (ts_path_join(out, sizeof(out), outdir, "corrupt.bin") != 0)
+        return 1;
     // Clean any previous input/output files to avoid stale resume behavior when size changes
-    (void)remove(in);
-    (void)remove(out);
-    write_pattern(in, size);
+    ts_remove_file(in);
+    ts_remove_file(out);
+    if (ts_write_pattern_file(in, size) != 0)
+        return 1;
 
     uint8_t *sb_a = (uint8_t *)calloc(1, packet), *rb_a = (uint8_t *)calloc(1, packet);
     uint8_t *sb_b = (uint8_t *)calloc(1, packet), *rb_b = (uint8_t *)calloc(1, packet);
@@ -121,6 +65,7 @@ int main(void)
     }
 
     ts_thread_t th = ts_start_receiver(rx, outdir);
+    ts_receiver_warmup(&cfg_tx, 5);
 
     const char *files[1] = {in};
     val_status_t st = val_send_files(tx, files, 1, NULL);
@@ -172,7 +117,7 @@ int main(void)
         fprintf(stderr, "send failed %d\n", (int)st);
         return 2;
     }
-    if (!files_equal(in, out))
+    if (!ts_files_equal(in, out))
     {
         fprintf(stderr, "corruption recovery mismatch\n");
         return 3;

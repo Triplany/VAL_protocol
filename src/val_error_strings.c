@@ -34,6 +34,12 @@ const char *val_status_to_string(val_status_t status)
         return "FEATURE_NEGOTIATION";
     case VAL_ERR_ABORTED:
         return "ABORTED";
+    case VAL_ERR_MODE_NEGOTIATION_FAILED:
+        return "MODE_NEGOTIATION_FAILED";
+    case VAL_ERR_MODE_SYNC_FAILED:
+        return "MODE_SYNC_FAILED";
+    case VAL_ERR_UNSUPPORTED_TX_MODE:
+        return "UNSUPPORTED_TX_MODE";
     default:
         return "UNKNOWN";
     }

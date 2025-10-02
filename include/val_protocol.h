@@ -13,7 +13,7 @@ extern "C"
 // Protocol constants
 #define VAL_MAGIC 0x56414C00u // "VAL\0"
 #define VAL_VERSION_MAJOR 0u
-#define VAL_VERSION_MINOR 5u
+#define VAL_VERSION_MINOR 7u
 #define VAL_MIN_PACKET_SIZE 512u
 #define VAL_MAX_PACKET_SIZE 65536u
 #define VAL_MAX_FILENAME 127u
@@ -90,6 +90,15 @@ extern "C"
 
     typedef struct val_session_s val_session_t;
 
+    // Optional memory allocator used by VAL for dynamic session/tracking allocation.
+    // If not provided (alloc == NULL), VAL falls back to standard calloc/free.
+    typedef struct
+    {
+        void *(*alloc)(size_t size, void *context); // allocate 'size' bytes
+        void (*free)(void *ptr, void *context);     // free previously allocated pointer
+        void *context;                              // user context passed to hooks
+    } val_memory_allocator_t;
+
     // Log levels for runtime filtering (lower = higher priority)
     typedef enum
     {
@@ -122,6 +131,38 @@ extern "C"
         // on slow/embedded storage. Larger requests are reduced to this cap. FULL modes ignore this value.
         uint32_t crc_verify_bytes; // For tail modes only (0 = auto-calculate)
     } val_resume_config_t;
+
+    // Adaptive transmission window rungs (fastest has the lowest numeric value)
+    typedef enum
+    {
+        VAL_TX_WINDOW_64 = 0,     // 64-packet window
+        VAL_TX_WINDOW_32 = 1,     // 32-packet window
+        VAL_TX_WINDOW_16 = 2,     // 16-packet window
+        VAL_TX_WINDOW_8 = 3,      // 8-packet window
+        VAL_TX_WINDOW_4 = 4,      // 4-packet window
+        VAL_TX_WINDOW_2 = 5,      // 2-packet window
+        VAL_TX_STOP_AND_WAIT = 6, // 1 in flight
+    } val_tx_mode_t;
+
+    typedef struct
+    {
+        // Window rungs (discrete). These replace any prior mixed "streaming" enum.
+        val_tx_mode_t max_performance_mode;   // Max window rung supported by this endpoint (cap)
+        val_tx_mode_t preferred_initial_mode; // Initial rung (clamped to cap). If out of range, defaults to cap
+        // Streaming pacing preference (sender side). The receiver may veto via handshake negotiation.
+        // When enabled and allowed by peer, the sender interleaves short ACK polls derived from RTT to keep the pipe full.
+        uint8_t streaming_enabled; // 0 = off, 1 = on (default recommended: 1 on desktop, 0/1 on MCU)
+        // Receiver policy: whether this endpoint accepts an incoming sender streaming to it.
+        uint8_t accept_incoming_streaming; // 0 = peer must not stream to me; 1 = allowed (default: 1)
+        // Optional +1 MTU retransmit cache for faster Go-Back-N recovery (MCU default: 0)
+        uint8_t retransmit_cache_enabled; // 0/1
+        uint8_t reserved0;
+        // Adaptive stepping thresholds
+        uint16_t degrade_error_threshold;    // Errors before degrading one rung
+        uint16_t recovery_success_threshold; // Successes before upgrading one rung
+        uint16_t mode_sync_interval;         // Packets between mode sync messages (reserved; optional)
+        val_memory_allocator_t allocator;    // Allocator for session and tracking structures
+    } val_adaptive_tx_config_t;
 
     typedef struct
     {
@@ -212,6 +253,9 @@ extern "C"
         // Simple resume configuration
         val_resume_config_t resume;
 
+        // Adaptive transmission configuration (scaffolding; Phase 1)
+        val_adaptive_tx_config_t adaptive_tx;
+
         struct
         {
             // Filenames and sender_path are treated as UTF-8 on wire and in callbacks. Sanitizers preserve non-ASCII bytes
@@ -262,6 +306,20 @@ extern "C"
     void val_clean_path(const char *input, char *output, size_t output_size);
     uint32_t val_crc32(const void *data, size_t length);
 
+    // Adaptive TX helpers
+    // Get the sender's current adaptive transmission mode.
+    // Returns VAL_OK and writes to out_mode on success; VAL_ERR_INVALID_ARG on bad inputs.
+    val_status_t val_get_current_tx_mode(val_session_t *session, val_tx_mode_t *out_mode);
+
+    // Query negotiated streaming permissions for this session.
+    // On success, writes 0/1 to out_send_allowed (we may stream when sending) and out_recv_allowed (we accept peer streaming).
+    // Returns VAL_ERR_INVALID_ARG on bad inputs.
+    val_status_t val_get_streaming_allowed(val_session_t *session, int *out_send_allowed, int *out_recv_allowed);
+
+    // Get the effective negotiated packet size (MTU) for this session.
+    // Returns VAL_OK and writes to out_packet_size on success; VAL_ERR_INVALID_ARG on bad inputs.
+    val_status_t val_get_effective_packet_size(val_session_t *session, size_t *out_packet_size);
+
     // Query compiled-in features (what this build supports)
     uint32_t val_get_builtin_features(void);
 
@@ -280,6 +338,48 @@ extern "C"
     void val_config_validation_disabled(val_config_t *config);
     // Set custom validator with context
     void val_config_set_validator(val_config_t *config, val_metadata_validator_t validator, void *context);
+
+#if VAL_ENABLE_WIRE_AUDIT
+    // Optional compile-time wire audit: per-packet counters and inflight tracking to assert protocol invariants.
+    typedef struct
+    {
+        // Packet counters
+        uint64_t sent_hello;
+        uint64_t sent_send_meta;
+        uint64_t sent_resume_req;
+        uint64_t sent_resume_resp;
+        uint64_t sent_verify;
+        uint64_t sent_data;
+        uint64_t sent_data_ack;
+        uint64_t sent_done;
+        uint64_t sent_error;
+        uint64_t sent_eot;
+        uint64_t sent_eot_ack;
+        uint64_t sent_done_ack;
+        // Recv packet counters
+        uint64_t recv_hello;
+        uint64_t recv_send_meta;
+        uint64_t recv_resume_req;
+        uint64_t recv_resume_resp;
+        uint64_t recv_verify;
+        uint64_t recv_data;
+        uint64_t recv_data_ack;
+        uint64_t recv_done;
+        uint64_t recv_error;
+        uint64_t recv_eot;
+        uint64_t recv_eot_ack;
+        uint64_t recv_done_ack;
+        // Inflight and window audit (sender perspective)
+        uint32_t max_inflight_observed; // maximum simultaneous packets in flight during a file
+        uint32_t current_inflight;      // current inflight at last update
+    } val_wire_audit_t;
+
+    // Retrieve a snapshot of the current wire audit stats.
+    // Returns VAL_OK when auditing is compiled in; VAL_ERR_INVALID_ARG on bad inputs.
+    val_status_t val_get_wire_audit(val_session_t *session, val_wire_audit_t *out);
+    // Reset wire audit counters to zero.
+    val_status_t val_reset_wire_audit(val_session_t *session);
+#endif // VAL_ENABLE_WIRE_AUDIT
 
 #if VAL_ENABLE_METRICS
     // Optional compile-time metrics collection (enabled when VAL_ENABLE_METRICS=1 at build time)

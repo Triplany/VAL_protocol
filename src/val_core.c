@@ -146,6 +146,139 @@ uint32_t val_get_builtin_features(void)
     return VAL_BUILTIN_FEATURES;
 }
 
+// Public: expose current transmitter mode (thread-safe)
+val_status_t val_get_current_tx_mode(val_session_t *session, val_tx_mode_t *out_mode)
+{
+    if (!session || !out_mode)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    *out_mode = session->current_tx_mode;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
+// Public: expose negotiated streaming permissions (thread-safe)
+val_status_t val_get_streaming_allowed(val_session_t *session, int *out_send_allowed, int *out_recv_allowed)
+{
+    if (!session || !out_send_allowed || !out_recv_allowed)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    *out_send_allowed = session->send_streaming_allowed ? 1 : 0;
+    *out_recv_allowed = session->recv_streaming_allowed ? 1 : 0;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
+// Public: expose effective negotiated MTU (thread-safe)
+val_status_t val_get_effective_packet_size(val_session_t *session, size_t *out_packet_size)
+{
+    if (!session || !out_packet_size)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    *out_packet_size = session->effective_packet_size ? session->effective_packet_size : session->config->buffers.packet_size;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
+#if VAL_ENABLE_WIRE_AUDIT
+static void val__audit_zero(val_session_t *s)
+{
+    if (!s)
+        return;
+    memset(&s->audit, 0, sizeof(s->audit));
+}
+
+val_status_t val_get_wire_audit(val_session_t *session, val_wire_audit_t *out)
+{
+    if (!session || !out)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    // Map internal compact arrays to public struct
+    memset(out, 0, sizeof(*out));
+    // Sent
+    out->sent_hello = session->audit.sent[VAL_PKT_HELLO];
+    out->sent_send_meta = session->audit.sent[VAL_PKT_SEND_META];
+    out->sent_resume_req = session->audit.sent[VAL_PKT_RESUME_REQ];
+    out->sent_resume_resp = session->audit.sent[VAL_PKT_RESUME_RESP];
+    out->sent_verify = session->audit.sent[VAL_PKT_VERIFY];
+    out->sent_data = session->audit.sent[VAL_PKT_DATA];
+    out->sent_data_ack = session->audit.sent[VAL_PKT_DATA_ACK];
+    out->sent_done = session->audit.sent[VAL_PKT_DONE];
+    out->sent_error = session->audit.sent[VAL_PKT_ERROR];
+    out->sent_eot = session->audit.sent[VAL_PKT_EOT];
+    out->sent_eot_ack = session->audit.sent[VAL_PKT_EOT_ACK];
+    out->sent_done_ack = session->audit.sent[VAL_PKT_DONE_ACK];
+    // Recv
+    out->recv_hello = session->audit.recv[VAL_PKT_HELLO];
+    out->recv_send_meta = session->audit.recv[VAL_PKT_SEND_META];
+    out->recv_resume_req = session->audit.recv[VAL_PKT_RESUME_REQ];
+    out->recv_resume_resp = session->audit.recv[VAL_PKT_RESUME_RESP];
+    out->recv_verify = session->audit.recv[VAL_PKT_VERIFY];
+    out->recv_data = session->audit.recv[VAL_PKT_DATA];
+    out->recv_data_ack = session->audit.recv[VAL_PKT_DATA_ACK];
+    out->recv_done = session->audit.recv[VAL_PKT_DONE];
+    out->recv_error = session->audit.recv[VAL_PKT_ERROR];
+    out->recv_eot = session->audit.recv[VAL_PKT_EOT];
+    out->recv_eot_ack = session->audit.recv[VAL_PKT_EOT_ACK];
+    out->recv_done_ack = session->audit.recv[VAL_PKT_DONE_ACK];
+    // Window audit
+    out->max_inflight_observed = session->audit.max_inflight_observed;
+    out->current_inflight = session->audit.current_inflight;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
+val_status_t val_reset_wire_audit(val_session_t *session)
+{
+    if (!session)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    val__audit_zero(session);
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+#endif // VAL_ENABLE_WIRE_AUDIT
+
 // Metadata validation helpers
 void val_config_validation_disabled(val_config_t *config)
 {
@@ -312,6 +445,28 @@ static uint32_t validate_config_details(const val_config_t *cfg)
     return detail;
 }
 
+static uint32_t calculate_tracking_slots(val_tx_mode_t mode)
+{
+    switch (mode)
+    {
+    case VAL_TX_WINDOW_64:
+        return 64;
+    case VAL_TX_WINDOW_32:
+        return 32;
+    case VAL_TX_WINDOW_16:
+        return 16;
+    case VAL_TX_WINDOW_8:
+        return 8;
+    case VAL_TX_WINDOW_4:
+        return 4;
+    case VAL_TX_WINDOW_2:
+        return 2;
+    case VAL_TX_STOP_AND_WAIT:
+    default:
+        return 0;
+    }
+}
+
 val_status_t val_session_create(const val_config_t *config, val_session_t **out_session, uint32_t *out_detail)
 {
     if (out_detail)
@@ -326,7 +481,12 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
             *out_detail = detail;
         return VAL_ERR_INVALID_ARG;
     }
-    val_session_t *s = (val_session_t *)calloc(1, sizeof(val_session_t));
+    // Prefer user allocator when provided
+    val_session_t *s = NULL;
+    if (config && config->adaptive_tx.allocator.alloc)
+        s = (val_session_t *)config->adaptive_tx.allocator.alloc(sizeof(val_session_t), config->adaptive_tx.allocator.context);
+    else
+        s = (val_session_t *)calloc(1, sizeof(val_session_t));
     if (!s)
         return VAL_ERR_NO_MEMORY;
     // store by value to decouple from caller mutability, but keep pointer for callbacks
@@ -339,8 +499,32 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     s->peer_features = 0;
     s->last_error_code = VAL_OK;
     s->last_error_detail = 0;
+    // Initialize adaptive TX scaffolding
+    s->current_tx_mode = VAL_TX_STOP_AND_WAIT;
+    s->peer_tx_mode = VAL_TX_STOP_AND_WAIT;
+    s->min_negotiated_mode = VAL_TX_WINDOW_2;      // placeholder until handshake
+    s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT; // always supported
+    s->send_streaming_allowed = 0;
+    s->recv_streaming_allowed = 0;
+    s->consecutive_errors = 0;
+    s->consecutive_successes = 0;
+    s->packets_since_mode_change = 0;
+    s->packets_since_mode_sync = 0;
+    s->packets_in_flight = 0;
+    s->next_seq_to_send = 0;
+    s->oldest_unacked_seq = 0;
+    s->tracking_slots = NULL;
+    s->max_tracking_slots = 0;
+    s->current_file_handle = NULL;
+    s->current_file_position = 0;
+    s->total_file_size = 0;
+    s->mode_sync_sequence = 0;
+    s->last_mode_sync_time = 0;
 #if VAL_ENABLE_METRICS
     memset(&s->metrics, 0, sizeof(s->metrics));
+#endif
+#if VAL_ENABLE_WIRE_AUDIT
+    memset(&s->audit, 0, sizeof(s->audit));
 #endif
     // Initialize adaptive timing state
     // Clamp/sanitize config bounds: if invalid, swap, and default when zero.
@@ -389,6 +573,35 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     pthread_mutexattr_destroy(&attr);
 #endif
     *out_session = s;
+    // Allocate tracking slots based on configured max performance window rung
+    uint32_t slots = calculate_tracking_slots(config->adaptive_tx.max_performance_mode);
+    if (slots > 0)
+    {
+        size_t bytes = sizeof(val_inflight_packet_t) * (size_t)slots;
+        void *mem = NULL;
+        if (config->adaptive_tx.allocator.alloc)
+            mem = config->adaptive_tx.allocator.alloc(bytes, config->adaptive_tx.allocator.context);
+        else
+            mem = calloc(1, bytes);
+        if (!mem)
+        {
+            // Free session and return OOM
+#if defined(_WIN32)
+            DeleteCriticalSection(&s->lock);
+#else
+            pthread_mutex_destroy(&s->lock);
+#endif
+            if (config->adaptive_tx.allocator.free && config->adaptive_tx.allocator.alloc)
+                config->adaptive_tx.allocator.free(s, config->adaptive_tx.allocator.context);
+            else
+                free(s);
+            return VAL_ERR_NO_MEMORY;
+        }
+        s->tracking_slots = (val_inflight_packet_t *)mem;
+        s->max_tracking_slots = slots;
+        // zero-initialize
+        memset(s->tracking_slots, 0, bytes);
+    }
     return VAL_OK;
 }
 // --- Adaptive timeout helpers (RFC 6298-inspired, integer math) ---
@@ -516,7 +729,19 @@ void val_session_destroy(val_session_t *session)
 #else
     pthread_mutex_destroy(&session->lock);
 #endif
-    free(session);
+    // Free tracking slots
+    if (session->tracking_slots)
+    {
+        if (session->cfg.adaptive_tx.allocator.free && session->cfg.adaptive_tx.allocator.alloc)
+            session->cfg.adaptive_tx.allocator.free(session->tracking_slots, session->cfg.adaptive_tx.allocator.context);
+        else
+            free(session->tracking_slots);
+    }
+    // Free session
+    if (session->cfg.adaptive_tx.allocator.free && session->cfg.adaptive_tx.allocator.alloc)
+        session->cfg.adaptive_tx.allocator.free(session, session->cfg.adaptive_tx.allocator.context);
+    else
+        free(session);
 }
 
 // Packet helpers
@@ -598,6 +823,13 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
     }
     // Metrics: count one packet and bytes on successful low-level send
     val_metrics_add_sent(s, total_len);
+#if VAL_ENABLE_WIRE_AUDIT
+    if ((unsigned)type < 16u)
+    {
+        // Bump outside of the lock to keep overhead minimal; tearing is acceptable for test-only stats
+        s->audit.sent[(unsigned)type]++;
+    }
+#endif
     // Best-effort flush after control packets where timely delivery matters
     if (type == VAL_PKT_DONE || type == VAL_PKT_EOT || type == VAL_PKT_HELLO || type == VAL_PKT_ERROR)
     {
@@ -794,6 +1026,12 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #endif
     // Metrics: count one packet and total bytes received for this packet (hdr+payload+trailer)
     val_metrics_add_recv(s, (size_t)(sizeof(val_packet_header_t) + payload_len + sizeof(uint32_t)));
+#if VAL_ENABLE_WIRE_AUDIT
+    if ((unsigned)hdr->type < 16u)
+    {
+        s->audit.recv[(unsigned)hdr->type]++;
+    }
+#endif
     return VAL_OK;
 }
 
@@ -958,6 +1196,20 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     // Mask required/requested to negotiable bits only
     hello.required = s->config->features.required & negotiable;
     hello.requested = requested_sanitized; // already masked to negotiable
+    // Adaptive fields from config (window rungs + streaming flags)
+    hello.max_performance_mode = (uint8_t)s->cfg.adaptive_tx.max_performance_mode;
+    hello.preferred_initial_mode = (uint8_t)s->cfg.adaptive_tx.preferred_initial_mode;
+    hello.mode_sync_interval = s->cfg.adaptive_tx.mode_sync_interval;
+    uint8_t tx_cap = (s->cfg.adaptive_tx.streaming_enabled ? 1u : 0u);
+    uint8_t rx_acc = (s->cfg.adaptive_tx.accept_incoming_streaming ? 2u : 0u);
+    hello.streaming_flags = (uint8_t)(tx_cap | rx_acc);
+    hello.reserved_streaming[0] = 0;
+    hello.reserved_streaming[1] = 0;
+    hello.reserved_streaming[2] = 0;
+    hello.supported_features16 = 0;
+    hello.required_features16 = 0;
+    hello.requested_features16 = 0;
+    hello.reserved2 = 0;
     // Send LE-encoded hello
     val_handshake_t hello_le = hello;
     hello_le.magic = val_htole32(hello_le.magic);
@@ -965,6 +1217,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     hello_le.features = val_htole32(hello_le.features);
     hello_le.required = val_htole32(hello_le.required);
     hello_le.requested = val_htole32(hello_le.requested);
+    hello_le.mode_sync_interval = val_htole16(hello_le.mode_sync_interval);
     VAL_LOG_TRACE(s, "handshake(sender): sending HELLO");
     val_status_t st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
     if (st != VAL_OK)
@@ -1003,7 +1256,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
         --tries;
     }
     VAL_LOG_TRACEF(s, "handshake(sender): got pkt t=%u len=%u", (unsigned)t, (unsigned)len);
-    if (t != VAL_PKT_HELLO || len < sizeof(peer))
+    if (t != VAL_PKT_HELLO || len < sizeof(val_handshake_t))
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
@@ -1015,6 +1268,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     peer_h.features = val_letoh32(peer_h.features);
     peer_h.required = val_letoh32(peer_h.required);
     peer_h.requested = val_letoh32(peer_h.requested);
+    peer_h.mode_sync_interval = val_letoh16(peer_h.mode_sync_interval);
     if (peer_h.magic != VAL_MAGIC)
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
@@ -1048,6 +1302,29 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
 #if VAL_ENABLE_METRICS
     s->metrics.handshakes++;
 #endif
+    // Adaptive TX negotiation (window rung + streaming flags)
+    val_tx_mode_t local_max = s->cfg.adaptive_tx.max_performance_mode;
+    if (local_max < VAL_TX_WINDOW_64 || local_max > VAL_TX_STOP_AND_WAIT)
+        local_max = VAL_TX_STOP_AND_WAIT;
+    val_tx_mode_t peer_max = (val_tx_mode_t)peer_h.max_performance_mode;
+    if (peer_max < VAL_TX_WINDOW_64 || peer_max > VAL_TX_STOP_AND_WAIT)
+        peer_max = VAL_TX_STOP_AND_WAIT;
+    // Choose the conservative window rung cap shared by both: numerically max() because lower enum is faster
+    val_tx_mode_t negotiated_cap = (local_max > peer_max) ? local_max : peer_max;
+    s->min_negotiated_mode = negotiated_cap;       // best performance both support (largest window rung allowed)
+    s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT; // smallest rung always supported
+    // Streaming allowed from us to peer if we can stream and peer accepts incoming streaming
+    uint8_t peer_rx_accept = (peer_h.streaming_flags & 2u) ? 1u : 0u;
+    uint8_t local_tx_cap = (s->cfg.adaptive_tx.streaming_enabled ? 1u : 0u);
+    s->send_streaming_allowed = (uint8_t)(local_tx_cap && peer_rx_accept);
+    // Streaming we accept when peer sends to us (we advertise our accept flag)
+    s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.accept_incoming_streaming ? 1u : 0u);
+    // Initial window rung selection
+    val_tx_mode_t pref = s->cfg.adaptive_tx.preferred_initial_mode;
+    if (pref < negotiated_cap || pref > VAL_TX_STOP_AND_WAIT)
+        pref = negotiated_cap;
+    s->current_tx_mode = pref;
+    s->peer_tx_mode = s->current_tx_mode;
     // features compatibility: ensure required features supported. For now, just note the peer features; could gate behavior
     // later.
     (void)peer;
@@ -1090,7 +1367,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
             backoff <<= 1;
         --tries;
     }
-    if (t != VAL_PKT_HELLO || len < sizeof(peer))
+    if (t != VAL_PKT_HELLO || len < sizeof(val_handshake_t))
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
@@ -1141,6 +1418,20 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     hello.features = negotiable;
     hello.required = s->config->features.required & negotiable;
     hello.requested = requested_sanitized;
+    // Adaptive fields from config (window rungs + streaming flags)
+    hello.max_performance_mode = (uint8_t)s->cfg.adaptive_tx.max_performance_mode;
+    hello.preferred_initial_mode = (uint8_t)s->cfg.adaptive_tx.preferred_initial_mode;
+    hello.mode_sync_interval = s->cfg.adaptive_tx.mode_sync_interval;
+    uint8_t tx_cap = (s->cfg.adaptive_tx.streaming_enabled ? 1u : 0u);
+    uint8_t rx_acc = (s->cfg.adaptive_tx.accept_incoming_streaming ? 2u : 0u);
+    hello.streaming_flags = (uint8_t)(tx_cap | rx_acc);
+    hello.reserved_streaming[0] = 0;
+    hello.reserved_streaming[1] = 0;
+    hello.reserved_streaming[2] = 0;
+    hello.supported_features16 = 0;
+    hello.required_features16 = 0;
+    hello.requested_features16 = 0;
+    hello.reserved2 = 0;
     s->peer_features = peer_h.features;
     // Enforce peer's required optional features: must be subset of our advertised optional features
     uint32_t missing_local = (peer_h.required & negotiable) & ~hello.features;
@@ -1157,6 +1448,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     hello_le2.features = val_htole32(hello_le2.features);
     hello_le2.required = val_htole32(hello_le2.required);
     hello_le2.requested = val_htole32(hello_le2.requested);
+    hello_le2.mode_sync_interval = val_htole16(hello_le2.mode_sync_interval);
     VAL_LOG_TRACE(s, "handshake(receiver): sending HELLO response");
     st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le2, sizeof(hello_le2), 0);
     if (st == VAL_OK)
@@ -1165,6 +1457,27 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
 #if VAL_ENABLE_METRICS
         s->metrics.handshakes++;
 #endif
+        // Adaptive TX negotiation (window rung + streaming flags)
+        val_tx_mode_t local_max = s->cfg.adaptive_tx.max_performance_mode;
+        if (local_max < VAL_TX_WINDOW_64 || local_max > VAL_TX_STOP_AND_WAIT)
+            local_max = VAL_TX_STOP_AND_WAIT;
+        val_tx_mode_t peer_max = (val_tx_mode_t)peer_h.max_performance_mode;
+        if (peer_max < VAL_TX_WINDOW_64 || peer_max > VAL_TX_STOP_AND_WAIT)
+            peer_max = VAL_TX_STOP_AND_WAIT;
+        val_tx_mode_t negotiated_cap = (local_max > peer_max) ? local_max : peer_max;
+        s->min_negotiated_mode = negotiated_cap;
+        s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT;
+        // Streaming allowed from us to peer if we can stream and peer accepts
+        uint8_t peer_rx_accept = (peer_h.streaming_flags & 2u) ? 1u : 0u;
+        uint8_t local_tx_cap = (s->cfg.adaptive_tx.streaming_enabled ? 1u : 0u);
+        s->send_streaming_allowed = (uint8_t)(local_tx_cap && peer_rx_accept);
+        // What we accept for inbound is our advertised flag
+        s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.accept_incoming_streaming ? 1u : 0u);
+        val_tx_mode_t pref = s->cfg.adaptive_tx.preferred_initial_mode;
+        if (pref < negotiated_cap || pref > VAL_TX_STOP_AND_WAIT)
+            pref = negotiated_cap;
+        s->current_tx_mode = pref;
+        s->peer_tx_mode = s->current_tx_mode;
     }
     return st;
 }
@@ -1178,6 +1491,129 @@ val_status_t val_internal_send_error(val_session_t *s, val_status_t code, uint32
     p.code = (int32_t)val_htole32(code_bits);
     p.detail = val_htole32(detail);
     return val_internal_send_packet(s, VAL_PKT_ERROR, &p, sizeof(p), 0);
+}
+
+// Adaptive transmission mode management
+static val_tx_mode_t degrade_mode(val_tx_mode_t current)
+{
+    switch (current)
+    {
+    case VAL_TX_WINDOW_64:
+        return VAL_TX_WINDOW_32;
+    case VAL_TX_WINDOW_32:
+        return VAL_TX_WINDOW_16;
+    case VAL_TX_WINDOW_16:
+        return VAL_TX_WINDOW_8;
+    case VAL_TX_WINDOW_8:
+        return VAL_TX_WINDOW_4;
+    case VAL_TX_WINDOW_4:
+        return VAL_TX_WINDOW_2;
+    case VAL_TX_WINDOW_2:
+        return VAL_TX_STOP_AND_WAIT;
+    case VAL_TX_STOP_AND_WAIT:
+    default:
+        return VAL_TX_STOP_AND_WAIT; // can't degrade further
+    }
+}
+
+static val_tx_mode_t upgrade_mode(val_tx_mode_t current, val_tx_mode_t max_allowed)
+{
+    val_tx_mode_t next;
+    switch (current)
+    {
+    case VAL_TX_STOP_AND_WAIT:
+        next = VAL_TX_WINDOW_2;
+        break;
+    case VAL_TX_WINDOW_2:
+        next = VAL_TX_WINDOW_4;
+        break;
+    case VAL_TX_WINDOW_4:
+        next = VAL_TX_WINDOW_8;
+        break;
+    case VAL_TX_WINDOW_8:
+        next = VAL_TX_WINDOW_16;
+        break;
+    case VAL_TX_WINDOW_16:
+        next = VAL_TX_WINDOW_32;
+        break;
+    case VAL_TX_WINDOW_32:
+        next = VAL_TX_WINDOW_64;
+        break;
+    case VAL_TX_WINDOW_64:
+    default:
+        return current; // already at max
+    }
+    // Don't exceed negotiated capabilities
+    return (next <= max_allowed) ? next : current;
+}
+
+void val_internal_record_transmission_error(val_session_t *s)
+{
+    if (!s)
+        return;
+
+    s->consecutive_errors++;
+    s->consecutive_successes = 0; // reset success counter
+
+    // Check if we should degrade mode
+    uint16_t threshold = s->cfg.adaptive_tx.degrade_error_threshold;
+    if (threshold == 0)
+        threshold = 3; // default threshold
+
+    if (s->consecutive_errors >= threshold && s->current_tx_mode != VAL_TX_STOP_AND_WAIT)
+    {
+        val_tx_mode_t new_mode = degrade_mode(s->current_tx_mode);
+        VAL_LOG_INFOF(s, "adaptive: degrading mode from %u to %u after %u errors", (unsigned)s->current_tx_mode,
+                      (unsigned)new_mode, s->consecutive_errors);
+        s->current_tx_mode = new_mode;
+        s->consecutive_errors = 0; // reset after mode change
+        s->packets_since_mode_change = 0;
+
+        // Reallocate tracking slots if needed
+        uint32_t new_slots = calculate_tracking_slots(new_mode);
+        if (new_slots != s->max_tracking_slots)
+        {
+            // For simplicity, just reset tracking when changing modes
+            if (s->tracking_slots)
+                memset(s->tracking_slots, 0, sizeof(val_inflight_packet_t) * s->max_tracking_slots);
+        }
+    }
+}
+
+void val_internal_record_transmission_success(val_session_t *s)
+{
+    if (!s)
+        return;
+
+    s->consecutive_successes++;
+    s->consecutive_errors = 0; // reset error counter
+
+    // Check if we should upgrade mode
+    uint16_t threshold = s->cfg.adaptive_tx.recovery_success_threshold;
+    if (threshold == 0)
+        threshold = 10; // default threshold
+
+    if (s->consecutive_successes >= threshold && s->current_tx_mode != s->min_negotiated_mode)
+    {
+        val_tx_mode_t new_mode = upgrade_mode(s->current_tx_mode, s->min_negotiated_mode);
+        if (new_mode != s->current_tx_mode)
+        {
+            VAL_LOG_INFOF(s, "adaptive: upgrading mode from %u to %u after %u successes", (unsigned)s->current_tx_mode,
+                          (unsigned)new_mode, s->consecutive_successes);
+            s->current_tx_mode = new_mode;
+            s->consecutive_successes = 0; // reset after mode change
+            s->packets_since_mode_change = 0;
+
+            // Reallocate tracking slots if needed
+            uint32_t new_slots = calculate_tracking_slots(new_mode);
+            if (new_slots != s->max_tracking_slots)
+            {
+                // For simplicity, just reset tracking when changing modes
+                if (s->tracking_slots)
+                    memset(s->tracking_slots, 0, sizeof(val_inflight_packet_t) * s->max_tracking_slots);
+            }
+        }
+    }
 }
 
 #if VAL_ENABLE_METRICS

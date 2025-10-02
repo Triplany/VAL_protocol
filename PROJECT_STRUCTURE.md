@@ -35,6 +35,13 @@ Header layout (base protocol)
 - Buffers: The library uses caller-provided send/recv buffers sized to the configured MTU (`packet_size`).
 - Timeouts/retries: All blocking waits are bounded and configurable; see `DEVELOPMENT.md` for details.
 
+### Test harness and diagnostics
+- The Windows test harness installs OS-level guards to suppress crash/assert popups and includes a watchdog to abort hung tests.
+- An in-memory duplex transport simulates fragmentation, jitter, reordering, and timeouts deterministically.
+- Optional compile-time diagnostics:
+	- Metrics (`VAL_ENABLE_METRICS`): wire counters, timeouts, retransmits, CRC errors, file counts, RTT samples.
+	- Wire audit (`VAL_ENABLE_WIRE_AUDIT`): per-packet send/recv counters and inflight window auditing.
+
 ## Getting oriented
 
 Start with `include/val_protocol.h` for the API surface, then consult `src/val_core.c`, `src/val_sender.c`, and `src/val_receiver.c` for behavior. The example and unit tests show typical configuration and transport integration patterns.

@@ -8,6 +8,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 option(VAL_ENABLE_ERROR_STRINGS "Build optional error string utilities (host-only)" ON)
 option(VAL_ENABLE_METRICS "Enable compile-time protocol metrics counters and timing" OFF)
 option(VAL_ENABLE_ADVANCED_TX "Enable optional advanced transmitter/resume capabilities (sets VAL_FEAT_ADVANCED_TX)" OFF)
+option(VAL_ENABLE_WIRE_AUDIT "Enable compile-time wire audit counters and per-packet-type stats" OFF)
 
 # Platform-specific settings
 if(WIN32)
@@ -33,6 +34,13 @@ target_compile_definitions(val_protocol PUBLIC $<$<CONFIG:Debug>:VAL_LOG_LEVEL=5
 if(VAL_ENABLE_METRICS)
     target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_METRICS=1)
 endif()
+
+if(VAL_ENABLE_WIRE_AUDIT)
+    target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_WIRE_AUDIT=1)
+endif()
+
+# Always enable wire audit in Debug builds for tests/diagnostics
+target_compile_definitions(val_protocol PUBLIC $<$<CONFIG:Debug>:VAL_ENABLE_WIRE_AUDIT=1>)
 
 # Wire optional features (negotiated) compiled into this build.
 # This only affects the core library; examples/tests inherit behavior via the linked library.

@@ -46,6 +46,42 @@ extern "C"
     int test_tp_send(void *ctx, const void *data, size_t len);
     int test_tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received, uint32_t timeout_ms);
 
+    // Network simulation controls (disabled by default)
+    typedef struct
+    {
+        // Partial IO on send: when >0, the transport may accept fewer bytes than requested.
+        int enable_partial_send;
+        size_t min_send_chunk; // >=1
+        size_t max_send_chunk; // <= requested len
+
+        // Partial IO on recv: when >0, the transport may deliver fewer bytes than requested.
+        int enable_partial_recv;
+        size_t min_recv_chunk; // >=1
+        size_t max_recv_chunk; // <= buffer_size
+
+        // Jitter and spikes (ms)
+        int enable_jitter;
+        uint32_t jitter_min_ms;
+        uint32_t jitter_max_ms;
+        uint32_t spike_per_million; // additional spike probability
+        uint32_t spike_ms;          // added delay on spike
+
+        // Frame reordering: hold back frames and release out of order
+        int enable_reorder;
+        uint32_t reorder_per_million; // probability to enqueue frame instead of immediate send
+        size_t reorder_queue_max;     // cap queued frames; flush oldest when exceeded
+
+        // RNG seed for determinism
+        uint64_t rng_seed;
+        // Keep the first N bytes in-order and unmodified to allow clean handshake. 0 = disabled. Default tests use ~128.
+        uint32_t handshake_grace_bytes;
+    } ts_net_sim_t;
+
+    // Configure global network simulation (applies to all test transports)
+    void ts_net_sim_set(const ts_net_sim_t *cfg);
+    void ts_net_sim_reset(void);
+    void ts_rand_seed_set(uint64_t seed);
+
     // Minimal stdio wrappers used by tests
     void *ts_fopen(void *ctx, const char *path, const char *mode);
     int ts_fread(void *ctx, void *buffer, size_t size, size_t count, void *file);
@@ -53,6 +89,25 @@ extern "C"
     int ts_fseek(void *ctx, void *file, long offset, int whence);
     long ts_ftell(void *ctx, void *file);
     int ts_fclose(void *ctx, void *file);
+
+    // Filesystem fault injection (disabled by default)
+    typedef enum
+    {
+        TS_FS_FAIL_NONE = 0,
+        TS_FS_FAIL_SHORT_WRITE,
+        TS_FS_FAIL_DISK_FULL,
+        TS_FS_FAIL_EACCES
+    } ts_fs_fail_mode_t;
+    typedef struct
+    {
+        ts_fs_fail_mode_t mode;
+        uint64_t fail_after_total_bytes; // after this many bytes written across a file, subsequent writes fail
+        // Optional path prefix to deny writes (simulates EACCES/locked). If non-NULL, any fopen for write under this prefix
+        // fails.
+        const char *deny_write_prefix;
+    } ts_fs_faults_t;
+    void ts_fs_faults_set(const ts_fs_faults_t *f);
+    void ts_fs_faults_reset(void);
 
     // System hooks
     //
@@ -101,6 +156,42 @@ extern "C"
     // Accepts plain numbers or with k/m/g suffix (case-insensitive), e.g., "100k", "2M", "1g".
     // Returns default_value if the variable is unset or invalid. Clamps to at least 1 byte.
     size_t ts_env_size_bytes(const char *env_name, size_t default_value);
+
+    // Extra cross-platform helpers for tests to reduce duplication
+    int ts_remove_file(const char *path);                           // ignore if not present, returns 0 on success
+    int ts_write_pattern_file(const char *path, size_t size_bytes); // writes 0..255 repeating
+    int ts_files_equal(const char *a, const char *b);               // returns 1 if identical, 0 otherwise
+    // Fixed-buffer path join using platform separator; returns 0 on success
+    int ts_path_join(char *dst, size_t dst_size, const char *a, const char *b);
+    // Dynamic formatting and path-join (caller must free)
+    char *ts_dyn_sprintf(const char *fmt, ...);
+    char *ts_join_path_dyn(const char *a, const char *b);
+    // Convenience: create standard artifacts directories for a test case
+    // Produces <artifacts_root>/<case_name> and <...>/out
+    int ts_build_case_dirs(const char *case_name, char *basedir, size_t basedir_sz, char *outdir, size_t outdir_sz);
+    // Optional: small receiver warm-up without open-coding delay checks
+    void ts_receiver_warmup(const val_config_t *cfg, uint32_t ms);
+
+    // Fake clock support for deterministic time tests
+    typedef struct
+    {
+        uint32_t now_ms;     // current time
+        uint32_t wrap_after; // 0 to disable; when non-zero, modulo arithmetic simulates wrap
+        int enable_wrap;     // whether to wrap at 2^32 (or wrap_after)
+    } ts_fake_clock_t;
+    // Returns a get_ticks_ms function compatible with val_config_t that reads from the provided fake clock
+    uint32_t ts_fake_get_ticks_ms(void);
+    void ts_fake_delay_ms(uint32_t ms);
+    // Manage a process-global fake clock instance (disabled by default)
+    void ts_fake_clock_install(const ts_fake_clock_t *init);
+    void ts_fake_clock_uninstall(void);
+    void ts_fake_clock_advance(uint32_t delta_ms);
+    void ts_fake_clock_set(uint32_t now_ms);
+
+    // Watchdog: abort process if not cancelled within the timeout (helps catch hangs in CI)
+    typedef void *ts_cancel_token_t; // opaque
+    ts_cancel_token_t ts_start_timeout_guard(uint32_t timeout_ms, const char *name);
+    void ts_cancel_timeout_guard(ts_cancel_token_t token);
 
 #ifdef __cplusplus
 }

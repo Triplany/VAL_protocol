@@ -10,6 +10,12 @@
 #include <direct.h>
 #include <errno.h>
 #include <windows.h>
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#endif
 typedef CRITICAL_SECTION ts_mutex_t;
 typedef CONDITION_VARIABLE ts_cond_t;
 static void m_init(ts_mutex_t *m)
@@ -36,6 +42,55 @@ static void c_signal_all(ts_cond_t *c)
 {
     WakeAllConditionVariable(c);
 }
+#if defined(_WIN32)
+// Ensure Windows never shows modal error/assert dialogs during unit tests. This runs before main().
+static void __cdecl ts_win_invalid_parameter_handler(const wchar_t *expression, const wchar_t *function, const wchar_t *file,
+                                                     unsigned int line, uintptr_t pReserved)
+{
+    (void)pReserved;
+    fprintf(stderr, "Invalid parameter detected in function %ls. File: %ls Line: %u Expression: %ls\n",
+            function ? function : L"?", file ? file : L"?", line, expression ? expression : L"?");
+    fflush(stderr);
+    // Avoid invoking any UI, just abort
+    _exit(3);
+}
+
+static LONG WINAPI ts_win_unhandled_exception_filter(EXCEPTION_POINTERS *info)
+{
+    fprintf(stderr, "Unhandled exception 0x%08lx at address %p\n",
+            info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0ul,
+            info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : NULL);
+    fflush(stderr);
+    // Return EXECUTE_HANDLER so the process terminates without WER dialog
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void __cdecl ts_win_suppress_error_dialogs_init(void)
+{
+    // Disable Windows Error Reporting popups and critical-error boxes
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#if defined(SetThreadErrorMode)
+    DWORD prev = 0;
+    SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX, &prev);
+#endif
+#ifdef _MSC_VER
+    // Route CRT messages to stderr, not dialogs
+    _set_error_mode(_OUT_TO_STDERR);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _set_invalid_parameter_handler(ts_win_invalid_parameter_handler);
+    // Debug CRT: send asserts to stderr
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+#endif
+    SetUnhandledExceptionFilter(ts_win_unhandled_exception_filter);
+}
+
+// Use MSVC CRT initialization section to run our init routine before main in each test exe
+#pragma section(".CRT$XCU", read)
+__declspec(allocate(".CRT$XCU")) static void(__cdecl *ts_win_p_init)(void) = ts_win_suppress_error_dialogs_init;
+#endif // _WIN32
 #else
 #include <errno.h>
 #include <fcntl.h>
@@ -174,6 +229,77 @@ static uint32_t pcg32(void)
     return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
 }
 
+// Debug tracing for the transport simulator (enabled with TS_NET_SIM_TRACE=1)
+static int ts_net_trace_enabled(void)
+{
+    static int inited = 0;
+    static int enabled = 0;
+    if (!inited)
+    {
+#if defined(_WIN32)
+        char buf[8];
+        DWORD n = GetEnvironmentVariableA("TS_NET_SIM_TRACE", buf, (DWORD)sizeof(buf));
+        enabled = (n > 0 && buf[0] == '1') ? 1 : 0;
+#else
+        const char *v = getenv("TS_NET_SIM_TRACE");
+        enabled = (v && v[0] == '1') ? 1 : 0;
+#endif
+        inited = 1;
+    }
+    return enabled;
+}
+
+static void ts_net_tracef(const char *fmt, ...)
+{
+    if (!ts_net_trace_enabled())
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    va_end(ap);
+}
+
+// Optional low-level transport tracing (enabled with TS_TP_TRACE=1)
+static int ts_tp_trace_enabled(void)
+{
+    static int inited = 0;
+    static int enabled = 0;
+    if (!inited)
+    {
+#if defined(_WIN32)
+        char buf[8];
+        DWORD n = GetEnvironmentVariableA("TS_TP_TRACE", buf, (DWORD)sizeof(buf));
+        enabled = (n > 0 && buf[0] == '1') ? 1 : 0;
+#else
+        const char *v = getenv("TS_TP_TRACE");
+        enabled = (v && v[0] == '1') ? 1 : 0;
+#endif
+        inited = 1;
+    }
+    return enabled;
+}
+static void ts_tp_tracef(const char *fmt, ...)
+{
+    if (!ts_tp_trace_enabled())
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    va_end(ap);
+}
+
+void ts_rand_seed_set(uint64_t seed)
+{
+    // Advance the internal generator a seed-dependent number of steps to vary sequences deterministically.
+    uint64_t steps = (seed % 10000ull);
+    for (uint64_t i = 0; i < steps; ++i)
+        (void)pcg32();
+}
+
 void maybe_corrupt(uint8_t *data, size_t len, const fault_injection_t *f)
 {
     if (!f)
@@ -206,50 +332,322 @@ void test_duplex_free(test_duplex_t *d)
     test_fifo_destroy(d->b2a);
 }
 
+// ---- Network simulation implementation (disabled by default) ----
+static ts_net_sim_t g_net = {0};
+typedef struct
+{
+    uint8_t *data;
+    size_t len;
+} ts_frame_t;
+#define TS_REORDER_MAX 64
+typedef struct
+{
+    test_duplex_t *key; // transport context for which this queue applies (direction-specific)
+    ts_frame_t q[TS_REORDER_MAX];
+    size_t n;
+    size_t bytes_sent;
+} ts_reorder_entry_t;
+static ts_reorder_entry_t g_reorder_tbl[32];
+static ts_mutex_t g_reorder_lock;
+static int g_reorder_lock_inited = 0;
+static void reorder_lock_init_once(void)
+{
+    if (!g_reorder_lock_inited)
+    {
+        m_init(&g_reorder_lock);
+        g_reorder_lock_inited = 1;
+    }
+}
+static ts_reorder_entry_t *reorder_entry_for(test_duplex_t *d)
+{
+    reorder_lock_init_once();
+    m_lock(&g_reorder_lock);
+    ts_reorder_entry_t *slot = NULL;
+    for (size_t i = 0; i < sizeof(g_reorder_tbl) / sizeof(g_reorder_tbl[0]); ++i)
+    {
+        if (g_reorder_tbl[i].key == d)
+        {
+            slot = &g_reorder_tbl[i];
+            break;
+        }
+        if (!slot && g_reorder_tbl[i].key == NULL)
+            slot = &g_reorder_tbl[i];
+    }
+    if (slot && slot->key == NULL)
+    {
+        slot->key = d;
+        slot->n = 0;
+        slot->bytes_sent = 0;
+    }
+    m_unlock(&g_reorder_lock);
+    return slot;
+}
+
+void ts_net_sim_set(const ts_net_sim_t *cfg)
+{
+    g_net = cfg ? *cfg : (ts_net_sim_t){0};
+}
+void ts_net_sim_reset(void)
+{
+    memset(&g_net, 0, sizeof(g_net));
+    reorder_lock_init_once();
+    m_lock(&g_reorder_lock);
+    for (size_t i = 0; i < sizeof(g_reorder_tbl) / sizeof(g_reorder_tbl[0]); ++i)
+    {
+        for (size_t j = 0; j < g_reorder_tbl[i].n; ++j)
+            free(g_reorder_tbl[i].q[j].data);
+        g_reorder_tbl[i].key = NULL;
+        g_reorder_tbl[i].n = 0;
+    }
+    m_unlock(&g_reorder_lock);
+}
+
+static size_t rnd_between(size_t lo, size_t hi)
+{
+    if (lo == 0)
+        lo = 1;
+    if (hi < lo)
+        hi = lo;
+    uint32_t r = pcg32();
+    size_t span = hi - lo + 1;
+    return lo + (r % span);
+}
+
+static void maybe_delay(void)
+{
+    if (!g_net.enable_jitter)
+        return;
+    uint32_t base = (uint32_t)rnd_between(g_net.jitter_min_ms, g_net.jitter_max_ms);
+    uint32_t d = base;
+    if (g_net.spike_per_million && (pcg32() % 1000000u) < g_net.spike_per_million)
+        d += g_net.spike_ms;
+    if (d)
+        ts_delay(d);
+}
+
+static void reorder_enqueue(test_duplex_t *d, const uint8_t *data, size_t len)
+{
+    ts_reorder_entry_t *e = reorder_entry_for(d);
+    if (!e)
+        return;
+    m_lock(&g_reorder_lock);
+    if (e->n >= TS_REORDER_MAX)
+    {
+        free(e->q[0].data);
+        memmove(&e->q[0], &e->q[1], sizeof(e->q[0]) * (TS_REORDER_MAX - 1));
+        e->n = TS_REORDER_MAX - 1;
+    }
+    e->q[e->n].data = (uint8_t *)malloc(len);
+    e->q[e->n].len = len;
+    memcpy(e->q[e->n].data, data, len);
+    e->n++;
+    m_unlock(&g_reorder_lock);
+}
+
+static int reorder_dequeue_some(test_duplex_t *d)
+{
+    ts_reorder_entry_t *e = reorder_entry_for(d);
+    if (!e)
+        return 0;
+    m_lock(&g_reorder_lock);
+    if (e->n == 0)
+    {
+        m_unlock(&g_reorder_lock);
+        return 0;
+    }
+    size_t n = 1 + (pcg32() % e->n);
+    for (size_t i = 0; i < n; ++i)
+    {
+        size_t idx = e->n - 1; // LIFO emit for out-of-order
+        test_fifo_push(d->a2b, e->q[idx].data, e->q[idx].len);
+        free(e->q[idx].data);
+        e->n--;
+    }
+    m_unlock(&g_reorder_lock);
+    return (int)n;
+}
+
+static void net_sim_send(const void *data, size_t len, test_duplex_t *d)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    size_t left = len;
+    ts_reorder_entry_t *e = reorder_entry_for(d);
+    while (left > 0)
+    {
+        size_t chunk = left;
+        if (g_net.enable_partial_send)
+        {
+            // Bound both lo and hi by the remaining bytes to avoid overruns
+            size_t lo = g_net.min_send_chunk ? g_net.min_send_chunk : 1;
+            if (lo > left)
+                lo = left;
+            size_t hi = g_net.max_send_chunk ? g_net.max_send_chunk : left;
+            if (hi > left)
+                hi = left;
+            if (hi < lo)
+                hi = lo;
+            chunk = rnd_between(lo, hi);
+        }
+        maybe_delay();
+        int drop = (d->faults.drop_frame_per_million && (pcg32() % 1000000u < d->faults.drop_frame_per_million));
+        int dup = (!drop && d->faults.dup_frame_per_million && (pcg32() % 1000000u < d->faults.dup_frame_per_million));
+        if (!drop)
+        {
+            // Avoid reordering/fragmenting the very first bytes to prevent HELLO/control desync.
+            size_t sent = 0;
+            if (e)
+                sent = e->bytes_sent;
+            size_t grace = g_net.handshake_grace_bytes;
+            int allow_reorder = g_net.enable_reorder && (!grace || sent >= grace);
+            if (allow_reorder && (pcg32() % 1000000u < g_net.reorder_per_million))
+            {
+                ts_net_tracef("SEND d=%p chunk=%zu REORDER enqueue (q later)", (void *)d, chunk);
+                reorder_enqueue(d, p, chunk);
+                (void)reorder_dequeue_some(d);
+            }
+            else
+            {
+                uint8_t *tmp = (uint8_t *)malloc(chunk);
+                memcpy(tmp, p, chunk);
+                maybe_corrupt(tmp, chunk, &d->faults);
+                test_fifo_push(d->a2b, tmp, chunk);
+                free(tmp);
+                ts_net_tracef("SEND d=%p chunk=%zu DIRECT", (void *)d, chunk);
+            }
+        }
+        if (dup)
+        {
+            uint8_t *tmp = (uint8_t *)malloc(chunk);
+            memcpy(tmp, p, chunk);
+            maybe_corrupt(tmp, chunk, &d->faults);
+            test_fifo_push(d->a2b, tmp, chunk);
+            free(tmp);
+            ts_net_tracef("SEND d=%p DUP chunk=%zu", (void *)d, chunk);
+        }
+        if (e)
+        {
+            m_lock(&g_reorder_lock);
+            e->bytes_sent += chunk;
+            m_unlock(&g_reorder_lock);
+        }
+        p += chunk;
+        left -= chunk;
+    }
+    // Flush any remaining reordered frames to ensure nothing is stuck after sender completes
+    while (reorder_dequeue_some(d) > 0)
+        ;
+}
+
+static int net_sim_recv(void *buffer, size_t buffer_size, size_t *received, uint32_t timeout_ms, test_duplex_t *d)
+{
+    if (buffer_size == 0)
+    {
+        if (received)
+            *received = 0;
+        return 0;
+    }
+    size_t total = 0;
+    uint8_t *dst = (uint8_t *)buffer;
+    uint32_t waited = 0;
+    const uint32_t step = 10; // poll interval for timeout
+    while (total < buffer_size)
+    {
+        size_t remaining = buffer_size - total;
+        size_t want = remaining;
+        if (g_net.enable_partial_recv)
+        {
+            size_t lo = g_net.min_recv_chunk ? g_net.min_recv_chunk : 1;
+            if (lo > remaining)
+                lo = remaining;
+            size_t hi = g_net.max_recv_chunk && g_net.max_recv_chunk <= remaining ? g_net.max_recv_chunk : remaining;
+            if (hi < lo)
+                hi = lo;
+            want = rnd_between(lo, hi);
+        }
+        // For stream semantics, do not reorder bytes here; just allow jitter.
+        maybe_delay();
+        int ok = test_fifo_pop_exact(d->b2a, dst + total, want, step);
+        if (!ok)
+        {
+            waited += step;
+            if (timeout_ms && waited >= timeout_ms)
+            {
+                if (received)
+                    *received = 0; // indicate no data read
+                ts_net_tracef("RECV d=%p TIMEOUT after %u ms (need=%zu got=%zu)", (void *)d, waited, buffer_size, total);
+                // Return 0 with received=0 to signal timeout (recoverable) to core
+                return 0;
+            }
+            continue;
+        }
+        total += want;
+        ts_net_tracef("RECV d=%p got=%zu/%zu", (void *)d, total, buffer_size);
+    }
+    if (received)
+        *received = buffer_size;
+    ts_net_tracef("RECV d=%p DONE size=%zu", (void *)d, buffer_size);
+    return 0;
+}
+
 int test_tp_send(void *ctx, const void *data, size_t len)
 {
     test_duplex_t *d = (test_duplex_t *)ctx;
-    // Potentially drop or duplicate frame; apply corruption to a copy to avoid mutating caller buffer
+    // Use simulation when any knob is enabled; otherwise preserve legacy behavior
+    if (g_net.enable_partial_send || g_net.enable_reorder || g_net.enable_jitter)
+    {
+        net_sim_send(data, len, d);
+        return (int)len;
+    }
+    // Legacy path
     uint8_t *tmp = (uint8_t *)malloc(len);
     memcpy(tmp, data, len);
     maybe_corrupt(tmp, len, &d->faults);
-
-    // Drop?
     int drop = (d->faults.drop_frame_per_million && (pcg32() % 1000000u < d->faults.drop_frame_per_million));
     int dup = (!drop && d->faults.dup_frame_per_million && (pcg32() % 1000000u < d->faults.dup_frame_per_million));
-
     if (!drop)
-    {
         test_fifo_push(d->a2b, tmp, len);
-    }
     if (dup)
-    {
         test_fifo_push(d->a2b, tmp, len);
-    }
     free(tmp);
-    return (int)len; // behave like a write that accepted len bytes regardless
+    return (int)len;
 }
 
 int test_tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received, uint32_t timeout_ms)
 {
     test_duplex_t *d = (test_duplex_t *)ctx;
+    if (g_net.enable_partial_recv || g_net.enable_reorder || g_net.enable_jitter)
+        return net_sim_recv(buffer, buffer_size, received, timeout_ms, d);
     int ok = test_fifo_pop_exact(d->b2a, (uint8_t *)buffer, buffer_size, timeout_ms);
     if (!ok)
     {
         if (received)
-            *received = 0; // signal timeout/no data
-        return 0;          // timeout is not a hard error; let protocol map it to VAL_ERR_TIMEOUT
+            *received = 0;
+        // Return 0 to indicate timeout; core will treat got!=expected as VAL_ERR_TIMEOUT
+        ts_tp_tracef("LEGACY RECV d=%p TIMEOUT need=%zu", (void *)d, buffer_size);
+        return 0;
     }
     if (received)
         *received = buffer_size;
+    ts_tp_tracef("LEGACY RECV d=%p DONE size=%zu", (void *)d, buffer_size);
     return 0;
+}
+
+// ---- Filesystem fault injection (Windows path only; no-op elsewhere) ----
+static ts_fs_faults_t g_fs = {0};
+void ts_fs_faults_set(const ts_fs_faults_t *f)
+{
+    g_fs = f ? *f : (ts_fs_faults_t){0};
+}
+void ts_fs_faults_reset(void)
+{
+    memset(&g_fs, 0, sizeof(g_fs));
 }
 
 // Platform-native file I/O wrappers (avoid FILE dependency for analyzers)
 typedef struct ts_file_s
 {
 #if defined(_WIN32)
-    HANDLE h;
+    FILE *fp;
 #else
     int fd;
 #endif
@@ -259,36 +657,21 @@ void *ts_fopen(void *ctx, const char *path, const char *mode)
 {
     (void)ctx;
 #if defined(_WIN32)
-    DWORD access = 0, creation = 0;
-    int append = 0;
+    (void)path;
+    (void)mode;
+    // Use CRT FILE* on Windows for simpler semantics and to avoid rare ReadFile() 0-byte anomalies under AV/scanners
+    const char *m = "rb";
     if (mode && mode[0] == 'r')
-    {
-        access = GENERIC_READ;
-        creation = OPEN_EXISTING;
-    }
+        m = "rb";
     else if (mode && mode[0] == 'a')
-    {
-        // Append: open or create, then seek to end before writing
-        access = FILE_APPEND_DATA | GENERIC_WRITE; // allow normal WriteFile
-        creation = OPEN_ALWAYS;
-        append = 1;
-    }
+        m = "ab";
     else
-    {
-        // Default write: truncate/create new
-        access = GENERIC_WRITE;
-        creation = CREATE_ALWAYS;
-    }
-    HANDLE h = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE)
+        m = "wb";
+    FILE *fp = fopen(path, m);
+    if (!fp)
         return NULL;
     ts_file_t *f = (ts_file_t *)calloc(1, sizeof(*f));
-    f->h = h;
-    if (append)
-    {
-        LARGE_INTEGER zero = {0};
-        SetFilePointerEx(f->h, zero, NULL, FILE_END);
-    }
+    f->fp = fp;
     return f;
 #else
     int flags = 0;
@@ -326,16 +709,14 @@ int ts_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
     uint8_t *dst = (uint8_t *)buffer;
     size_t read_total = 0;
 #if defined(_WIN32)
+    // Use fread for robustness with CRT FILE*
     while (read_total < total)
     {
-        DWORD got = 0;
         size_t want = total - read_total;
-        DWORD chunk = (want > 0x7FFFFFFFu) ? 0x7FFFFFFFu : (DWORD)want; // clamp to signed 31-bit to be safe
-        if (!ReadFile(f->h, dst + read_total, chunk, &got, NULL))
-            break;
+        size_t got = fread(dst + read_total, 1, want, f->fp);
         if (got == 0)
-            break; // EOF
-        read_total += (size_t)got;
+            break; // EOF or error
+        read_total += got;
     }
 #else
     while (read_total < total)
@@ -355,8 +736,29 @@ int ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *fi
     ts_file_t *f = (ts_file_t *)file;
     size_t bytes = size * count;
 #if defined(_WIN32)
-    DWORD put = 0;
-    if (!WriteFile(f->h, buffer, (DWORD)bytes, &put, NULL))
+    // Simulate failures/short writes if configured
+    size_t allowed = bytes;
+    if (g_fs.mode != TS_FS_FAIL_NONE)
+    {
+        long pos = ftell(f->fp);
+        if (pos < 0)
+            pos = 0;
+        uint64_t sofar = (uint64_t)pos;
+        if (g_fs.deny_write_prefix)
+        {
+            // Without path here we approximate by denying any write when deny_write_prefix is set
+            return 0;
+        }
+        if (g_fs.fail_after_total_bytes)
+        {
+            if (sofar >= g_fs.fail_after_total_bytes)
+                allowed = 0;
+            else if (sofar + allowed > g_fs.fail_after_total_bytes)
+                allowed = (size_t)(g_fs.fail_after_total_bytes - sofar);
+        }
+    }
+    size_t put = fwrite(buffer, 1, allowed, f->fp);
+    if (put == 0)
         return 0;
     return (int)(put / (size ? size : 1));
 #else
@@ -371,10 +773,7 @@ int ts_fseek(void *ctx, void *file, long offset, int whence)
     (void)ctx;
     ts_file_t *f = (ts_file_t *)file;
 #if defined(_WIN32)
-    LARGE_INTEGER li;
-    li.QuadPart = offset;
-    DWORD movemethod = (whence == 0 ? FILE_BEGIN : whence == 1 ? FILE_CURRENT : FILE_END);
-    return SetFilePointerEx(f->h, li, NULL, movemethod) ? 0 : -1;
+    return fseek(f->fp, offset, whence);
 #else
     return lseek(f->fd, offset, whence) < 0 ? -1 : 0;
 #endif
@@ -384,11 +783,8 @@ long ts_ftell(void *ctx, void *file)
     (void)ctx;
     ts_file_t *f = (ts_file_t *)file;
 #if defined(_WIN32)
-    LARGE_INTEGER zero = {0};
-    LARGE_INTEGER pos;
-    if (!SetFilePointerEx(f->h, zero, &pos, FILE_CURRENT))
-        return -1;
-    return (long)pos.QuadPart;
+    long p = ftell(f->fp);
+    return p;
 #else
     off_t p = lseek(f->fd, 0, SEEK_CUR);
     return (long)p;
@@ -399,7 +795,7 @@ int ts_fclose(void *ctx, void *file)
     (void)ctx;
     ts_file_t *f = (ts_file_t *)file;
 #if defined(_WIN32)
-    int ok = CloseHandle(f->h) ? 0 : -1;
+    int ok = fclose(f->fp);
     free(f);
     return ok;
 #else
@@ -672,6 +1068,79 @@ void ts_join_thread(ts_thread_t th)
 #endif
 }
 
+// ---- Timeout guard (watchdog) ----
+typedef struct
+{
+    uint32_t to_ms;
+    volatile int cancel;
+    char name[64];
+} ts_guard_t;
+#if defined(_WIN32)
+static DWORD WINAPI ts_guard_fn(LPVOID p)
+{
+    ts_guard_t *g = (ts_guard_t *)p;
+    uint32_t waited = 0;
+    while (!g->cancel && waited < g->to_ms)
+    {
+        Sleep(50);
+        waited += 50;
+    }
+    if (!g->cancel)
+    {
+        fprintf(stderr, "[WATCHDOG] Test '%s' exceeded %u ms; terminating.\n", g->name, g->to_ms);
+        fflush(stderr);
+        ExitProcess(3);
+    }
+    free(g);
+    return 0;
+}
+#else
+static void *ts_guard_fn(void *p)
+{
+    ts_guard_t *g = (ts_guard_t *)p;
+    uint32_t waited = 0;
+    while (!g->cancel && waited < g->to_ms)
+    {
+        struct timespec req = {0};
+        req.tv_sec = 0;
+        req.tv_nsec = 50 * 1000000L;
+        nanosleep(&req, NULL);
+        waited += 50;
+    }
+    if (!g->cancel)
+    {
+        fprintf(stderr, "[WATCHDOG] Test '%s' exceeded %u ms; terminating.\n", g->name, g->to_ms);
+        fflush(stderr);
+        _exit(3);
+    }
+    free(g);
+    return NULL;
+}
+#endif
+
+ts_cancel_token_t ts_start_timeout_guard(uint32_t timeout_ms, const char *name)
+{
+    ts_guard_t *g = (ts_guard_t *)calloc(1, sizeof(*g));
+    g->to_ms = timeout_ms;
+    g->cancel = 0;
+    snprintf(g->name, sizeof(g->name), "%s", name ? name : "test");
+#if defined(_WIN32)
+    (void)CreateThread(NULL, 0, ts_guard_fn, g, 0, NULL);
+#else
+    pthread_t tid;
+    pthread_create(&tid, NULL, ts_guard_fn, g);
+    pthread_detach(tid);
+#endif
+    return (ts_cancel_token_t)g;
+}
+void ts_cancel_timeout_guard(ts_cancel_token_t token)
+{
+    if (!token)
+        return;
+    ts_guard_t *g = (ts_guard_t *)token;
+    g->cancel = 1;
+}
+
 uint64_t ts_file_size(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -745,4 +1214,227 @@ size_t ts_env_size_bytes(const char *env_name, size_t default_value)
     if (res > (unsigned long long)~(size_t)0)
         res = (unsigned long long)~(size_t)0;
     return (size_t)res;
+}
+
+// Extra cross-platform helpers for tests
+int ts_remove_file(const char *path)
+{
+    if (!path || !*path)
+        return 0;
+#if defined(_WIN32)
+    DeleteFileA(path);
+    return 0;
+#else
+    (void)remove(path);
+    return 0;
+#endif
+}
+
+int ts_write_pattern_file(const char *path, size_t size_bytes)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return -1;
+    for (size_t i = 0; i < size_bytes; ++i)
+    {
+        unsigned char b = (unsigned char)(i & 0xFF);
+        if (fputc(b, f) == EOF)
+        {
+            fclose(f);
+            return -1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+int ts_files_equal(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
+    if (!fa || !fb)
+    {
+        if (fa)
+            fclose(fa);
+        if (fb)
+            fclose(fb);
+        return 0;
+    }
+    int eq = 1;
+    const size_t K = 4096;
+    unsigned char *ba = (unsigned char *)malloc(K);
+    unsigned char *bb = (unsigned char *)malloc(K);
+    if (!ba || !bb)
+    {
+        free(ba);
+        free(bb);
+        fclose(fa);
+        fclose(fb);
+        return 0;
+    }
+    for (;;)
+    {
+        size_t ra = fread(ba, 1, K, fa);
+        size_t rb = fread(bb, 1, K, fb);
+        if (ra != rb || memcmp(ba, bb, ra) != 0)
+        {
+            eq = 0;
+            break;
+        }
+        if (ra == 0) // both EOF
+            break;
+    }
+    free(ba);
+    free(bb);
+    fclose(fa);
+    fclose(fb);
+    return eq;
+}
+
+int ts_path_join(char *dst, size_t dst_size, const char *a, const char *b)
+{
+    if (!dst || dst_size == 0 || !a || !b)
+        return -1;
+#if defined(_WIN32)
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    int need_sep = (la > 0 && a[la - 1] != sep) ? 1 : 0;
+    if (lb > 0 && b[0] == sep)
+        need_sep = 0;
+    size_t need = la + (size_t)need_sep + lb + 1;
+    if (need > dst_size)
+        return -1;
+    memcpy(dst, a, la);
+    size_t pos = la;
+    if (need_sep)
+        dst[pos++] = sep;
+    memcpy(dst + pos, b, lb);
+    dst[pos + lb] = '\0';
+    return 0;
+}
+
+char *ts_dyn_sprintf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    va_list ap2;
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+    {
+        va_end(ap2);
+        return NULL;
+    }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf)
+    {
+        va_end(ap2);
+        return NULL;
+    }
+    vsnprintf(buf, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
+    return buf;
+}
+
+char *ts_join_path_dyn(const char *a, const char *b)
+{
+#if defined(_WIN32)
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    int need_sep = (la > 0 && a[la - 1] != sep) ? 1 : 0;
+    if (lb > 0 && b[0] == sep)
+        need_sep = 0;
+    size_t len = la + (size_t)need_sep + lb;
+    char *out = (char *)malloc(len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, a, la);
+    size_t pos = la;
+    if (need_sep)
+        out[pos++] = sep;
+    memcpy(out + pos, b, lb);
+    out[len] = '\0';
+    return out;
+}
+
+int ts_build_case_dirs(const char *case_name, char *basedir, size_t basedir_sz, char *outdir, size_t outdir_sz)
+{
+    char root[512];
+    if (!ts_get_artifacts_root(root, sizeof(root)))
+        return -1;
+    char tmp[1024];
+    if (ts_path_join(tmp, sizeof(tmp), root, case_name) != 0)
+        return -1;
+    if (ts_ensure_dir(tmp) != 0)
+        return -1;
+    if (ts_path_join(basedir, basedir_sz, root, case_name) != 0)
+        return -1;
+    if (ts_path_join(outdir, outdir_sz, basedir, "out") != 0)
+        return -1;
+    if (ts_ensure_dir(outdir) != 0)
+        return -1;
+    return 0;
+}
+
+void ts_receiver_warmup(const val_config_t *cfg, uint32_t ms)
+{
+    if (cfg && cfg->system.delay_ms)
+        cfg->system.delay_ms(ms);
+}
+
+// ---- Fake clock support ----
+static struct
+{
+    int installed;
+    ts_fake_clock_t clk;
+} g_fake = {0};
+uint32_t ts_fake_get_ticks_ms(void)
+{
+    if (!g_fake.installed)
+        return ts_ticks();
+    uint32_t now = g_fake.clk.now_ms;
+    if (g_fake.clk.enable_wrap)
+    {
+        uint32_t mod = g_fake.clk.wrap_after ? g_fake.clk.wrap_after : 0u;
+        if (mod)
+            now = now % mod;
+    }
+    return now;
+}
+void ts_fake_clock_install(const ts_fake_clock_t *init)
+{
+    g_fake.installed = 1;
+    g_fake.clk = init ? *init : (ts_fake_clock_t){0};
+}
+void ts_fake_clock_uninstall(void)
+{
+    g_fake.installed = 0;
+    memset(&g_fake.clk, 0, sizeof(g_fake.clk));
+}
+void ts_fake_clock_advance(uint32_t delta_ms)
+{
+    if (!g_fake.installed)
+        return;
+    g_fake.clk.now_ms += delta_ms;
+}
+void ts_fake_clock_set(uint32_t now_ms)
+{
+    if (!g_fake.installed)
+        return;
+    g_fake.clk.now_ms = now_ms;
+}
+void ts_fake_delay_ms(uint32_t ms)
+{
+    if (g_fake.installed)
+        ts_fake_clock_advance(ms);
+    else
+        ts_delay(ms);
 }

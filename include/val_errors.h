@@ -20,6 +20,10 @@ typedef enum
     VAL_ERR_PACKET_SIZE_MISMATCH = -9,
     VAL_ERR_FEATURE_NEGOTIATION = -10,
     VAL_ERR_ABORTED = -11,
+    // Adaptive TX related (Phase 1 scaffolding)
+    VAL_ERR_MODE_NEGOTIATION_FAILED = -12,
+    VAL_ERR_MODE_SYNC_FAILED = -13,
+    VAL_ERR_UNSUPPORTED_TX_MODE = -14,
 } val_status_t;
 
 // Error detail mask (32-bit) layout:

@@ -149,6 +149,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         uint32_t t0 = s->config->system.get_ticks_ms();
         s->timing.in_retransmit = 0;
+
         for (;;)
         {
             if (!val_internal_transport_is_connected(s))
@@ -441,7 +442,395 @@ static void val_emit_progress_sender(val_session_t *s, val_send_progress_ctx_t *
     s->config->callbacks.on_progress(&info);
 }
 
+// Forward declaration for the legacy stop-and-wait path used during Phase 1
+static val_status_t val__send_file_stop_and_wait(val_session_t *s, const char *filepath, const char *sender_path,
+                                                 void *progress_ctx);
+
+// Adaptive controller entrypoint - routes to appropriate sender based on negotiated mode
+static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepath, const char *sender_path, void *progress_ctx)
+{
+    // Branch by current mode; map STREAMING to largest window
+    switch (s->current_tx_mode)
+    {
+    case VAL_TX_STOP_AND_WAIT:
+        return val__send_file_stop_and_wait(s, filepath, sender_path, progress_ctx);
+    case VAL_TX_WINDOW_2:
+    case VAL_TX_WINDOW_4:
+    case VAL_TX_WINDOW_8:
+    case VAL_TX_WINDOW_16:
+    case VAL_TX_WINDOW_32:
+    case VAL_TX_WINDOW_64:
+        break; // handled below by windowed sender
+    default:
+        return val__send_file_stop_and_wait(s, filepath, sender_path, progress_ctx);
+    }
+    // Fallthrough: windowed/streaming implementation
+    // Map mode to window size
+    uint32_t win = 2;
+    switch (s->current_tx_mode)
+    {
+    case VAL_TX_WINDOW_2:
+        win = 2;
+        break;
+    case VAL_TX_WINDOW_4:
+        win = 4;
+        break;
+    case VAL_TX_WINDOW_8:
+        win = 8;
+        break;
+    case VAL_TX_WINDOW_16:
+        win = 16;
+        break;
+    case VAL_TX_WINDOW_32:
+        win = 32;
+        break;
+    case VAL_TX_WINDOW_64:
+        win = 64;
+        break;
+    default:
+        win = 2;
+        break;
+    }
+    // Use a simplified Go-Back-N cumulative ACK approach
+    // Gather meta
+    uint64_t size = 0;
+    char filename[VAL_MAX_FILENAME + 1];
+    VAL_LOG_INFOF(s, "send_file(win=%u): begin filepath='%s'", (unsigned)win, filepath ? filepath : "<null>");
+    val_status_t st = get_file_size_and_name(s, filepath, &size, filename);
+    if (st != VAL_OK)
+        return st;
+    const char *reported_path = (sender_path && sender_path[0]) ? sender_path : filepath;
+    // Compute file CRC32 (one pass)
+    void *fcrc = s->config->filesystem.fopen(s->config->filesystem.fs_context, filepath, "rb");
+    if (!fcrc)
+        return VAL_ERR_IO;
+    uint32_t crc_state = val_internal_crc32_init(s);
+    uint8_t *crc_buf = (uint8_t *)s->config->buffers.recv_buffer;
+    if (!crc_buf)
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, fcrc);
+        return VAL_ERR_INVALID_ARG;
+    }
+    size_t chunk_sz = (s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size);
+    if (chunk_sz > s->config->buffers.packet_size)
+        chunk_sz = s->config->buffers.packet_size;
+    for (;;)
+    {
+        int r = s->config->filesystem.fread(s->config->filesystem.fs_context, crc_buf, 1, chunk_sz, fcrc);
+        if (r <= 0)
+            break;
+        crc_state = val_internal_crc32_update(s, crc_state, crc_buf, (size_t)r);
+    }
+    s->config->filesystem.fclose(s->config->filesystem.fs_context, fcrc);
+    uint32_t file_crc = val_internal_crc32_final(s, crc_state);
+    // Send metadata
+    st = send_metadata(s, reported_path, size, file_crc, filename);
+    if (st != VAL_OK)
+        return st;
+    // Resume negotiation
+    uint64_t resume_off = 0;
+    st = request_resume_and_get_response(s, filepath, &resume_off);
+    if (st != VAL_OK)
+        return st;
+    if (resume_off == UINT64_MAX)
+    {
+        // Skip file
+        if (s->config->callbacks.on_file_start)
+            s->config->callbacks.on_file_start(filename, reported_path ? reported_path : "", size, size);
+        // Send DONE/ACK path same as legacy
+        st = val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
+        if (st != VAL_OK)
+            return st;
+        // Wait for DONE_ACK
+        val_packet_type_t t = 0;
+        uint32_t len = 0;
+        uint64_t off = 0;
+        uint32_t to = val_internal_get_timeout(s, VAL_OP_DONE_ACK);
+        uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
+        while (tries--)
+        {
+            st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
+            if (st == VAL_OK && t == VAL_PKT_DONE_ACK)
+                break;
+            if (st != VAL_OK && st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
+                return st;
+            (void)val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
+        }
+        if (s->config->callbacks.on_file_complete)
+            s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_SKIPPED);
+        val_metrics_inc_files_sent(s);
+        return VAL_OK;
+    }
+    // Open file
+    void *f = s->config->filesystem.fopen(s->config->filesystem.fs_context, filepath, "rb");
+    if (!f)
+        return VAL_ERR_IO;
+    if (resume_off && s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)resume_off, SEEK_SET) != 0)
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        return VAL_ERR_IO;
+    }
+    if (s->config->callbacks.on_file_start)
+        s->config->callbacks.on_file_start(filename, reported_path ? reported_path : "", size, resume_off);
+    if (progress_ctx)
+        val_emit_progress_sender(s, (val_send_progress_ctx_t *)progress_ctx, filename, resume_off, 1);
+    else
+        val_emit_progress_sender(s, NULL, filename, resume_off, 1);
+    if (val_check_for_cancel(s))
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        if (s->config->callbacks.on_file_complete)
+            s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+        return VAL_ERR_ABORTED;
+    }
+    // Prepare windowed send
+    size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size;
+    if (P <= (sizeof(val_packet_header_t) + sizeof(uint32_t)))
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        return VAL_ERR_INVALID_ARG;
+    }
+    uint8_t *send_buf_bytes = (uint8_t *)s->config->buffers.send_buffer;
+    uint8_t *payload_area = send_buf_bytes ? (send_buf_bytes + sizeof(val_packet_header_t)) : NULL;
+    size_t max_payload = (size_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t));
+    uint64_t last_acked = resume_off;
+    uint64_t next_to_send = resume_off;
+    uint32_t inflight = 0;
+    while (last_acked < size)
+    {
+        // Fill window
+        while (inflight < win && next_to_send < size)
+        {
+            size_t to_read =
+                (size_t)((size - next_to_send) < (uint64_t)max_payload ? (size - next_to_send) : (uint64_t)max_payload);
+            if (!payload_area)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                return VAL_ERR_INVALID_ARG;
+            }
+            long curpos = s->config->filesystem.ftell(s->config->filesystem.fs_context, f);
+            if (curpos < 0 || (uint64_t)curpos != next_to_send)
+                (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)next_to_send, SEEK_SET);
+            size_t have = 0;
+            while (have < to_read)
+            {
+                int r = s->config->filesystem.fread(s->config->filesystem.fs_context, payload_area + have, 1, to_read - have, f);
+                if (r <= 0)
+                    break;
+                have += (size_t)r;
+            }
+            if (have != to_read)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                return VAL_ERR_IO;
+            }
+            st = val_internal_send_packet(s, VAL_PKT_DATA, payload_area, (uint32_t)to_read, next_to_send);
+            if (st != VAL_OK)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                return st;
+            }
+            next_to_send += to_read;
+            inflight++;
+#if VAL_ENABLE_WIRE_AUDIT
+            // Track inflight after each send
+            s->audit.current_inflight = inflight;
+            if (inflight > s->audit.max_inflight_observed)
+                s->audit.max_inflight_observed = inflight;
+#endif
+        }
+        // Wait for cumulative ACK
+        val_packet_type_t t = 0;
+        uint32_t len = 0;
+        uint64_t off = 0;
+        uint32_t to_ack = val_internal_get_timeout(s, VAL_OP_DATA_ACK);
+        uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
+        uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+        uint32_t t0 = s->config->system.get_ticks_ms();
+        // Fixed deadline for this ACK wait — declare before any statements to satisfy strict C parsers
+        uint32_t wait_deadline = s->config->system.get_ticks_ms() + to_ack;
+        s->timing.in_retransmit = 0;
+        for (;;)
+        {
+            // Hoist declarations to the top of the block for C90-style parsers
+            uint8_t streaming_mode;
+            uint32_t poll_ms;
+            if (val_check_for_cancel(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                return VAL_ERR_ABORTED;
+            }
+            // If streaming is allowed and enabled, use micro-polling derived from RTT to check for ACKs frequently.
+            // This prevents long blocking waits when the pipe is full and provides smoother pacing.
+            streaming_mode = (uint8_t)(s->send_streaming_allowed && s->cfg.adaptive_tx.streaming_enabled);
+
+            if (streaming_mode)
+            {
+                // Derive poll from SRTT/4 clamped to [2,20] ms; fall back to min_timeout/4 or 10ms.
+                uint32_t base =
+                    (s->timing.samples_taken ? s->timing.srtt_ms
+                                             : (s->cfg.timeouts.min_timeout_ms ? s->cfg.timeouts.min_timeout_ms : 40));
+                uint32_t candidate = (base / 4u) ? (base / 4u) : 10u;
+                if (candidate < 2u)
+                    candidate = 2u;
+                if (candidate > 20u)
+                    candidate = 20u;
+                poll_ms = candidate;
+            }
+            else
+            {
+                poll_ms = to_ack;
+            }
+            st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, streaming_mode ? poll_ms : to_ack);
+            if (st == VAL_OK)
+            {
+                if (t == VAL_PKT_CANCEL)
+                {
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    if (s->config->callbacks.on_file_complete)
+                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                    return VAL_ERR_ABORTED;
+                }
+                if (t == VAL_PKT_DATA_ACK)
+                {
+                    if (t0 && !s->timing.in_retransmit)
+                    {
+                        uint32_t now = s->config->system.get_ticks_ms();
+                        val_internal_record_rtt(s, now - t0);
+                    }
+                    if (off > last_acked)
+                    {
+                        // Progress
+                        last_acked = off;
+                        if (progress_ctx)
+                            val_emit_progress_sender(s, (val_send_progress_ctx_t *)progress_ctx, filename, last_acked, 1);
+                        else
+                            val_emit_progress_sender(s, NULL, filename, last_acked, 1);
+                        // Calculate new inflight based on sent - acked
+                        uint64_t outstanding = (next_to_send > last_acked) ? (next_to_send - last_acked) : 0;
+                        inflight = (uint32_t)((outstanding + max_payload - 1) / max_payload);
+#if VAL_ENABLE_WIRE_AUDIT
+                        s->audit.current_inflight = inflight;
+                        if (inflight > s->audit.max_inflight_observed)
+                            s->audit.max_inflight_observed = inflight;
+#endif
+                    }
+                    break; // leave inner recv loop; refill window
+                }
+                if (t == VAL_PKT_ERROR)
+                {
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    return VAL_ERR_PROTOCOL;
+                }
+                // Ignore other types
+                continue;
+            }
+            // Timeout or CRC
+            if (streaming_mode && (st == VAL_ERR_TIMEOUT || st == VAL_ERR_CRC))
+            {
+                // Soft poll timeout/CRC during streaming pacing: only escalate to a real timeout when the overall deadline passes
+                uint32_t nowp = s->config->system.get_ticks_ms();
+                if (nowp < wait_deadline)
+                {
+                    // Keep polling
+                    continue;
+                }
+                // Fall through to real-timeout handling when deadline reached
+                VAL_LOG_DEBUG(s, "data: streaming poll deadline reached, escalating to timeout");
+            }
+            if ((st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC) || tries == 0)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (st == VAL_ERR_TIMEOUT)
+                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
+                else if (st == VAL_ERR_CRC)
+                    VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
+                return st;
+            }
+            // Retransmit from last_acked (Go-Back-N)
+            // Record transmission error for adaptive tracking
+            val_internal_record_transmission_error(s);
+            val_metrics_inc_retrans(s);
+            s->timing.in_retransmit = 1;
+            size_t to_read = (size_t)((size - last_acked) < (uint64_t)max_payload ? (size - last_acked) : (uint64_t)max_payload);
+            long curpos2 = s->config->filesystem.ftell(s->config->filesystem.fs_context, f);
+            if (curpos2 < 0 || (uint64_t)curpos2 != last_acked)
+                (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)last_acked, SEEK_SET);
+            size_t have2 = 0;
+            while (have2 < to_read)
+            {
+                int r2 =
+                    s->config->filesystem.fread(s->config->filesystem.fs_context, payload_area + have2, 1, to_read - have2, f);
+                if (r2 <= 0)
+                    break;
+                have2 += (size_t)r2;
+            }
+            if (have2 != to_read)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                return VAL_ERR_IO;
+            }
+            val_status_t rs = val_internal_send_packet(s, VAL_PKT_DATA, payload_area, (uint32_t)to_read, last_acked);
+            if (rs != VAL_OK)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                return rs;
+            }
+            if (backoff && s->config->system.delay_ms)
+                s->config->system.delay_ms(backoff);
+            if (backoff)
+                backoff <<= 1;
+            --tries;
+        }
+    }
+    // DONE/DONE_ACK
+    st = val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
+    if (st != VAL_OK)
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        if (s->config->callbacks.on_file_complete)
+            s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", st);
+        return st;
+    }
+    {
+        val_packet_type_t t = 0;
+        uint32_t len = 0;
+        uint64_t off = 0;
+        uint32_t to = val_internal_get_timeout(s, VAL_OP_DONE_ACK);
+        uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
+        while (tries--)
+        {
+            st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
+            if (st == VAL_OK && t == VAL_PKT_DONE_ACK)
+                break;
+            if (st != VAL_OK && st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                return st;
+            }
+            (void)val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
+        }
+    }
+    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+    if (s->config->callbacks.on_file_complete)
+        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_OK);
+    val_metrics_inc_files_sent(s);
+    // Successful file completion counts as a success for adaptive mode tracking
+    val_internal_record_transmission_success(s);
+    return VAL_OK;
+}
+
 val_status_t val_internal_send_file(val_session_t *s, const char *filepath, const char *sender_path, void *progress_ctx)
+{
+    // Delegate to adaptive controller (which currently uses stop-and-wait path)
+    return send_file_data_adaptive(s, filepath, sender_path, progress_ctx);
+}
+
+// --- Legacy stop-and-wait implementation moved behind a helper ---
+static val_status_t val__send_file_stop_and_wait(val_session_t *s, const char *filepath, const char *sender_path,
+                                                 void *progress_ctx)
 {
     // Gather meta
     uint64_t size = 0;
@@ -658,6 +1047,12 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
             VAL_LOG_ERRORF(s, "send DATA failed %d", (int)st);
             return st;
         }
+#if VAL_ENABLE_WIRE_AUDIT
+        // In stop-and-wait, inflight is 1 while waiting for ACK
+        s->audit.current_inflight = 1;
+        if (s->audit.max_inflight_observed < 1)
+            s->audit.max_inflight_observed = 1;
+#endif
         // Wait for cumulative ACK (offset == next expected on receiver)
         uint32_t len = 0;
         uint64_t off = 0;
@@ -669,6 +1064,7 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
         s->timing.in_retransmit = 0;
         for (;;)
         {
+            // Keep declarations early for strict parsers
             if (!val_internal_transport_is_connected(s))
             {
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
@@ -750,6 +1146,9 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                     // Normal advance: receiver accepted this chunk
                     sent = off; // equals sent + to_read in happy path
                 }
+#if VAL_ENABLE_WIRE_AUDIT
+                s->audit.current_inflight = 0;
+#endif
                 break;
             }
             if ((st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC) || tries == 0)
@@ -771,6 +1170,8 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                 VAL_LOG_WARN(s, "data: local cancel before retransmit");
                 return VAL_ERR_ABORTED;
             }
+            // Record transmission error for adaptive mode tracking
+            val_internal_record_transmission_error(s);
             val_metrics_inc_retrans(s);
             s->timing.in_retransmit = 1; // Karn's algorithm
             val_status_t rs = val_internal_send_packet(s, VAL_PKT_DATA, payload_area, (uint32_t)to_read, sent);
@@ -779,6 +1180,11 @@ val_status_t val_internal_send_file(val_session_t *s, const char *filepath, cons
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                 return rs;
             }
+#if VAL_ENABLE_WIRE_AUDIT
+            s->audit.current_inflight = 1;
+            if (s->audit.max_inflight_observed < 1)
+                s->audit.max_inflight_observed = 1;
+#endif
             VAL_LOG_DEBUG(s, "data: ack timeout, retransmitting");
             val_metrics_inc_timeout(s);
             if (backoff && s->config->system.delay_ms)
@@ -900,6 +1306,7 @@ send_done:
                 return VAL_ERR_TIMEOUT;
             }
             // Retransmit DONE on timeout or wrong packet
+            val_internal_record_transmission_error(s);
             val_metrics_inc_retrans(s);
             s->timing.in_retransmit = 1; // Karn's algorithm
             val_status_t rs = val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
@@ -940,6 +1347,11 @@ send_done:
             val_emit_progress_sender(s, ctx, filename, size, 0);
         }
     }
+    // Record transmission result for adaptive mode tracking
+    if (st == VAL_OK)
+        val_internal_record_transmission_success(s);
+    else if (st == VAL_ERR_TIMEOUT || st == VAL_ERR_CRC)
+        val_internal_record_transmission_error(s);
     // Count a file send attempt as files_sent regardless of status; adjust if desired later
     val_metrics_inc_files_sent(s);
     return st;

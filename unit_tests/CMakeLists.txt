@@ -4,7 +4,8 @@ cmake_minimum_required(VERSION 3.15)
 
 function(add_ctest_exe name src)
     add_executable(${name} ${src} support/test_support.c)
-    target_include_directories(${name} PRIVATE support include)
+    # Allow unit tests to include public and selected internal headers for white-box testing
+    target_include_directories(${name} PRIVATE support include ${CMAKE_CURRENT_LIST_DIR}/../src ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(${name} PRIVATE val_protocol)
     add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
 endfunction()
@@ -31,9 +32,35 @@ set_property(TEST ut_metadata_validation PROPERTY LABELS "quick")
 add_ctest_exe(ut_adaptive_timeouts core/test_adaptive_timeouts.c)
 set_property(TEST ut_adaptive_timeouts PROPERTY LABELS "quick")
 
+# Adaptive transmission behavior
+add_ctest_exe(ut_adaptive_transmission core/test_adaptive_transmission.c)
+set_property(TEST ut_adaptive_transmission PROPERTY LABELS "heavy")
+
+# Adaptive transmission demo (lightweight, quick)
+add_ctest_exe(ut_adaptive_demo core/test_adaptive_demo.c)
+set_property(TEST ut_adaptive_demo PROPERTY LABELS "quick")
+
+# Streaming negotiation/veto behavior
+add_ctest_exe(ut_streaming_veto core/test_streaming_veto.c)
+set_property(TEST ut_streaming_veto PROPERTY LABELS "quick")
+
+# Positive streaming negotiation (both sides allow streaming)
+add_ctest_exe(ut_streaming_allowed core/test_streaming_allowed.c)
+set_property(TEST ut_streaming_allowed PROPERTY LABELS "quick")
+
+# Wire audit (requires VAL_ENABLE_WIRE_AUDIT build option to assert invariants)
+add_ctest_exe(ut_wire_audit core/test_wire_audit.c)
+set_property(TEST ut_wire_audit PROPERTY LABELS "quick")
+
 # Clock requirement behavior
 add_ctest_exe(ut_clock_requirement core/test_clock_requirement.c)
 set_property(TEST ut_clock_requirement PROPERTY LABELS "quick")
+
+# Transport fragmentation and reordering/jitter behavior
+add_ctest_exe(ut_transport_fragmentation core/test_transport_fragmentation.c)
+set_property(TEST ut_transport_fragmentation PROPERTY LABELS "quick")
+add_ctest_exe(ut_transport_reorder_jitter core/test_transport_reorder_jitter.c)
+set_property(TEST ut_transport_reorder_jitter PROPERTY LABELS "quick")
 
 # Label heavier suites to allow selective runs
 set_property(TEST ut_sr_check PROPERTY LABELS "heavy")

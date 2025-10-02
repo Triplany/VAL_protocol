@@ -90,6 +90,9 @@ typedef enum
     VAL_PKT_EOT = 10,      // end of transmission
     VAL_PKT_EOT_ACK = 11,  // ack for end of transmission
     VAL_PKT_DONE_ACK = 12, // ack for end of file
+    // Adaptive mode sync (Phase 3; reserved in Phase 1)
+    VAL_PKT_MODE_SYNC = 13,
+    VAL_PKT_MODE_SYNC_ACK = 14,
 } val_packet_type_t;
 
 typedef enum
@@ -129,7 +132,7 @@ typedef struct
     uint32_t action; // val_resume_action_t
     uint64_t resume_offset;
     uint32_t verify_crc;
-    uint64_t verify_len;
+    uint64_t verify_len; // 64-bit per design prompt
 } val_resume_resp_t;
 
 // Minimal session struct
@@ -157,9 +160,49 @@ struct val_session_s
     // last error info
     val_status_t last_error_code;
     uint32_t last_error_detail;
+    // --- Adaptive transmission state (Phase 1 scaffolding) ---
+    // Negotiated/active mode tracking
+    val_tx_mode_t current_tx_mode;     // current active window rung
+    val_tx_mode_t peer_tx_mode;        // peer's last known window rung
+    val_tx_mode_t min_negotiated_mode; // best performance (largest window) both sides support
+    val_tx_mode_t max_negotiated_mode; // most reliable mode (stop-and-wait)
+    // Streaming negotiation (directional)
+    uint8_t send_streaming_allowed; // we may stream when we are sender to peer
+    uint8_t recv_streaming_allowed; // we accept peer streaming to us
+    // Performance counters
+    uint32_t consecutive_errors;
+    uint32_t consecutive_successes;
+    uint32_t packets_since_mode_change;
+    uint32_t packets_since_mode_sync;
+    // Window/sequence tracking
+    uint32_t packets_in_flight;
+    uint32_t next_seq_to_send;
+    uint32_t oldest_unacked_seq;
+    // In-flight packet tracking array (allocated at session create)
+    struct val_inflight_packet_s *tracking_slots;
+    uint32_t max_tracking_slots;
+    // File state for retransmissions (sender side)
+    void *current_file_handle;
+    uint64_t current_file_position;
+    uint64_t total_file_size;
+    // Mode sync state
+    uint32_t mode_sync_sequence;
+    uint32_t last_mode_sync_time;
 #if VAL_ENABLE_METRICS
     // Metrics counters (zeroed at session create)
     val_metrics_t metrics;
+#endif
+#if VAL_ENABLE_WIRE_AUDIT
+    // Wire audit counters (zeroed at session create)
+    struct
+    {
+        // Packet counters
+        uint64_t sent[16];
+        uint64_t recv[16];
+        // Inflight/window audit (sender perspective)
+        uint32_t max_inflight_observed;
+        uint32_t current_inflight;
+    } audit;
 #endif
     // thread-safety primitive (coarse serialization per session)
 #if defined(_WIN32)
@@ -168,6 +211,56 @@ struct val_session_s
     pthread_mutex_t lock;
 #endif
 };
+
+// In-flight packet tracking slot
+typedef struct val_inflight_packet_s
+{
+    uint32_t sequence;       // sequence number
+    uint64_t file_offset;    // file offset
+    uint32_t payload_length; // data length
+    uint32_t send_timestamp; // ticks at send
+    uint8_t retransmit_count;
+    uint8_t state; // 0=SENT,1=ACKED,2=TIMEOUT
+} val_inflight_packet_t;
+
+// Mode synchronization payloads
+typedef struct
+{
+    uint32_t current_mode;        // val_tx_mode_t
+    uint32_t sequence;            // sync sequence
+    uint32_t consecutive_errors;  // recent error count
+    uint32_t consecutive_success; // recent success count
+} val_mode_sync_t;
+
+typedef struct
+{
+    uint32_t ack_sequence;    // sequence from sync
+    uint32_t agreed_mode;     // agreed val_tx_mode_t
+    uint32_t receiver_errors; // receiver view of errors
+} val_mode_sync_ack_t;
+
+// Extended handshake payload with adaptive fields
+typedef struct
+{
+    uint32_t magic;        // VAL_MAGIC
+    uint8_t version_major; // protocol version
+    uint8_t version_minor; // protocol version
+    uint16_t reserved;     // keep alignment
+    uint32_t packet_size;  // MTU
+    uint32_t features;     // optional features (negotiable)
+    uint32_t required;     // optional features required by peer
+    uint32_t requested;    // optional features requested by peer
+    // Adaptive TX negotiation
+    uint8_t max_performance_mode;   // window rung cap (val_tx_mode_t)
+    uint8_t preferred_initial_mode; // initial window rung (val_tx_mode_t)
+    uint16_t mode_sync_interval;    // reserved
+    uint8_t streaming_flags;        // bit0: tx_stream_capable, bit1: rx_stream_accept, other bits 0
+    uint8_t reserved_streaming[3];  // pad to 4-byte boundary
+    uint16_t supported_features16;  // reserved 16-bit future
+    uint16_t required_features16;   // reserved 16-bit future
+    uint16_t requested_features16;  // reserved 16-bit future
+    uint32_t reserved2;
+} val_handshake_t;
 
 // Endianness helpers: on-wire is Little Endian. Convert to/from host as needed.
 static inline int val_is_little_endian(void)
@@ -379,19 +472,7 @@ val_status_t val_internal_handle_file_resume(val_session_t *session, const char 
 // String utils
 size_t val_internal_strnlen(const char *s, size_t maxlen);
 
-// Handshake payload
-typedef struct
-{
-    uint32_t magic; // VAL_MAGIC
-    uint8_t version_major;
-    uint8_t version_minor;
-    uint16_t reserved;
-    uint32_t packet_size; // required packet size for this endpoint
-    uint32_t features;    // bitfield for future capability negotiation all compiled in features
-    uint32_t required;    // bitfield for future capability negotiation user set on required features to use. if one side doesn't
-                          // have transfer aborts
-    uint32_t requested;   // bitfield for future capability negotiation user set on requested features to use if peer supports.
-} val_handshake_t;
+// Handshake payload is defined later with extended fields for adaptive TX (val_handshake_t)
 
 // Feature bits are defined publicly in val_protocol.h
 // VAL_BUILTIN_FEATURES should include ONLY negotiable/optional features compiled into this build.
@@ -436,5 +517,9 @@ uint32_t val_internal_crc32(val_session_t *s, const void *data, size_t length);
 uint32_t val_internal_crc32_init(val_session_t *s);
 uint32_t val_internal_crc32_update(val_session_t *s, uint32_t state, const void *data, size_t length);
 uint32_t val_internal_crc32_final(val_session_t *s, uint32_t state);
+
+// Adaptive transmission mode management
+void val_internal_record_transmission_error(val_session_t *s);
+void val_internal_record_transmission_success(val_session_t *s);
 
 #endif // VAL_INTERNAL_H

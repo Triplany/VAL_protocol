@@ -2,23 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <pthread.h>
-#include <unistd.h>
-#endif
-
-static int write_pattern_file(const char *path, size_t size)
-{
-    FILE *f = fopen(path, "wb");
-    if (!f)
-        return -1;
-    for (size_t i = 0; i < size; ++i)
-        fputc((int)(i & 0xFF), f);
-    fclose(f);
-    return 0;
-}
 
 static val_session_t *g_tx_for_cancel = NULL;
 static volatile int g_cancel_done = 0;
@@ -50,43 +33,22 @@ int main(void)
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
 
-    char artroot[1024];
-    if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
-    {
-        fprintf(stderr, "failed to determine artifacts root\n");
-        return 1;
-    }
-#if defined(_WIN32)
-    char tmpdir[2048];
-    snprintf(tmpdir, sizeof(tmpdir), "%s\\cancel_tx", artroot);
+    char basedir[2048];
     char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s\\cancel_tx\\out", artroot);
-    char inpath[2048];
-    snprintf(inpath, sizeof(inpath), "%s\\cancel_tx\\input.bin", artroot);
-    char outpath[2048];
-    snprintf(outpath, sizeof(outpath), "%s\\cancel_tx\\out\\input.bin", artroot);
-#else
-    char tmpdir[2048];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/cancel_tx", artroot);
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s/cancel_tx/out", artroot);
-    char inpath[2048];
-    snprintf(inpath, sizeof(inpath), "%s/cancel_tx/input.bin", artroot);
-    char outpath[2048];
-    snprintf(outpath, sizeof(outpath), "%s/cancel_tx/out/input.bin", artroot);
-#endif
-    if (ts_ensure_dir(tmpdir) != 0 || ts_ensure_dir(outdir) != 0)
+    if (ts_build_case_dirs("cancel_tx", basedir, sizeof(basedir), outdir, sizeof(outdir)) != 0)
     {
         fprintf(stderr, "failed to create artifacts dirs\n");
         return 1;
     }
+    char inpath[2048];
+    if (ts_path_join(inpath, sizeof(inpath), basedir, "input.bin") != 0)
+        return 1;
+    char outpath[2048];
+    if (ts_path_join(outpath, sizeof(outpath), outdir, "input.bin") != 0)
+        return 1;
     // Ensure no stale output exists from previous runs which could alter resume offset
-#if defined(_WIN32)
-    DeleteFileA(outpath);
-#else
-    unlink(outpath);
-#endif
-    if (write_pattern_file(inpath, file_size) != 0)
+    ts_remove_file(outpath);
+    if (ts_write_pattern_file(inpath, file_size) != 0)
     {
         fprintf(stderr, "failed to create input file\n");
         return 1;
@@ -124,6 +86,7 @@ int main(void)
     }
 
     ts_thread_t th_rx = ts_start_receiver(rx, outdir);
+    ts_receiver_warmup(&cfg_tx, 5);
 
     // Keep a handle for cancel
     g_tx_for_cancel = tx;

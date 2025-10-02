@@ -49,36 +49,7 @@ static int copy_prefix(const char *src, const char *dst, size_t bytes)
     return 0;
 }
 
-static void make_paths(char *root, size_t rootsz, char *dir, size_t dirsz, char *indir, size_t indirsz, char *outdir,
-                       size_t outdirsz, char *infile, size_t infilesz, char *outfile, size_t outfilesz, const char *subdir)
-{
-    // Build paths under artifacts root: <root>/<subdir>/{in,out}
-    if (!ts_get_artifacts_root(root, rootsz))
-    {
-#if defined(_WIN32)
-        snprintf(root, rootsz, ".\\ut_artifacts");
-#else
-        snprintf(root, rootsz, "./ut_artifacts");
-#endif
-    }
-#if defined(_WIN32)
-    snprintf(dir, dirsz, "%s\\%s", root, subdir);
-    snprintf(indir, indirsz, "%s\\in", dir);
-    snprintf(outdir, outdirsz, "%s\\out", dir);
-    snprintf(infile, infilesz, "%s\\file.bin", indir);
-    snprintf(outfile, outfilesz, "%s\\file.bin", outdir);
-#else
-    snprintf(dir, dirsz, "%s/%s", root, subdir);
-    snprintf(indir, indirsz, "%s/in", dir);
-    snprintf(outdir, outdirsz, "%s/out", dir);
-    snprintf(infile, infilesz, "%s/file.bin", indir);
-    snprintf(outfile, outfilesz, "%s/file.bin", outdir);
-#endif
-    ts_ensure_dir(root);
-    ts_ensure_dir(dir);
-    ts_ensure_dir(indir);
-    ts_ensure_dir(outdir);
-}
+// Paths are built using shared helpers (ts_build_case_dirs, ts_path_join)
 
 static void make_cfgs(val_config_t *cfg_tx, val_config_t *cfg_rx, test_duplex_t *d_tx, test_duplex_t *d_rx, void *sb_a,
                       void *rb_a, void *sb_b, void *rb_b, size_t packet)
@@ -106,6 +77,7 @@ static int run_send_recv(const char *in, const char *outdir, val_config_t *cfg_t
         return -1;
     }
     ts_thread_t th = ts_start_receiver(rx, outdir);
+    ts_receiver_warmup(cfg_tx, 5);
     const char *files[1] = {in};
     val_status_t st = val_send_files(tx, files, 1, NULL);
     ts_join_thread(th);
@@ -121,9 +93,14 @@ static int test_always_skip_if_exists(void)
     const size_t packet = 1024, depth = 16, size = 128 * 1024 + 9;
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
-    char root[512], dir[512], indir[512], outdir[512], in[512], out[512];
-    make_paths(root, sizeof(root), dir, sizeof(dir), indir, sizeof(indir), outdir, sizeof(outdir), in, sizeof(in), out,
-               sizeof(out), "policies_skip_exist");
+    char basedir[512], outdir[512];
+    char in[512], out[512];
+    if (ts_build_case_dirs("policies_skip_exist", basedir, sizeof(basedir), outdir, sizeof(outdir)) != 0)
+        return 1;
+    if (ts_path_join(in, sizeof(in), basedir, "file.bin") != 0)
+        return 1;
+    if (ts_path_join(out, sizeof(out), outdir, "file.bin") != 0)
+        return 1;
 
     // Create input and an identical existing output
     if (write_pattern_file(in, size, 0) != 0)
@@ -172,9 +149,14 @@ static int test_strict_resume_only_abort_on_mismatch(void)
     const size_t packet = 1024, depth = 16, size = 192 * 1024 + 5;
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
-    char root[512], dir[512], indir[512], outdir[512], in[512], out[512];
-    make_paths(root, sizeof(root), dir, sizeof(dir), indir, sizeof(indir), outdir, sizeof(outdir), in, sizeof(in), out,
-               sizeof(out), "policies_strict_abort");
+    char basedir[512], outdir[512];
+    char in[512], out[512];
+    if (ts_build_case_dirs("policies_strict_abort", basedir, sizeof(basedir), outdir, sizeof(outdir)) != 0)
+        return 1;
+    if (ts_path_join(in, sizeof(in), basedir, "file.bin") != 0)
+        return 1;
+    if (ts_path_join(out, sizeof(out), outdir, "file.bin") != 0)
+        return 1;
 
     if (write_pattern_file(in, size, 0) != 0)
         return 1;
@@ -223,9 +205,14 @@ static int test_always_start_zero_overwrite(void)
     const size_t packet = 1024, depth = 16, size = 256 * 1024 + 17;
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
-    char root[512], dir[512], indir[512], outdir[512], in[512], out[512];
-    make_paths(root, sizeof(root), dir, sizeof(dir), indir, sizeof(indir), outdir, sizeof(outdir), in, sizeof(in), out,
-               sizeof(out), "policies_start_zero");
+    char basedir[512], outdir[512];
+    char in[512], out[512];
+    if (ts_build_case_dirs("policies_start_zero", basedir, sizeof(basedir), outdir, sizeof(outdir)) != 0)
+        return 1;
+    if (ts_path_join(in, sizeof(in), basedir, "file.bin") != 0)
+        return 1;
+    if (ts_path_join(out, sizeof(out), outdir, "file.bin") != 0)
+        return 1;
 
     if (write_pattern_file(in, size, 0) != 0)
         return 1;
@@ -282,11 +269,18 @@ int main(void)
         const size_t packet = 1024, depth = 16, size = 160 * 1024 + 11;
         test_duplex_t d;
         test_duplex_init(&d, packet, depth);
-        char root[512], dir[512], indir[512], outdir[512], in[512], out[512];
-        make_paths(root, sizeof(root), dir, sizeof(dir), indir, sizeof(indir), outdir, sizeof(outdir), in, sizeof(in), out,
-                   sizeof(out), "policies_skip_if_diff");
-        write_pattern_file(in, size, 0);
-        write_pattern_file(out, size, 1); // different content, same size
+        char basedir[512], outdir[512];
+        char in[512], out[512];
+        if (ts_build_case_dirs("policies_skip_if_diff", basedir, sizeof(basedir), outdir, sizeof(outdir)) != 0)
+            rc = 1;
+        else if (ts_path_join(in, sizeof(in), basedir, "file.bin") != 0 ||
+                 ts_path_join(out, sizeof(out), outdir, "file.bin") != 0)
+            rc = 1;
+        else
+        {
+            write_pattern_file(in, size, 0);
+            write_pattern_file(out, size, 1); // different content, same size
+        }
         uint64_t before_size = ts_file_size(out);
         uint32_t before_crc = ts_file_crc32(out);
         uint8_t *sb_a = (uint8_t *)calloc(1, packet), *rb_a = (uint8_t *)calloc(1, packet);

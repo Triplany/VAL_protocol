@@ -149,8 +149,18 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     }
     else
     {
-        // Mismatch: indicate verify failed so sender restarts from zero
-        result = VAL_ERR_RESUME_VERIFY;
+        // Mismatch: result depends on resume mode policy
+        val_resume_mode_t mode = s->config->resume.mode;
+        if (mode == VAL_RESUME_CRC_TAIL || mode == VAL_RESUME_CRC_FULL)
+        {
+            // In CRC_TAIL and CRC_FULL modes, mismatch means skip the file
+            result = VAL_SKIPPED;
+        }
+        else
+        {
+            // In CRC_TAIL_OR_ZERO and CRC_FULL_OR_ZERO modes, mismatch means restart from zero
+            result = VAL_ERR_RESUME_VERIFY;
+        }
     }
     // Encode status as LE int32
     int32_t result_le = (int32_t)val_htole32((uint32_t)result);
@@ -417,19 +427,17 @@ static val_status_t handle_file_resume(val_session_t *s, const char *filename, c
         VAL_LOG_INFOF(s, "resume: verify result st=%d", (int)st);
         if (st == VAL_ERR_RESUME_VERIFY)
         {
-            // Mismatch handling based on simplified mode
-            if (mode == VAL_RESUME_CRC_TAIL || mode == VAL_RESUME_CRC_FULL)
-            {
-                // In CRC_TAIL and CRC_FULL modes, mismatch means skip the file (do not overwrite existing content)
-                *resume_offset_out = file_size;
-                VAL_LOG_WARN(s, "resume: verify mismatch -> skipping file");
-                if (s->config->callbacks.on_file_start)
-                    s->config->callbacks.on_file_start(filename, sender_path, file_size, file_size);
-                return VAL_OK; // downstream treats resume_offset_out >= size as skip
-            }
-            // CRC_TAIL_OR_ZERO and CRC_FULL_OR_ZERO: restart from zero for safety
+            // Sender will restart from zero; receiver resets resume offset
             resume_offset = 0;
             VAL_LOG_INFO(s, "resume: verify mismatch -> restarting at 0");
+        }
+        else if (st == VAL_SKIPPED)
+        {
+            // File will be skipped; set resume offset to file size
+            resume_offset = file_size;
+            VAL_LOG_WARN(s, "resume: verify mismatch -> skipping file");
+            if (s->config->callbacks.on_file_start)
+                s->config->callbacks.on_file_start(filename, sender_path, file_size, file_size);
         }
         else if (st == VAL_ERR_TIMEOUT)
         {

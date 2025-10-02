@@ -2,50 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32)
-#include <direct.h>
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#include <sys/types.h>
-#endif
-
-static int write_file(const char *path, const uint8_t *data, size_t size)
-{
-    FILE *f = fopen(path, "wb");
-    if (!f)
-        return -1;
-    fwrite(data, 1, size, f);
-    fclose(f);
-    return 0;
-}
-static int files_equal(const char *a, const char *b)
-{
-    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
-    if (!fa || !fb)
-    {
-        if (fa)
-            fclose(fa);
-        if (fb)
-            fclose(fb);
-        return 0;
-    }
-    int eq = 1;
-    int ca, cb;
-    do
-    {
-        ca = fgetc(fa);
-        cb = fgetc(fb);
-        if (ca != cb)
-        {
-            eq = 0;
-            break;
-        }
-    } while (ca != EOF && cb != EOF);
-    fclose(fa);
-    fclose(fb);
-    return eq;
-}
+// Using shared helpers from test_support
 
 int main(void)
 {
@@ -53,32 +10,19 @@ int main(void)
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
 
-    char artroot[1024];
-    if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
-    {
-        fprintf(stderr, "failed to determine artifacts root\n");
-        return 1;
-    }
-#if defined(_WIN32)
+    char basedir[2048];
     char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s\\multi\\out", artroot);
-    char in1[2048];
-    snprintf(in1, sizeof(in1), "%s\\multi\\a.bin", artroot);
-    char in2[2048];
-    snprintf(in2, sizeof(in2), "%s\\multi\\b.bin", artroot);
-#else
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s/multi/out", artroot);
-    char in1[2048];
-    snprintf(in1, sizeof(in1), "%s/multi/a.bin", artroot);
-    char in2[2048];
-    snprintf(in2, sizeof(in2), "%s/multi/b.bin", artroot);
-#endif
-    if (ts_ensure_dir(outdir) != 0)
+    if (ts_build_case_dirs("multi", basedir, sizeof(basedir), outdir, sizeof(outdir)) != 0)
     {
         fprintf(stderr, "failed to create artifacts dir\n");
         return 1;
     }
+    char in1[2048];
+    if (ts_path_join(in1, sizeof(in1), basedir, "a.bin") != 0)
+        return 1;
+    char in2[2048];
+    if (ts_path_join(in2, sizeof(in2), basedir, "b.bin") != 0)
+        return 1;
 
     // Two different sizes to cross packet boundaries (overridable via env)
     const size_t s1 = ts_env_size_bytes("VAL_TEST_MULTI_A_SIZE", 300 * 1024 + 17);
@@ -89,8 +33,18 @@ int main(void)
     uint8_t *buf2 = (uint8_t *)malloc(s2);
     for (size_t i = 0; i < s2; ++i)
         buf2[i] = (uint8_t)(255 - (i * 3));
-    write_file(in1, buf1, s1);
-    write_file(in2, buf2, s2);
+    ts_remove_file(in1);
+    ts_remove_file(in2);
+    FILE *f1 = fopen(in1, "wb");
+    if (!f1)
+        return 1;
+    fwrite(buf1, 1, s1, f1);
+    fclose(f1);
+    FILE *f2 = fopen(in2, "wb");
+    if (!f2)
+        return 1;
+    fwrite(buf2, 1, s2, f2);
+    fclose(f2);
 
     uint8_t *sb_a = (uint8_t *)calloc(1, packet);
     uint8_t *rb_a = (uint8_t *)calloc(1, packet);
@@ -116,6 +70,7 @@ int main(void)
     }
 
     ts_thread_t th = ts_start_receiver(rx, outdir);
+    ts_receiver_warmup(&cfg_tx, 5);
 
     const char *files[2] = {in1, in2};
     val_status_t st = val_send_files(tx, files, 2, NULL);
@@ -147,6 +102,31 @@ int main(void)
     }
 #endif
 
+#if VAL_ENABLE_WIRE_AUDIT
+    {
+        val_wire_audit_t a_tx = {0}, a_rx = {0};
+        if (val_get_wire_audit(tx, &a_tx) == VAL_OK && val_get_wire_audit(rx, &a_rx) == VAL_OK)
+        {
+            if (a_rx.sent_data != 0)
+            {
+                fprintf(stderr, "wire_audit: receiver sent DATA unexpectedly (count=%llu)\n", (unsigned long long)a_rx.sent_data);
+                return 12;
+            }
+            if (a_tx.sent_done_ack != 0 || a_tx.sent_eot_ack != 0)
+            {
+                fprintf(stderr, "wire_audit: sender sent *_ACK unexpectedly (done_ack=%llu eot_ack=%llu)\n",
+                        (unsigned long long)a_tx.sent_done_ack, (unsigned long long)a_tx.sent_eot_ack);
+                return 13;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "val_get_wire_audit failed\n");
+            return 14;
+        }
+    }
+#endif
+
     val_session_destroy(tx);
     val_session_destroy(rx);
     free(sb_a);
@@ -158,20 +138,17 @@ int main(void)
 
     // Check outputs
     char out1[2048];
+    if (ts_path_join(out1, sizeof(out1), outdir, "a.bin") != 0)
+        return 1;
     char out2[2048];
-#if defined(_WIN32)
-    snprintf(out1, sizeof(out1), "%s\\multi\\out\\a.bin", artroot);
-    snprintf(out2, sizeof(out2), "%s\\multi\\out\\b.bin", artroot);
-#else
-    snprintf(out1, sizeof(out1), "%s/multi/out/a.bin", artroot);
-    snprintf(out2, sizeof(out2), "%s/multi/out/b.bin", artroot);
-#endif
+    if (ts_path_join(out2, sizeof(out2), outdir, "b.bin") != 0)
+        return 1;
     if (st != VAL_OK)
     {
         fprintf(stderr, "send failed %d\n", (int)st);
         return 2;
     }
-    if (!files_equal(in1, out1) || !files_equal(in2, out2))
+    if (!ts_files_equal(in1, out1) || !ts_files_equal(in2, out2))
     {
         fprintf(stderr, "output mismatch\n");
         return 3;

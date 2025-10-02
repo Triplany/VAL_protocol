@@ -9,23 +9,36 @@ A small, robust, blocking-I/O file transfer protocol library in C. Frames are fi
 - Public headers: `include/`
 - Sources: `src/`
 - Examples: `examples/tcp/` (TCP send/receive)
-- Unit tests: `unit_tests/` (CTest executables)
+- Unit tests: `unit_tests/` (CTest executables; artifacts like ut_artifacts live under the build tree)
 
 ## Features (from source)
 
 - Feature bits: see `include/val_protocol.h` and `val_get_builtin_features()`
   - Only optional features are negotiated; core behavior is implicit.
   - Optional (negotiated): e.g., `VAL_FEAT_ADVANCED_TX` (bit 0)
-- Resume modes and policies
-  - Resume modes: six-mode system — `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_CRC_TAIL`, `VAL_RESUME_CRC_TAIL_OR_ZERO`, `VAL_RESUME_CRC_FULL`, `VAL_RESUME_CRC_FULL_OR_ZERO` (+ `crc_verify_bytes` for tail modes)
+- Resume configuration
+  - Six modes (see `val_resume_mode_t`): `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_CRC_TAIL`,
+    `VAL_RESUME_CRC_TAIL_OR_ZERO`, `VAL_RESUME_CRC_FULL`, `VAL_RESUME_CRC_FULL_OR_ZERO`.
+  - Tail modes use a trailing verification window (`crc_verify_bytes`); FULL modes verify a full prefix (with internal caps for large files).
+  - Sizes/offsets on wire are 64‑bit LE.
+- Adaptive transmitter
+  - Window-only rungs: `VAL_TX_WINDOW_64/32/16/8/4/2` and `VAL_TX_STOP_AND_WAIT` (fastest has the lowest enum value).
+  - Streaming is not a distinct mode; it’s sender pacing. If both sides agree, the sender uses RTT-derived micro-polling between ACK waits to keep the pipe full.
+  - Streaming negotiation happens in HELLO via compact `streaming_flags`:
+    - bit0: this endpoint can stream when sending
+    - bit1: this endpoint accepts an incoming peer that streams to it
+    - Effective permissions are directional and can be queried with `val_get_streaming_allowed()`.
+  - RTT-derived pacing: poll interval ≈ SRTT/4 clamped to 2–20 ms; falls back to a conservative value when no samples exist.
+  - `val_get_current_tx_mode(session, &out_mode)` exposes the current window rung for tests/telemetry; `val_get_streaming_allowed(session, &send_ok, &recv_ok)` exposes negotiated streaming permissions.
+- Diagnostics (optional, compile‑time)
+  - Metrics: `VAL_ENABLE_METRICS` — packet/byte counters, timeouts, retransmits, crc errors, etc.
+  - Wire audit: `VAL_ENABLE_WIRE_AUDIT` — per‑packet send/recv counters and inflight window snapshot.
+  - Emergency cancel: `val_emergency_cancel(session)` sends a best‑effort CANCEL and marks the session aborted.
+
 Limitations
--
-- Very large verification windows (>4 GiB) are not currently supported on the sender side due to 32-bit file I/O offsets used for the verify CRC computation. If the receiver requests a `verify_len` larger than this, the sender treats it as an unverifiable region and falls back per policy (effectively a mismatch → restart or skip depending on mode).
-   - Core defaults clamp verification windows for responsiveness: tail modes are capped at ~2 MiB by default; FULL uses full-prefix verify up to 512 MiB and falls back to a large-tail verify beyond that. Sizes/offsets on wire are 64-bit LE.
-  - Receiver-driven policies (preferred): `val_resume_policy_t`
-  - NONE(0) uses resume.mode as configured; SAFE_DEFAULT(1); ALWAYS_START_ZERO(2); ALWAYS_SKIP_IF_EXISTS(3);
-      SKIP_IF_DIFFERENT(4); ALWAYS_SKIP(5); STRICT_RESUME_ONLY(6)
-  - On mismatch/anomaly defaults come from the session (see `val_session_create()` in `src/val_core.c`)
+- Very large verification windows (>4 GiB) are not currently supported by the example filesystem adapter during VERIFY CRC computation.
+  The core clamps verification windows for responsiveness: tail modes are capped by default (≈2 MiB); FULL verifies full‑prefix up to a cap,
+  and falls back to a large‑tail verify beyond that. Application integrations can supply their own filesystem and CRC providers to remove these limits.
 
 ## Build options
 
@@ -64,12 +77,12 @@ cmake --build build\windows-debug --config Debug -j
 
 Two executables live under `examples/tcp/` with optional flags for MTU and resume mode.
 
-- Sender usage: `val_example_send.exe [--mtu N] [--policy NAME|ID] <host> <port> <file1> [file2 ...]`
-- Receiver usage: `val_example_receive.exe [--mtu N] [--policy NAME|ID] <port> <outdir>`
+- Sender usage: `val_example_send.exe [--mtu N] [--resume MODE] [--tail-bytes N] [--log-level L] [--log-file PATH] <host> <port> <file1> [file2 ...]`
+- Receiver usage: `val_example_receive.exe [--mtu N] [--resume MODE] [--tail-bytes N] [--log-level L] [--log-file PATH] <port> <outdir>`
 
 Resume mode names (case-insensitive) map to `val_resume_mode_t`:
 
-- `none(0)`, `safe(1)`, `start_zero(2)`, `skip_if_exists(3)`, `skip_if_different(4)`, `always_skip(5)`, `strict_only(6)`
+- `never`, `skip`/`skip_existing`, `tail`, `tail_or_zero`, `full`, `full_or_zero`
 
 Build (Windows/Visual Studio):
 
@@ -81,14 +94,18 @@ cmake --build build\windows-release --config Release -j
 Run (PowerShell):
 
 ```powershell
-# Receiver (port 9000, output to D:\out)
-.\build\windows-release\Release\val_example_receive.exe --policy safe --mtu 8192 9000 D:\out
+# Receiver (port 9000, output to D:\\out, MTU 8192, resume tail-or-zero with 16 KiB)
+.\build\windows-release\Release\val_example_receive.exe --mtu 8192 --resume tail_or_zero --tail-bytes 16384 9000 D:\\out
 
-# Sender (connect to localhost, send files)
-.\build\windows-release\Release\val_example_send.exe --policy strict_only 127.0.0.1 9000 D:\files\a.bin D:\files\b.bin
+# Sender (connect to localhost, same resume settings)
+.\build\windows-release\Release\val_example_send.exe --mtu 8192 --resume tail_or_zero --tail-bytes 16384 127.0.0.1 9000 D:\\files\a.bin D:\\files\b.bin
 ```
 
 On Linux/WSL, use the provided `linux-*` presets in `CMakePresets.json` and run the corresponding binaries.
+
+Notes
+- The repository root should stay clean. All build outputs and test artifacts go under `build/<preset>/...`.
+- If you previously had stray `Testing/` or `out/` folders at the root, they were from older ad-hoc runs; they are ignored by `.gitignore` and no longer created by the current CMake setup.
 
 ## Status
 
@@ -98,6 +115,13 @@ On Linux/WSL, use the provided `linux-*` presets in `CMakePresets.json` and run 
   - Header layout (base/pre‑1.0): type, wire_version(=0), payload_len, seq, offset, header CRC.
 - Mid‑stream recovery: cumulative DATA_ACK semantics and DONE_ACK implemented.
 - Errors on the wire are compact: `val_status_t code` + `detail mask` (both little‑endian in ERROR payload).
+
+Transport contract (recv)
+- Transports must be blocking.
+- For each header/payload/trailer read, the core passes an exact length to `recv(ctx, buf, len, &received, timeout_ms)`.
+- On success, return 0 and set `*received == len`.
+- On timeout, return 0 and set `*received == 0` (the core will treat this as a timeout and retry per policy).
+- On fatal I/O error, return <0 (the core will abort the operation).
 
 Resilience and timeouts:
 - All blocking waits use adaptive timeouts derived from round-trip time (RFC 6298 style) with Karn’s algorithm, clamped between `timeouts.min_timeout_ms` and `timeouts.max_timeout_ms`.

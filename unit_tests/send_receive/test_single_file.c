@@ -2,52 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32)
-#include <direct.h>
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#include <sys/types.h>
-#endif
-
-static int write_pattern_file(const char *path, size_t size)
-{
-    FILE *f = fopen(path, "wb");
-    if (!f)
-        return -1;
-    for (size_t i = 0; i < size; ++i)
-        fputc((int)(i & 0xFF), f);
-    fclose(f);
-    return 0;
-}
-
-static int files_equal(const char *a, const char *b)
-{
-    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
-    if (!fa || !fb)
-    {
-        if (fa)
-            fclose(fa);
-        if (fb)
-            fclose(fb);
-        return 0;
-    }
-    int eq = 1;
-    int ca, cb;
-    do
-    {
-        ca = fgetc(fa);
-        cb = fgetc(fb);
-        if (ca != cb)
-        {
-            eq = 0;
-            break;
-        }
-    } while (ca != EOF && cb != EOF);
-    fclose(fa);
-    fclose(fb);
-    return eq;
-}
+// Using common helpers from test_support.h
 
 int main(void)
 {
@@ -59,38 +14,29 @@ int main(void)
     test_duplex_init(&d, packet, depth);
 
     // Temp directories/files under the build's executable directory
-    char artroot[1024];
-    if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
-    {
-        fprintf(stderr, "failed to determine artifacts root\n");
-        return 1;
-    }
-#if defined(_WIN32)
     char tmpdir[2048];
-    snprintf(tmpdir, sizeof(tmpdir), "%s\\single", artroot);
     char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s\\single\\out", artroot);
-    char inpath[2048];
-    snprintf(inpath, sizeof(inpath), "%s\\single\\input.bin", artroot);
-    char outpath[2048];
-    snprintf(outpath, sizeof(outpath), "%s\\single\\out\\input.bin", artroot);
-#else
-    char tmpdir[2048];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/single", artroot);
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s/single/out", artroot);
-    char inpath[2048];
-    snprintf(inpath, sizeof(inpath), "%s/single/input.bin", artroot);
-    char outpath[2048];
-    snprintf(outpath, sizeof(outpath), "%s/single/out/input.bin", artroot);
-#endif
-    if (ts_ensure_dir(tmpdir) != 0 || ts_ensure_dir(outdir) != 0)
+    if (ts_build_case_dirs("single", tmpdir, sizeof(tmpdir), outdir, sizeof(outdir)) != 0)
     {
         fprintf(stderr, "failed to create artifacts dirs\n");
         return 1;
     }
+    char inpath[2048];
+    if (ts_path_join(inpath, sizeof(inpath), tmpdir, "input.bin") != 0)
+    {
+        fprintf(stderr, "path join failed\n");
+        return 1;
+    }
+    char outpath[2048];
+    if (ts_path_join(outpath, sizeof(outpath), outdir, "input.bin") != 0)
+    {
+        fprintf(stderr, "path join failed\n");
+        return 1;
+    }
 
-    if (write_pattern_file(inpath, file_size) != 0)
+    ts_remove_file(outpath);
+    ts_remove_file(inpath);
+    if (ts_write_pattern_file(inpath, file_size) != 0)
     {
         fprintf(stderr, "failed to create input file\n");
         return 1;
@@ -122,6 +68,7 @@ int main(void)
 
     // Spawn receiver thread using helper
     ts_thread_t th = ts_start_receiver(rx, outdir);
+    ts_receiver_warmup(&cfg_tx, 5);
 
     const char *files[1] = {inpath};
     val_status_t st = val_send_files(tx, files, 1, NULL);
@@ -165,6 +112,33 @@ int main(void)
     }
 #endif
 
+#if VAL_ENABLE_WIRE_AUDIT
+    {
+        val_wire_audit_t a_tx = {0}, a_rx = {0};
+        if (val_get_wire_audit(tx, &a_tx) == VAL_OK && val_get_wire_audit(rx, &a_rx) == VAL_OK)
+        {
+            // Receiver should not send DATA
+            if (a_rx.sent_data != 0)
+            {
+                fprintf(stderr, "wire_audit: receiver sent DATA unexpectedly (count=%llu)\n", (unsigned long long)a_rx.sent_data);
+                return 12;
+            }
+            // Sender should not send DONE_ACK/EOT_ACK
+            if (a_tx.sent_done_ack != 0 || a_tx.sent_eot_ack != 0)
+            {
+                fprintf(stderr, "wire_audit: sender sent *_ACK unexpectedly (done_ack=%llu eot_ack=%llu)\n",
+                        (unsigned long long)a_tx.sent_done_ack, (unsigned long long)a_tx.sent_eot_ack);
+                return 13;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "val_get_wire_audit failed\n");
+            return 14;
+        }
+    }
+#endif
+
     val_session_destroy(tx);
     val_session_destroy(rx);
 
@@ -179,7 +153,7 @@ int main(void)
         return 4;
     }
 
-    if (!files_equal(inpath, outpath))
+    if (!ts_files_equal(inpath, outpath))
     {
         fprintf(stderr, "mismatch in output\n");
         return 5;

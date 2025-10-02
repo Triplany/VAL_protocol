@@ -9,11 +9,14 @@
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--mtu N] [--resume MODE] [--tail-bytes N] [--log-level L] [--log-file PATH] <host> <port> <file1> [file2 "
+            "Usage: %s [--mtu N] [--resume MODE] [--tail-bytes N] [--streaming on|off] [--accept-streaming on|off] [--log-level "
+            "L] [--log-file PATH] <host> <port> <file1> [file2 "
             "...>]\n"
             "  --mtu N          Packet size/MTU (default 4096; min %u, max %u)\n"
             "  --resume MODE    Resume mode: never, skip, tail, tail_or_zero, full, full_or_zero\n"
             "  --tail-bytes N   Tail verification bytes for tail modes (default 1024)\n"
+            "  --streaming      Enable sender streaming pacing if peer accepts (default on)\n"
+            "  --accept-streaming  Accept incoming peer streaming pacing (default on)\n"
             "  --log-level L    Runtime log verbosity: off, crit, warn, info, debug, trace, or 0..5\n"
             "  --log-file PATH  If set, append logs to this file (else stderr)\n",
             prog, (unsigned)VAL_MIN_PACKET_SIZE, (unsigned)VAL_MAX_PACKET_SIZE);
@@ -209,6 +212,8 @@ int main(int argc, char **argv)
     unsigned tail_bytes = 16384;
     int log_level = -1; // -1 means: derive from env or default
     const char *log_file_path = NULL;
+    int opt_streaming = 1;        // default on
+    int opt_accept_streaming = 1; // default on
 
     // Parse optional flags
     int argi = 1;
@@ -272,6 +277,42 @@ int main(int argc, char **argv)
                 return 1;
             }
             log_level = parse_level(argv[argi++]);
+        }
+        else if (strcmp(arg, "--streaming") == 0)
+        {
+            if (argi >= argc)
+            {
+                usage(argv[0]);
+                return 1;
+            }
+            const char *v = argv[argi++];
+            if (strieq(v, "on") || strieq(v, "true") || strieq(v, "1"))
+                opt_streaming = 1;
+            else if (strieq(v, "off") || strieq(v, "false") || strieq(v, "0"))
+                opt_streaming = 0;
+            else
+            {
+                fprintf(stderr, "Invalid --streaming value; use on|off\n");
+                return 1;
+            }
+        }
+        else if (strcmp(arg, "--accept-streaming") == 0)
+        {
+            if (argi >= argc)
+            {
+                usage(argv[0]);
+                return 1;
+            }
+            const char *v = argv[argi++];
+            if (strieq(v, "on") || strieq(v, "true") || strieq(v, "1"))
+                opt_accept_streaming = 1;
+            else if (strieq(v, "off") || strieq(v, "false") || strieq(v, "0"))
+                opt_accept_streaming = 0;
+            else
+            {
+                fprintf(stderr, "Invalid --accept-streaming value; use on|off\n");
+                return 1;
+            }
         }
         else if (strcmp(arg, "--log-file") == 0)
         {
@@ -370,6 +411,15 @@ int main(int argc, char **argv)
     // Resume configuration: use resume.mode defaults unless policy provided
     cfg.resume.mode = resume_mode;
     cfg.resume.crc_verify_bytes = tail_bytes;
+    // Adaptive TX defaults; allow flags to override
+    cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
+    cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_16;
+    cfg.adaptive_tx.streaming_enabled = (uint8_t)(opt_streaming ? 1 : 0);
+    cfg.adaptive_tx.accept_incoming_streaming = (uint8_t)(opt_accept_streaming ? 1 : 0);
+    cfg.adaptive_tx.retransmit_cache_enabled = 0;
+    cfg.adaptive_tx.degrade_error_threshold = 3;
+    cfg.adaptive_tx.recovery_success_threshold = 10;
+    cfg.adaptive_tx.mode_sync_interval = 0;
 
     val_session_t *tx = NULL;
     uint32_t init_detail = 0;
@@ -395,6 +445,21 @@ int main(int argc, char **argv)
 #else
         fprintf(stderr, "send failed: code=%d detail=0x%08X\n", (int)lc, (unsigned)det);
 #endif
+    }
+    else
+    {
+        // After successful handshake/transfer, print negotiated settings
+        size_t mtu = 0;
+        if (val_get_effective_packet_size(tx, &mtu) == VAL_OK)
+        {
+            int send_stream_ok = 0, recv_stream_ok = 0;
+            (void)val_get_streaming_allowed(tx, &send_stream_ok, &recv_stream_ok);
+            val_tx_mode_t mode = VAL_TX_STOP_AND_WAIT;
+            (void)val_get_current_tx_mode(tx, &mode);
+            fprintf(stdout, "[VAL][TX] negotiated: mtu=%zu, send_streaming=%s, accept_streaming=%s, init_tx_mode=%u\n", mtu,
+                    send_stream_ok ? "yes" : "no", recv_stream_ok ? "yes" : "no", (unsigned)mode);
+            fflush(stdout);
+        }
     }
 
 #if VAL_ENABLE_METRICS

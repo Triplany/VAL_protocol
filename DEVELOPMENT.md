@@ -53,7 +53,10 @@ Header: `include/val_protocol.h` (source of truth for public constants and types
 
 - Transport (blocking)
   - `int (*send)(void* io_ctx, const void* data, size_t len)` — Must send exactly `len` bytes.
-  - `int (*recv)(void* io_ctx, void* buf, size_t buf_size, size_t* received, uint32_t timeout_ms)` — Reads exactly `buf_size` bytes or times out; returns 0 on success.
+  - `int (*recv)(void* io_ctx, void* buf, size_t buf_size, size_t* received, uint32_t timeout_ms)` — Called for header, payload, and trailer reads.
+    - Return 0 on success and set `*received == buf_size`.
+    - Return 0 on timeout and set `*received == 0` (the core treats this as a timeout and will retry per policy).
+    - Return <0 on fatal I/O error (the core aborts the operation).
   - Optional: `int (*is_connected)(void* io_ctx)` — Return 1 if connected, 0 if disconnected, <0 if unknown. If NULL, the core assumes connected.
   - Optional: `void (*flush)(void* io_ctx)` — Best‑effort flush after control packets. If NULL, treated as no‑op.
   - `void* io_context`
@@ -83,17 +86,21 @@ Header: `include/val_protocol.h` (source of truth for public constants and types
   - Compile‑time gated by `VAL_LOG_LEVEL` (0..5). Provide `debug.log`/`debug.context` to receive messages.
   - Runtime filter: `debug.min_level` (messages with `level <= min_level` are forwarded). If left 0, a sensible default is applied at session creation.
 
-## Features and policy
+## Features and resume
 
 Features:
   - Core behavior is implicit and not represented by feature bits.
   - Optional (negotiated via HELLO; included in `val_get_builtin_features()` when compiled in):
-    - `VAL_FEAT_ADVANCED_TX` (bit 0) — Advanced transmitter/resume capabilities (placeholder)
-- Resume strategies
-  - Resume modes: NONE, APPEND, CRC_VERIFY
-  - Policies removed: receiver decisions are determined by the selected resume mode.
-  - NONE(0) uses resume.mode; SAFE_DEFAULT(1); ALWAYS_START_ZERO(2); ALWAYS_SKIP_IF_EXISTS(3); SKIP_IF_DIFFERENT(4); ALWAYS_SKIP(5); STRICT_RESUME_ONLY(6)
-  - Mismatch/anomaly defaults are set during `val_session_create()` based on policy (see `src/val_core.c`).
+    - `VAL_FEAT_ADVANCED_TX` (bit 0) — Placeholder for future adaptive TX features.
+
+Resume configuration (public `val_resume_mode_t`):
+  - `VAL_RESUME_NEVER` — Always start from zero (overwrite any existing file).
+  - `VAL_RESUME_SKIP_EXISTING` — Skip the file if it exists; do not verify.
+  - `VAL_RESUME_CRC_TAIL` — Verify trailing window; resume on match, skip on mismatch.
+  - `VAL_RESUME_CRC_TAIL_OR_ZERO` — Verify trailing window; resume on match, overwrite from zero on mismatch.
+  - `VAL_RESUME_CRC_FULL` — Verify full local prefix; skip only when exact match, otherwise skip on mismatch.
+  - `VAL_RESUME_CRC_FULL_OR_ZERO` — Verify full local prefix; skip only when exact match, otherwise overwrite from zero.
+  - Tail modes use `crc_verify_bytes` to choose the trailing window size; very large windows are internally capped for responsiveness.
 
 ## Protocol: wire format and flow
 
@@ -181,6 +188,7 @@ cmake --build --preset linux-release
 ## Tests
 
 - Unit tests live under `unit_tests/` and are registered with CTest. Suites cover send/receive, policy behaviors, and corruption/recovery scenarios. Artifacts are placed under the build tree.
+ - The Windows test harness suppresses system error dialogs and uses a deterministic in‑memory duplex transport with optional jitter/fragmentation/reordering. A watchdog guard aborts hung tests.
 
 ## Internal notes & invariants
 
@@ -189,6 +197,23 @@ cmake --build --preset linux-release
 - Transports must be blocking and may be invoked with different lengths for header/payload/trailer segments.
 - Multi‑file sessions end with EOT/EOT_ACK.
 - Resume never truncates files; policies choose between START_ZERO, START_OFFSET, VERIFY_FIRST, SKIP_FILE, ABORT_FILE.
+
+## Adaptive TX and diagnostics
+
+- Adaptive transmitter uses window-only rungs: WINDOW_64/32/16/8/4/2 and STOP_AND_WAIT (fastest has the lowest enum value).
+  - Streaming is pacing, not a distinct mode. When negotiated, the sender uses RTT-derived micro-polling between ACK waits (≈SRTT/4 clamped 2–20 ms) up to a fixed per-wait deadline; on deadline expiry it escalates to a full timeout and retries with exponential backoff.
+  - Negotiation occurs via HELLO `streaming_flags` (bit0: can stream when sending; bit1: accepts incoming streaming). Effective permissions are directional and can be queried with `val_get_streaming_allowed()`.
+  - `val_get_current_tx_mode(session, &out_mode)` exposes the current window rung to tests/telemetry.
+- Compile‑time diagnostics:
+  - Metrics (`VAL_ENABLE_METRICS`): wire counters (packets/bytes), timeouts, retransmits, CRC errors, file counts, RTT samples.
+  - Wire audit (`VAL_ENABLE_WIRE_AUDIT`): per‑packet send/recv counters and inflight window auditing.
+- Emergency cancel API: `val_emergency_cancel(session)` best‑effort sends a CANCEL signal and marks the session aborted.
+
+### Unit test diagnostics toggles
+- The in‑memory transport and network simulator have optional, test‑only tracing controlled via environment variables:
+  - `TS_TP_TRACE=1` prints low‑level transport recv/send decisions from the legacy test transport.
+  - `TS_NET_SIM_TRACE=1` prints network‑simulator events (partial sends/recvs, jitter delays, reordering queue activity).
+- These are intended for debugging failing/flaky tests and are not part of the public library API.
 
 ## Roadmap / TODO
 

@@ -185,10 +185,14 @@ For field definitions and API details, see `DEVELOPMENT.md` and `include/val_pro
 
 Developer diagnostics
 - The library has compile-time gated logging to help analyze sequences like resume verify and ACK retries. Enable it by setting `VAL_LOG_LEVEL` at build time and provide a sink via `cfg.debug.log`.
+ - Optional compile-time diagnostics:
+   - Metrics (`VAL_ENABLE_METRICS`): packet/byte counters, timeouts, retransmits, CRC errors, files sent/recv, RTT samples.
+   - Wire audit (`VAL_ENABLE_WIRE_AUDIT`): per-packet send/recv counters and inflight window snapshots.
 
 Transport integration notes
 - The library can consult an optional `transport.is_connected` hook before blocking waits/retransmits to fail fast on disconnects. If the hook is absent, it assumes connected.
 - After control packets (HELLO, DONE, EOT, ERROR), the library may call an optional `transport.flush` hook to reduce latency. Absent the hook, flush is a no‑op.
+ - Timeout semantics for `transport.recv`: return 0 with `*received == 0` to indicate a timeout (recoverable). Return <0 only for fatal I/O errors. On success, return 0 with `*received == exact_len`.
 
 
 ## Implemented pre‑1.0 changes (mid‑stream recovery)
@@ -214,3 +218,13 @@ We simplified and hardened recovery without preserving previous on‑wire semant
 - DONE_ACK added. Receiver replies after final CRC verification. Sender retransmits DONE on timeout until DONE_ACK is received.
 
 These keep the fixed‑size framing and stop‑and‑wait simplicity while enabling mid‑stream resync.
+
+## Adaptive TX and streaming pacing
+
+- Adaptive transmitter uses window-only rungs: 64, 32, 16, 8, 4, 2, and stop-and-wait (1 in flight). Faster rungs have lower enum values.
+- Streaming is sender pacing, not a separate mode. When negotiated, the sender interleaves short ACK polls derived from RTT during DATA_ACK waits to keep the window full without long blocking sleeps.
+- Negotiation: HELLO carries a compact `streaming_flags` byte.
+  - bit0: this endpoint can stream when sending to the peer
+  - bit1: this endpoint accepts an incoming peer that streams to it
+  - Effective permissions are directional and can be queried at runtime via `val_get_streaming_allowed()`.
+- Pacing policy: poll interval ≈ SRTT/4 clamped to [2, 20] ms (falls back to a conservative value before enough samples). Each ACK wait has a fixed deadline; if the deadline elapses, the code escalates to a real timeout and retries with exponential backoff.
