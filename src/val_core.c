@@ -363,26 +363,7 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     s->timing.samples_taken = 0;
     s->timing.in_retransmit = 0;
     // Clock presence is guaranteed by validate_config(); no runtime fallback paths.
-    // Fill in sane defaults for newly added resume policy fields if caller left them zero.
-    // Important: If policy==NONE, we preserve legacy resume.mode behavior; do not override to SAFE_DEFAULT here.
-    if (s->cfg.resume.verify_algo == 0)
-    {
-        s->cfg.resume.verify_algo = VAL_VERIFY_ALGO_CRC32;
-    }
-    if (s->cfg.resume.on_fs_anomaly == 0)
-    {
-        s->cfg.resume.on_fs_anomaly = VAL_FS_ANOMALY_SKIP_FILE;
-    }
-    if (s->cfg.resume.on_verify_mismatch == 0)
-    {
-        // Choose mismatch default based on policy when enabled; otherwise default to START_ZERO
-        if (s->cfg.resume.policy == VAL_RESUME_POLICY_STRICT_RESUME_ONLY)
-            s->cfg.resume.on_verify_mismatch = VAL_RESUME_MISMATCH_ABORT_FILE;
-        else if (s->cfg.resume.policy == VAL_RESUME_POLICY_SKIP_IF_DIFFERENT)
-            s->cfg.resume.on_verify_mismatch = VAL_RESUME_MISMATCH_SKIP_FILE;
-        else
-            s->cfg.resume.on_verify_mismatch = VAL_RESUME_MISMATCH_START_ZERO;
-    }
+    // No legacy resume policy defaults; simplified resume config has only mode and crc_verify_bytes.
 #if VAL_LOG_LEVEL == 0
     s->cfg.debug.min_level = 0; // OFF in builds without logging
 #else
@@ -672,12 +653,6 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     {
         VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_HEADER);
         VAL_LOG_ERROR(s, "recv_packet: header CRC mismatch");
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
-        val_status_t st = VAL_ERR_CRC;
 #if VAL_ENABLE_METRICS
         s->metrics.crc_errors++;
 #endif
@@ -686,7 +661,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #else
         pthread_mutex_unlock(&s->lock);
 #endif
-        return st;
+        return VAL_ERR_CRC;
     }
     val_packet_header_t *hdr = (val_packet_header_t *)buf; // original header bytes remain for trailer CRC
     // Verify wire_version is zero (reserved for future use)
@@ -776,12 +751,6 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     {
         VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_TRAILER);
         VAL_LOG_ERROR(s, "recv_packet: trailer CRC mismatch");
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
-        val_status_t st = VAL_ERR_CRC;
 #if VAL_ENABLE_METRICS
         s->metrics.crc_errors++;
 #endif
@@ -790,7 +759,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #else
         pthread_mutex_unlock(&s->lock);
 #endif
-        return st;
+        return VAL_ERR_CRC;
     }
     if (type)
         *type = (val_packet_type_t)hdr->type;
@@ -930,12 +899,21 @@ static uint32_t def_or(uint32_t v, uint32_t d)
     return v ? v : d;
 }
 
-// Ensure local config.required only contains compiled-in features; sanitize requested
+// Ensure local config.required/requested only contains negotiable (optional) features compiled-in; sanitize requested
+static inline uint32_t val__negotiable_mask(void)
+{
+    // Negotiable bits are exactly the compiled-in optional feature mask
+    return VAL_BUILTIN_FEATURES;
+}
+
 static val_status_t val_internal_validate_local_features(const val_config_t *cfg, uint32_t *out_requested_sanitized)
 {
     if (!cfg)
         return VAL_ERR_INVALID_ARG;
-    uint32_t missing_required = cfg->features.required & ~VAL_BUILTIN_FEATURES;
+    // Ignore any core/reserved bits the app may have set by mistake; we only negotiate optional bits
+    uint32_t negotiable = val__negotiable_mask();
+    uint32_t required_sanitized = cfg->features.required & negotiable;
+    uint32_t missing_required = required_sanitized & ~negotiable; // always zero but keep shape for clarity
     if (missing_required)
     {
         // Local build does not support some required features; abort before handshake
@@ -943,7 +921,7 @@ static val_status_t val_internal_validate_local_features(const val_config_t *cfg
     }
     if (out_requested_sanitized)
     {
-        *out_requested_sanitized = cfg->features.requested & VAL_BUILTIN_FEATURES;
+        *out_requested_sanitized = cfg->features.requested & negotiable;
     }
     return VAL_OK;
 }
@@ -974,10 +952,12 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     hello.version_minor = (uint8_t)VAL_VERSION_MINOR;
     // Propose our configured size; effective size will be min on negotiation
     hello.packet_size = (uint32_t)s->config->buffers.packet_size;
-    // Advertise built-in features and clamp required/requested to built-in
-    hello.features = VAL_BUILTIN_FEATURES;
-    hello.required = s->config->features.required; // don't mask required; we validated locally
-    hello.requested = requested_sanitized;         // drop unsupported requested bits
+    // Advertise only negotiable optional features; core features are implicit
+    uint32_t negotiable = val__negotiable_mask();
+    hello.features = negotiable;
+    // Mask required/requested to negotiable bits only
+    hello.required = s->config->features.required & negotiable;
+    hello.requested = requested_sanitized; // already masked to negotiable
     // Send LE-encoded hello
     val_handshake_t hello_le = hello;
     hello_le.magic = val_htole32(hello_le.magic);
@@ -1054,7 +1034,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
         return VAL_ERR_PACKET_SIZE_MISMATCH;
     }
     s->effective_packet_size = negotiated;
-    // Enforce required features: our required must be present on peer
+    // Enforce optional required features: our negotiable 'required' must be present on peer
     s->peer_features = peer_h.features;
     uint32_t missing_on_peer = hello.required & ~peer_h.features;
     if (missing_on_peer)
@@ -1148,21 +1128,22 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     hello.version_major = (uint8_t)VAL_VERSION_MAJOR;
     hello.version_minor = (uint8_t)VAL_VERSION_MINOR;
     hello.packet_size = (uint32_t)s->effective_packet_size;
-    // Validate our local required; sanitize requested
-    uint32_t requested_sanitized = s->config->features.requested & VAL_BUILTIN_FEATURES;
-    uint32_t missing_required = s->config->features.required & ~VAL_BUILTIN_FEATURES;
+    // Sanitize to negotiable optional features; core features are implicit and ignored
+    uint32_t negotiable = val__negotiable_mask();
+    uint32_t requested_sanitized = s->config->features.requested & negotiable;
+    uint32_t missing_required = (s->config->features.required & negotiable) & ~negotiable; // always zero
     if (missing_required)
     {
         VAL_SET_FEATURE_ERROR(s, missing_required);
         (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, VAL_SET_MISSING_FEATURE(missing_required));
         return VAL_ERR_FEATURE_NEGOTIATION;
     }
-    hello.features = VAL_BUILTIN_FEATURES;
-    hello.required = s->config->features.required; // keep as-is; validated above
+    hello.features = negotiable;
+    hello.required = s->config->features.required & negotiable;
     hello.requested = requested_sanitized;
     s->peer_features = peer_h.features;
-    // Enforce peer's required features: must be subset of our features
-    uint32_t missing_local = peer_h.required & ~hello.features;
+    // Enforce peer's required optional features: must be subset of our advertised optional features
+    uint32_t missing_local = (peer_h.required & negotiable) & ~hello.features;
     if (missing_local)
     {
         VAL_SET_FEATURE_ERROR(s, missing_local);

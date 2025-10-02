@@ -129,7 +129,7 @@ typedef struct
     uint32_t action; // val_resume_action_t
     uint64_t resume_offset;
     uint32_t verify_crc;
-    uint32_t verify_len;
+    uint64_t verify_len;
 } val_resume_resp_t;
 
 // Minimal session struct
@@ -159,20 +159,7 @@ struct val_session_s
     uint32_t last_error_detail;
 #if VAL_ENABLE_METRICS
     // Metrics counters (zeroed at session create)
-    struct
-    {
-        uint64_t packets_sent;
-        uint64_t packets_recv;
-        uint64_t bytes_sent;
-        uint64_t bytes_recv;
-        uint32_t timeouts;
-        uint32_t retransmits;
-        uint32_t crc_errors;
-        uint32_t handshakes;
-        uint32_t files_sent;
-        uint32_t files_recv;
-        uint32_t rtt_samples;
-    } metrics;
+    val_metrics_t metrics;
 #endif
     // thread-safety primitive (coarse serialization per session)
 #if defined(_WIN32)
@@ -407,8 +394,9 @@ typedef struct
 } val_handshake_t;
 
 // Feature bits are defined publicly in val_protocol.h
+// VAL_BUILTIN_FEATURES should include ONLY negotiable/optional features compiled into this build.
 #ifndef VAL_BUILTIN_FEATURES
-#define VAL_BUILTIN_FEATURES (VAL_FEAT_CRC_RESUME | VAL_FEAT_MULTI_FILES)
+#define VAL_BUILTIN_FEATURES (0u)
 #endif
 
 // Handshake helpers

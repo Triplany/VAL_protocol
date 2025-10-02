@@ -106,8 +106,8 @@ static int test_resume_crc_verify_check(void)
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
-    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_VERIFY, 8192);
-    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_VERIFY, 8192);
+    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 8192);
+    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 8192);
     val_session_t *tx = NULL, *rx = NULL;
     uint32_t dtx = 0, drx = 0;
     val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
@@ -187,8 +187,8 @@ static int test_corruption_recovery_check(void)
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet, .faults = d.faults};
     val_config_t cfg_tx, cfg_rx;
-    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_VERIFY, 16384);
-    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_VERIFY, 16384);
+    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 16384);
+    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 16384);
     val_session_t *tx = NULL, *rx = NULL;
     uint32_t dtx = 0, drx = 0;
     val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);

@@ -153,8 +153,8 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     val_config_t cfg_tx, cfg_rx;
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
-    ts_make_config(&cfg_tx, sb_tx, rb_tx, sender_pkt, &end_tx, VAL_RESUME_APPEND, 1024);
-    ts_make_config(&cfg_rx, sb_rx, rb_rx, receiver_pkt, &end_rx, VAL_RESUME_APPEND, 1024);
+    ts_make_config(&cfg_tx, sb_tx, rb_tx, sender_pkt, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
+    ts_make_config(&cfg_rx, sb_rx, rb_rx, receiver_pkt, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
 
     val_session_t *tx = NULL, *rx = NULL;
     uint32_t dtx = 0, drx = 0;
@@ -265,8 +265,8 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     // For reverse direction, the endpoint that was previously RX (end_rx) becomes TX
     test_duplex_t end_tx2 = end_rx;
     test_duplex_t end_rx2 = end_tx;
-    ts_make_config(&cfg_tx2, sb_tx2, rb_tx2, receiver_pkt, &end_tx2, VAL_RESUME_APPEND, 1024);
-    ts_make_config(&cfg_rx2, sb_rx2, rb_rx2, sender_pkt, &end_rx2, VAL_RESUME_APPEND, 1024);
+    ts_make_config(&cfg_tx2, sb_tx2, rb_tx2, receiver_pkt, &end_tx2, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
+    ts_make_config(&cfg_rx2, sb_rx2, rb_rx2, sender_pkt, &end_rx2, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
     val_session_t *tx2 = NULL, *rx2 = NULL;
     uint32_t dtx2 = 0, drx2 = 0;
     val_status_t rctx2 = val_session_create(&cfg_tx2, &tx2, &dtx2);

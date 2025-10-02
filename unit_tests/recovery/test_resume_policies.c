@@ -83,8 +83,8 @@ static void make_paths(char *root, size_t rootsz, char *dir, size_t dirsz, char 
 static void make_cfgs(val_config_t *cfg_tx, val_config_t *cfg_rx, test_duplex_t *d_tx, test_duplex_t *d_rx, void *sb_a,
                       void *rb_a, void *sb_b, void *rb_b, size_t packet)
 {
-    ts_make_config(cfg_tx, sb_a, rb_a, packet, d_tx, VAL_RESUME_CRC_VERIFY, 8192);
-    ts_make_config(cfg_rx, sb_b, rb_b, packet, d_rx, VAL_RESUME_CRC_VERIFY, 8192);
+    ts_make_config(cfg_tx, sb_a, rb_a, packet, d_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 8192);
+    ts_make_config(cfg_rx, sb_b, rb_b, packet, d_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 8192);
     ts_set_console_logger(cfg_tx);
     ts_set_console_logger(cfg_rx);
 }
@@ -140,7 +140,7 @@ static int test_always_skip_if_exists(void)
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
     make_cfgs(&cfg_tx, &cfg_rx, &end_tx, &end_rx, sb_a, rb_a, sb_b, rb_b, packet);
-    cfg_rx.resume.policy = VAL_RESUME_POLICY_ALWAYS_SKIP_IF_EXISTS;
+    cfg_rx.resume.mode = VAL_RESUME_SKIP_EXISTING;
 
     val_status_t st = VAL_OK;
     if (run_send_recv(in, outdir, &cfg_tx, &cfg_rx, &st) != 0)
@@ -190,7 +190,7 @@ static int test_strict_resume_only_abort_on_mismatch(void)
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
     make_cfgs(&cfg_tx, &cfg_rx, &end_tx, &end_rx, sb_a, rb_a, sb_b, rb_b, packet);
-    cfg_rx.resume.policy = VAL_RESUME_POLICY_STRICT_RESUME_ONLY; // default on mismatch = ABORT
+    cfg_rx.resume.mode = VAL_RESUME_CRC_FULL;
 
     val_status_t st = VAL_OK;
     if (run_send_recv(in, outdir, &cfg_tx, &cfg_rx, &st) != 0)
@@ -201,12 +201,13 @@ static int test_strict_resume_only_abort_on_mismatch(void)
     free(rb_b);
     test_duplex_free(&d);
 
-    if (st != VAL_ERR_ABORTED)
+    // New behavior: CRC_FULL mismatch should skip the file (no overwrite) and continue session.
+    if (st != VAL_OK)
     {
-        fprintf(stderr, "STRICT_RESUME_ONLY: expected VAL_ERR_ABORTED, got %d\n", st);
+        fprintf(stderr, "CRC_FULL mismatch expected skip/continue, got status %d\n", st);
         return 3;
     }
-    // Ensure output unchanged after abort
+    // Ensure output unchanged after skip
     uint64_t after_size = ts_file_size(out);
     uint32_t after_crc = ts_file_crc32(out);
     if (before_size != after_size || before_crc != after_crc)
@@ -238,7 +239,7 @@ static int test_always_start_zero_overwrite(void)
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
     make_cfgs(&cfg_tx, &cfg_rx, &end_tx, &end_rx, sb_a, rb_a, sb_b, rb_b, packet);
-    cfg_rx.resume.policy = VAL_RESUME_POLICY_ALWAYS_START_ZERO;
+    cfg_rx.resume.mode = VAL_RESUME_NEVER;
 
     val_status_t st = VAL_OK;
     if (run_send_recv(in, outdir, &cfg_tx, &cfg_rx, &st) != 0)
@@ -294,7 +295,7 @@ int main(void)
         test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
         val_config_t cfg_tx, cfg_rx;
         make_cfgs(&cfg_tx, &cfg_rx, &end_tx, &end_rx, sb_a, rb_a, sb_b, rb_b, packet);
-        cfg_rx.resume.policy = VAL_RESUME_POLICY_SKIP_IF_DIFFERENT;
+        cfg_rx.resume.mode = VAL_RESUME_CRC_FULL;
         val_status_t st = VAL_OK;
         run_send_recv(in, outdir, &cfg_tx, &cfg_rx, &st);
         free(sb_a);

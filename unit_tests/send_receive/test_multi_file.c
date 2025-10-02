@@ -100,8 +100,8 @@ int main(void)
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = {.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
-    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_APPEND, 2048);
-    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_APPEND, 2048);
+    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 2048);
+    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 2048);
 
     val_session_t *tx = NULL;
     val_session_t *rx = NULL;
@@ -121,6 +121,31 @@ int main(void)
     val_status_t st = val_send_files(tx, files, 2, NULL);
 
     ts_join_thread(th);
+
+#if VAL_ENABLE_METRICS
+    {
+        val_metrics_t mtx = {0}, mrx = {0};
+        if (val_get_metrics(tx, &mtx) == VAL_OK && val_get_metrics(rx, &mrx) == VAL_OK)
+        {
+            if (mtx.files_sent != 2 || mrx.files_recv != 2)
+            {
+                fprintf(stderr, "metrics mismatch files: tx_sent=%u rx_recv=%u\n", mtx.files_sent, mrx.files_recv);
+                return 8;
+            }
+            if (mtx.bytes_sent == 0 || mrx.bytes_recv == 0)
+            {
+                fprintf(stderr, "metrics bytes should be non-zero: tx_bytes=%llu rx_bytes=%llu\n",
+                        (unsigned long long)mtx.bytes_sent, (unsigned long long)mrx.bytes_recv);
+                return 9;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "val_get_metrics failed\n");
+            return 10;
+        }
+    }
+#endif
 
     val_session_destroy(tx);
     val_session_destroy(rx);

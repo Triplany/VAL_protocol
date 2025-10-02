@@ -260,13 +260,22 @@ void *ts_fopen(void *ctx, const char *path, const char *mode)
     (void)ctx;
 #if defined(_WIN32)
     DWORD access = 0, creation = 0;
+    int append = 0;
     if (mode && mode[0] == 'r')
     {
         access = GENERIC_READ;
         creation = OPEN_EXISTING;
     }
+    else if (mode && mode[0] == 'a')
+    {
+        // Append: open or create, then seek to end before writing
+        access = FILE_APPEND_DATA | GENERIC_WRITE; // allow normal WriteFile
+        creation = OPEN_ALWAYS;
+        append = 1;
+    }
     else
     {
+        // Default write: truncate/create new
         access = GENERIC_WRITE;
         creation = CREATE_ALWAYS;
     }
@@ -275,6 +284,11 @@ void *ts_fopen(void *ctx, const char *path, const char *mode)
         return NULL;
     ts_file_t *f = (ts_file_t *)calloc(1, sizeof(*f));
     f->h = h;
+    if (append)
+    {
+        LARGE_INTEGER zero = {0};
+        SetFilePointerEx(f->h, zero, NULL, FILE_END);
+    }
     return f;
 #else
     int flags = 0;
@@ -282,8 +296,14 @@ void *ts_fopen(void *ctx, const char *path, const char *mode)
     {
         flags = O_RDONLY;
     }
+    else if (mode && mode[0] == 'a')
+    {
+        // Append: do not truncate, writes go to end
+        flags = O_WRONLY | O_CREAT | O_APPEND;
+    }
     else
     {
+        // Default write: truncate/create new
         flags = O_WRONLY | O_CREAT | O_TRUNC;
     }
     int fd = open(path, flags, 0666);
@@ -539,7 +559,7 @@ void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t pa
     cfg->buffers.recv_buffer = recv_buf;
     cfg->buffers.packet_size = packet_size;
     cfg->resume.mode = mode;
-    cfg->resume.verify_bytes = verify;
+    cfg->resume.crc_verify_bytes = verify;
     // Adaptive timeout bounds (tests run in-memory; keep low to speed up failures while allowing retries)
     cfg->timeouts.min_timeout_ms = 50;   // floor for RTO
     cfg->timeouts.max_timeout_ms = 2000; // ceiling for RTO

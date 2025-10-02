@@ -13,22 +13,35 @@ A small, robust, blocking-I/O file transfer protocol library in C. Frames are fi
 
 ## Features (from source)
 
-- Built-in feature bits: see `include/val_protocol.h` and `val_get_builtin_features()`
-  - `VAL_FEAT_CRC_RESUME` — CRC-seeded resume verification
-  - `VAL_FEAT_MULTI_FILES` — Multi-file send/receive per session
+- Feature bits: see `include/val_protocol.h` and `val_get_builtin_features()`
+  - Only optional features are negotiated; core behavior is implicit.
+  - Optional (negotiated): e.g., `VAL_FEAT_ADVANCED_TX` (bit 0)
 - Resume modes and policies
-  - Legacy modes: `VAL_RESUME_NONE`, `VAL_RESUME_APPEND`, `VAL_RESUME_CRC_VERIFY` (+ `verify_bytes`)
+  - Resume modes: six-mode system — `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_CRC_TAIL`, `VAL_RESUME_CRC_TAIL_OR_ZERO`, `VAL_RESUME_CRC_FULL`, `VAL_RESUME_CRC_FULL_OR_ZERO` (+ `crc_verify_bytes` for tail modes)
+Limitations
+-
+- Very large verification windows (>4 GiB) are not currently supported on the sender side due to 32-bit file I/O offsets used for the verify CRC computation. If the receiver requests a `verify_len` larger than this, the sender treats it as an unverifiable region and falls back per policy (effectively a mismatch → restart or skip depending on mode).
+   - Core defaults clamp verification windows for responsiveness: tail modes are capped at ~2 MiB by default; FULL uses full-prefix verify up to 512 MiB and falls back to a large-tail verify beyond that. Sizes/offsets on wire are 64-bit LE.
   - Receiver-driven policies (preferred): `val_resume_policy_t`
-    - NONE(0) keeps legacy behavior; SAFE_DEFAULT(1); ALWAYS_START_ZERO(2); ALWAYS_SKIP_IF_EXISTS(3);
+  - NONE(0) uses resume.mode as configured; SAFE_DEFAULT(1); ALWAYS_START_ZERO(2); ALWAYS_SKIP_IF_EXISTS(3);
       SKIP_IF_DIFFERENT(4); ALWAYS_SKIP(5); STRICT_RESUME_ONLY(6)
   - On mismatch/anomaly defaults come from the session (see `val_session_create()` in `src/val_core.c`)
+
+## Build options
+
+These CMake options toggle compile-time features; defaults are conservative.
+
+- VAL_ENABLE_ERROR_STRINGS=ON: build host-only string utilities (`val_error_strings`)
+- VAL_ENABLE_METRICS=OFF: enable lightweight internal counters/timing
+- VAL_ENABLE_ADVANCED_TX=OFF: advertise optional `VAL_FEAT_ADVANCED_TX` during handshake
+  - When ON, the core defines `VAL_BUILTIN_FEATURES=VAL_FEAT_ADVANCED_TX` so peers can negotiate the capability.
 
 ## Error system and debug logging
 
 Errors
 - Numeric `val_status_t` codes (negative for errors) with a 32‑bit detail mask segmented by category (Network/CRC/Protocol/FS/Context) live in `include/val_errors.h`.
 - The core library is MCU‑friendly and records only numeric code+detail.
-- Optional host‑only utilities (`include/val_error_strings.h`, `src/val_error_strings.c`) provide string formatting and diagnostics; controlled via the `VAL_BUILD_HOST_UTILS` CMake option and linked only into examples/tests.
+- Optional host‑only utilities (`include/val_error_strings.h`, `src/val_error_strings.c`) provide string formatting and diagnostics; controlled via the `VAL_ENABLE_ERROR_STRINGS` CMake option and linked only into examples/tests.
 
 Logging
 
@@ -49,12 +62,12 @@ cmake --build build\windows-debug --config Debug -j
 
 ## Try the TCP example
 
-Two executables live under `examples/tcp/` with optional flags for MTU and resume policy.
+Two executables live under `examples/tcp/` with optional flags for MTU and resume mode.
 
 - Sender usage: `val_example_send.exe [--mtu N] [--policy NAME|ID] <host> <port> <file1> [file2 ...]`
 - Receiver usage: `val_example_receive.exe [--mtu N] [--policy NAME|ID] <port> <outdir>`
 
-Policy names (case-insensitive) map to `val_resume_policy_t`:
+Resume mode names (case-insensitive) map to `val_resume_mode_t`:
 
 - `none(0)`, `safe(1)`, `start_zero(2)`, `skip_if_exists(3)`, `skip_if_different(4)`, `always_skip(5)`, `strict_only(6)`
 

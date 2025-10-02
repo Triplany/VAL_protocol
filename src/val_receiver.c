@@ -4,13 +4,13 @@
 #include <string.h>
 
 static val_status_t send_resume_response(val_session_t *s, val_resume_action_t action, uint64_t offset, uint32_t crc,
-                                         uint32_t verify_len)
+                                         uint64_t verify_len)
 {
     val_resume_resp_t resp;
     resp.action = val_htole32((uint32_t)action);
     resp.resume_offset = val_htole64(offset);
     resp.verify_crc = val_htole32(crc);
-    resp.verify_len = val_htole32(verify_len);
+    resp.verify_len = val_htole64(verify_len);
     return val_internal_send_packet(s, VAL_PKT_RESUME_RESP, &resp, sizeof(resp), offset);
 }
 
@@ -60,7 +60,7 @@ static val_status_t val_handle_validation_action(val_session_t *session, val_val
 }
 
 static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resume_offset_expected, uint32_t expected_crc,
-                                                 uint32_t verify_len)
+                                                 uint64_t verify_len, val_status_t on_match_status)
 {
     VAL_LOG_DEBUG(s, "verify: starting exchange");
     // Wait for sender to echo back the CRC in a VERIFY packet
@@ -128,32 +128,29 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
         return VAL_ERR_PROTOCOL;
     }
     VAL_LOG_DEBUGF(s, "verify: extracting crc from payload len=%u", (unsigned)len);
-    // Extract verify_crc from payload (offset 12 in struct)
-    uint32_t their_verify_crc;
-    memcpy(&their_verify_crc, buf + 12, sizeof(their_verify_crc));
-    their_verify_crc = val_letoh32(their_verify_crc);
+    // Payload is a val_resume_resp_t encoded in LE; decode to read verify_crc robustly
+    val_resume_resp_t vr_le;
+    memcpy(&vr_le, buf, sizeof(vr_le));
+    val_resume_resp_t vr;
+    vr.action = val_letoh32(vr_le.action);
+    vr.resume_offset = val_letoh64(vr_le.resume_offset);
+    vr.verify_crc = val_letoh32(vr_le.verify_crc);
+    vr.verify_len = val_letoh64(vr_le.verify_len);
+    uint32_t their_verify_crc = vr.verify_crc;
+    // Optional sanity logs to help diagnose mismatches
+    VAL_LOG_DEBUGF(s, "verify: expected off=%llu len=%llu, got off=%llu len=%llu", (unsigned long long)resume_offset_expected,
+                   (unsigned long long)verify_len, (unsigned long long)vr.resume_offset, (unsigned long long)vr.verify_len);
     VAL_LOG_DEBUG(s, "verify: computing result");
     int32_t result;
     if (their_verify_crc == expected_crc)
     {
-        result = VAL_OK;
+        // On match, return the caller-provided status (VAL_OK to resume, or VAL_SKIPPED to skip)
+        result = (int32_t)on_match_status;
     }
     else
     {
-        // Mismatch: derive response based on configured action
-        switch (s->config->resume.on_verify_mismatch)
-        {
-        case VAL_RESUME_MISMATCH_SKIP_FILE:
-            result = VAL_SKIPPED;
-            break;
-        case VAL_RESUME_MISMATCH_ABORT_FILE:
-            result = VAL_ERR_ABORTED;
-            break;
-        case VAL_RESUME_MISMATCH_START_ZERO:
-        default:
-            result = VAL_ERR_RESUME_VERIFY;
-            break;
-        }
+        // Mismatch: indicate verify failed so sender restarts from zero
+        result = VAL_ERR_RESUME_VERIFY;
     }
     // Encode status as LE int32
     int32_t result_le = (int32_t)val_htole32((uint32_t)result);
@@ -170,11 +167,10 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
 
 static val_resume_action_t determine_resume_action(val_session_t *session, const char *filename, const char *sender_path,
                                                    uint64_t incoming_file_size, uint64_t *out_resume_offset,
-                                                   uint32_t *out_verify_crc, uint32_t *out_verify_length)
+                                                   uint32_t *out_verify_crc, uint64_t *out_verify_length)
 {
     (void)sender_path; // not needed for determining resume
     val_resume_mode_t mode = session->config->resume.mode;
-    val_resume_policy_t policy = session->config->resume.policy;
 
     char full_output_path[512];
     if (session->output_directory[0])
@@ -194,15 +190,7 @@ static val_resume_action_t determine_resume_action(val_session_t *session, const
     if (!file)
     {
         *out_resume_offset = 0;
-        if (policy == VAL_RESUME_POLICY_ALWAYS_SKIP || policy == VAL_RESUME_POLICY_ALWAYS_SKIP_IF_EXISTS)
-        {
-            // No local file exists; skip policies do not apply — proceed to receive fresh
-            VAL_LOG_INFO(session, "resume: no existing file; proceeding to receive from 0");
-        }
-        else
-        {
-            VAL_LOG_INFO(session, "resume: no existing file, start at 0");
-        }
+        VAL_LOG_INFO(session, "resume: no existing file, start at 0");
         return VAL_RESUME_ACTION_START_ZERO;
     }
 
@@ -215,113 +203,63 @@ static val_resume_action_t determine_resume_action(val_session_t *session, const
         return VAL_RESUME_ACTION_START_ZERO;
     }
 
-    // Preferred: apply policy semantics when specified
-    if (policy != VAL_RESUME_POLICY_NONE)
-    {
-        if (policy == VAL_RESUME_POLICY_ALWAYS_START_ZERO)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            VAL_LOG_INFO(session, "policy: ALWAYS_START_ZERO -> start at 0");
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        // For other policies, force CRC_VERIFY style logic regardless of legacy mode
-        mode = VAL_RESUME_CRC_VERIFY;
-    }
-
+    // Implement simplified six-mode behavior
     switch (mode)
     {
-    case VAL_RESUME_NONE:
+    case VAL_RESUME_NEVER:
         session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
         *out_resume_offset = 0;
         VAL_LOG_INFO(session, "resume: disabled, start at 0");
         return VAL_RESUME_ACTION_START_ZERO;
-    case VAL_RESUME_APPEND:
-        if ((uint64_t)existing_size >= incoming_file_size)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            VAL_LOG_INFO(session, "resume: local file >= incoming, restart at 0");
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-        *out_resume_offset = (uint64_t)existing_size;
-        VAL_LOG_INFO(session, "resume: append mode, continue at existing size");
-        return VAL_RESUME_ACTION_START_OFFSET;
-    case VAL_RESUME_CRC_VERIFY:
+    case VAL_RESUME_SKIP_EXISTING:
     {
-        if (existing_size == 0)
+        // If a local file exists at any size, skip it; otherwise start from zero
+        session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+        if (existing_size > 0)
+        {
+            *out_resume_offset = 0;
+            VAL_LOG_INFO(session, "resume: SKIP_EXISTING -> skipping existing file");
+            return VAL_RESUME_ACTION_SKIP_FILE;
+        }
+        *out_resume_offset = 0;
+        return VAL_RESUME_ACTION_START_ZERO;
+    }
+    case VAL_RESUME_CRC_TAIL:
+    case VAL_RESUME_CRC_TAIL_OR_ZERO:
+    {
+        if (existing_size <= 0)
         {
             session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
             *out_resume_offset = 0;
-            VAL_LOG_INFO(session, "resume: empty existing file, start at 0");
+            VAL_LOG_INFO(session, "resume: no bytes locally, start at 0");
             return VAL_RESUME_ACTION_START_ZERO;
         }
-        // If the existing file is larger than what the sender will send, do NOT attempt to verify tail
-        // against an offset beyond the sender's end-of-file. That would force the sender to seek past EOF
-        // during its verify CRC computation and fail. Instead, restart from zero to overwrite and truncate.
+        // If the local file is larger than incoming, treat as mismatch per policy
         if ((uint64_t)existing_size > incoming_file_size)
         {
             session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            VAL_LOG_INFO(session, "resume: local file larger than incoming, restart at 0");
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        // If sizes are exactly equal, we can verify the tail at full size and, on success, skip retransmission.
-        // This avoids resending the entire file while still protecting against content mismatch.
-        if ((uint64_t)existing_size == incoming_file_size)
-        {
-            uint32_t verify_bytes = session->config->resume.verify_bytes ? session->config->resume.verify_bytes : 1024u;
-            if (verify_bytes > (uint32_t)existing_size)
-                verify_bytes = (uint32_t)existing_size;
-            long seek_pos = existing_size - (long)verify_bytes;
-            session->config->filesystem.fseek(session->config->filesystem.fs_context, file, seek_pos, SEEK_SET);
-            if (!session->config->buffers.recv_buffer)
+            if (mode == VAL_RESUME_CRC_TAIL)
             {
-                session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+                VAL_LOG_INFO(session, "resume: local larger than incoming (TAIL) -> skip file");
                 *out_resume_offset = 0;
-                return VAL_RESUME_ACTION_START_ZERO;
-            }
-            size_t buf_size =
-                session->effective_packet_size ? session->effective_packet_size : session->config->buffers.packet_size;
-            if (buf_size == 0)
-            {
-                session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-                *out_resume_offset = 0;
-                return VAL_RESUME_ACTION_START_ZERO;
-            }
-            uint32_t state = val_internal_crc32_init(session);
-            uint64_t left = verify_bytes;
-            while (left > 0)
-            {
-                size_t take = (left < buf_size) ? (size_t)left : buf_size;
-                int rr = session->config->filesystem.fread(session->config->filesystem.fs_context,
-                                                           session->config->buffers.recv_buffer, 1, take, file);
-                if (rr != (int)take)
-                {
-                    session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-                    *out_resume_offset = 0;
-                    return VAL_RESUME_ACTION_START_ZERO;
-                }
-                state = val_internal_crc32_update(session, state, session->config->buffers.recv_buffer, take);
-                left -= take;
-            }
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = (uint64_t)existing_size; // equals incoming_file_size
-            *out_verify_crc = val_internal_crc32_final(session, state);
-            *out_verify_length = verify_bytes;
-            if (policy == VAL_RESUME_POLICY_ALWAYS_SKIP || policy == VAL_RESUME_POLICY_ALWAYS_SKIP_IF_EXISTS)
-            {
-                VAL_LOG_INFO(session, "policy: SKIP_IF_EXISTS/equal-size -> verify and skip");
+                *out_verify_crc = 0;
+                *out_verify_length = 0;
                 return VAL_RESUME_ACTION_SKIP_FILE;
             }
-            VAL_LOG_INFO(session, "resume: sizes match, crc verify requested at full size");
-            return VAL_RESUME_ACTION_VERIFY_FIRST;
+            VAL_LOG_INFO(session, "resume: local larger than incoming (TAIL_OR_ZERO) -> start at 0");
+            *out_resume_offset = 0;
+            return VAL_RESUME_ACTION_START_ZERO;
         }
-        uint32_t verify_bytes = session->config->resume.verify_bytes ? session->config->resume.verify_bytes : 1024u;
-        if (verify_bytes > (uint32_t)existing_size)
-            verify_bytes = (uint32_t)existing_size;
-        long seek_pos = existing_size - verify_bytes;
+        // Determine tail verification window: respect user-configured bytes but cap to a small default for speed.
+        // Core default cap: 2 MiB to keep MCU/slow storage responsive.
+        uint32_t verify_bytes_cfg = session->config->resume.crc_verify_bytes ? session->config->resume.crc_verify_bytes : 1024u;
+        uint64_t verify_bytes = (uint64_t)verify_bytes_cfg;
+        if (verify_bytes > (uint64_t)existing_size)
+            verify_bytes = (uint64_t)existing_size;
+        const uint64_t TAIL_CAP_BYTES = (uint64_t)2 * 1024 * 1024; // 2 MiB
+        if (verify_bytes > TAIL_CAP_BYTES)
+            verify_bytes = TAIL_CAP_BYTES;
+        long seek_pos = (long)((uint64_t)existing_size - verify_bytes);
         session->config->filesystem.fseek(session->config->filesystem.fs_context, file, seek_pos, SEEK_SET);
         if (!session->config->buffers.recv_buffer)
         {
@@ -329,7 +267,6 @@ static val_resume_action_t determine_resume_action(val_session_t *session, const
             *out_resume_offset = 0;
             return VAL_RESUME_ACTION_START_ZERO;
         }
-        /* Stream the requested verify_bytes into the configured recv_buffer in chunks, allowing verify_bytes > packet_size. */
         size_t buf_size = session->effective_packet_size ? session->effective_packet_size : session->config->buffers.packet_size;
         if (buf_size == 0)
         {
@@ -357,12 +294,79 @@ static val_resume_action_t determine_resume_action(val_session_t *session, const
         *out_resume_offset = (uint64_t)existing_size;
         *out_verify_crc = val_internal_crc32_final(session, state);
         *out_verify_length = verify_bytes;
-        if (policy == VAL_RESUME_POLICY_STRICT_RESUME_ONLY)
+        VAL_LOG_INFO(session, "resume: tail crc verify requested");
+        return VAL_RESUME_ACTION_VERIFY_FIRST;
+    }
+    case VAL_RESUME_CRC_FULL:
+    case VAL_RESUME_CRC_FULL_OR_ZERO:
+    {
+        // FULL means: verify all locally available bytes (prefix) when <= incoming size.
+        if (existing_size <= 0)
         {
-            VAL_LOG_INFO(session, "policy: STRICT -> verify required before resume");
-            return VAL_RESUME_ACTION_VERIFY_FIRST;
+            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+            *out_resume_offset = 0;
+            VAL_LOG_INFO(session, "resume: no local bytes, start at 0");
+            return VAL_RESUME_ACTION_START_ZERO;
         }
-        VAL_LOG_INFO(session, "resume: crc verify requested");
+        if ((uint64_t)existing_size > incoming_file_size)
+        {
+            // Local larger than incoming cannot match; treat as mismatch per policy
+            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+            if (mode == VAL_RESUME_CRC_FULL)
+            {
+                VAL_LOG_INFO(session, "resume: local larger than incoming (FULL) -> skip file");
+                *out_resume_offset = 0;
+                *out_verify_crc = 0;
+                *out_verify_length = 0;
+                return VAL_RESUME_ACTION_SKIP_FILE;
+            }
+            VAL_LOG_INFO(session, "resume: local larger than incoming (FULL_OR_ZERO) -> start at 0");
+            *out_resume_offset = 0;
+            return VAL_RESUME_ACTION_START_ZERO;
+        }
+        if (!session->config->buffers.recv_buffer)
+        {
+            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+            *out_resume_offset = 0;
+            return VAL_RESUME_ACTION_START_ZERO;
+        }
+        // Compute CRC over either the entire local prefix (if <= cap) or the last 'cap' bytes (large tail fallback)
+        const uint64_t FULL_CAP_BYTES = (uint64_t)512 * 1024 * 1024; // 512 MiB
+        uint64_t existing_u64 = (uint64_t)existing_size;
+        uint64_t verify_len = existing_u64 <= FULL_CAP_BYTES ? existing_u64 : FULL_CAP_BYTES;
+        long start_pos = (long)(existing_u64 - verify_len);
+        session->config->filesystem.fseek(session->config->filesystem.fs_context, file, start_pos, SEEK_SET);
+        size_t buf_size = session->effective_packet_size ? session->effective_packet_size : session->config->buffers.packet_size;
+        if (buf_size == 0)
+        {
+            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+            *out_resume_offset = 0;
+            return VAL_RESUME_ACTION_START_ZERO;
+        }
+        uint32_t state = val_internal_crc32_init(session);
+        uint64_t left = verify_len;
+        while (left > 0)
+        {
+            size_t take = (left < buf_size) ? (size_t)left : buf_size;
+            int rr = session->config->filesystem.fread(session->config->filesystem.fs_context,
+                                                       session->config->buffers.recv_buffer, 1, take, file);
+            if (rr != (int)take)
+            {
+                session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+                *out_resume_offset = 0;
+                return VAL_RESUME_ACTION_START_ZERO;
+            }
+            state = val_internal_crc32_update(session, state, session->config->buffers.recv_buffer, take);
+            left -= take;
+        }
+        session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+        *out_resume_offset = (uint64_t)existing_size; // resume from what we have
+        *out_verify_crc = val_internal_crc32_final(session, state);
+        *out_verify_length = verify_len; // request verify over prefix or large-tail window
+        if (verify_len == existing_u64)
+            VAL_LOG_INFO(session, "resume: full-prefix crc verify requested");
+        else
+            VAL_LOG_INFO(session, "resume: FULL exceeded cap -> large-tail crc verify requested");
         return VAL_RESUME_ACTION_VERIFY_FIRST;
     }
     }
@@ -376,7 +380,7 @@ static val_status_t handle_file_resume(val_session_t *s, const char *filename, c
 {
     uint64_t resume_offset = 0;
     uint32_t verify_crc = 0;
-    uint32_t verify_length = 0;
+    uint64_t verify_length = 0;
     val_resume_action_t action =
         determine_resume_action(s, filename, sender_path, file_size, &resume_offset, &verify_crc, &verify_length);
     val_status_t st = send_resume_response(s, action, resume_offset, verify_crc, verify_length);
@@ -400,39 +404,35 @@ static val_status_t handle_file_resume(val_session_t *s, const char *filename, c
     }
     if (action == VAL_RESUME_ACTION_VERIFY_FIRST)
     {
-        st = handle_verification_exchange(s, resume_offset, verify_crc, verify_length);
+        // Map verification success to either resume (OK) or skip (SKIPPED) depending on mode
+        val_resume_mode_t mode = s->config->resume.mode;
+        val_status_t on_match = VAL_OK;
+        if (mode == VAL_RESUME_CRC_FULL || mode == VAL_RESUME_CRC_FULL_OR_ZERO)
+        {
+            // In FULL modes, if verify covered the entire file (existing_size == incoming size), we can skip.
+            // Otherwise, we should resume from the verified offset.
+            on_match = (verify_length == file_size) ? VAL_SKIPPED : VAL_OK;
+        }
+        st = handle_verification_exchange(s, resume_offset, verify_crc, verify_length, on_match);
         VAL_LOG_INFOF(s, "resume: verify result st=%d", (int)st);
         if (st == VAL_ERR_RESUME_VERIFY)
         {
-            // Honor configured mismatch action where possible
-            switch (s->config->resume.on_verify_mismatch)
+            // Mismatch handling based on simplified mode
+            if (mode == VAL_RESUME_CRC_TAIL || mode == VAL_RESUME_CRC_FULL)
             {
-            case VAL_RESUME_MISMATCH_START_ZERO:
-                resume_offset = 0;
-                VAL_LOG_INFO(s, "resume: verify mismatch, restarting at 0");
-                break;
-            case VAL_RESUME_MISMATCH_SKIP_FILE:
-                // Not representable over current wire; fall back to START_ZERO and log
-                resume_offset = 0;
-                VAL_LOG_WARN(s, "resume: verify mismatch; SKIP_FILE requested but not supported on wire; restarting at 0");
-                break;
-            case VAL_RESUME_MISMATCH_ABORT_FILE:
-                VAL_LOG_WARN(s, "resume: verify mismatch; aborting file");
-                return VAL_ERR_ABORTED;
-            default:
-                resume_offset = 0;
-                VAL_LOG_INFO(s, "resume: verify mismatch, restarting at 0");
-                break;
+                // In CRC_TAIL and CRC_FULL modes, mismatch means skip the file (do not overwrite existing content)
+                *resume_offset_out = file_size;
+                VAL_LOG_WARN(s, "resume: verify mismatch -> skipping file");
+                if (s->config->callbacks.on_file_start)
+                    s->config->callbacks.on_file_start(filename, sender_path, file_size, file_size);
+                return VAL_OK; // downstream treats resume_offset_out >= size as skip
             }
+            // CRC_TAIL_OR_ZERO and CRC_FULL_OR_ZERO: restart from zero for safety
+            resume_offset = 0;
+            VAL_LOG_INFO(s, "resume: verify mismatch -> restarting at 0");
         }
         else if (st == VAL_ERR_TIMEOUT)
         {
-            if (s->config->resume.policy == VAL_RESUME_POLICY_STRICT_RESUME_ONLY ||
-                s->config->resume.on_verify_mismatch == VAL_RESUME_MISMATCH_ABORT_FILE)
-            {
-                VAL_LOG_WARN(s, "resume: verify timeout under STRICT; aborting file");
-                return VAL_ERR_ABORTED;
-            }
             // Otherwise treat as failure to verify; restart from zero rather than aborting session
             resume_offset = 0;
             VAL_LOG_INFO(s, "resume: verify timeout, restarting at 0");

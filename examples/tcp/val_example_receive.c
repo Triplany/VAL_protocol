@@ -9,11 +9,11 @@
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [--mtu N] [--policy NAME|ID] [--no-validation] [--log-level L] [--log-file PATH] <port> <outdir>\n"
-            "  --mtu N        Packet size/MTU (default 4096; min %u, max %u)\n"
-            "  --policy P     Resume policy name or numeric ID:\n"
-            "                 none(0), safe(1), start_zero(2), skip_if_exists(3),\n"
-            "                 skip_if_different(4), always_skip(5), strict_only(6)\n"
+            "Usage: %s [--mtu N] [--resume MODE] [--tail-bytes N] [--no-validation] [--log-level L] [--log-file PATH] <port> "
+            "<outdir>\n"
+            "  --mtu N          Packet size/MTU (default 4096; min %u, max %u)\n"
+            "  --resume MODE    Resume mode: never, skip, tail, tail_or_zero, full, full_or_zero\n"
+            "  --tail-bytes N   Tail verification bytes for tail modes (default 1024)\n"
             "  --no-validation  Disable metadata validation (accept all files)\n",
             prog, (unsigned)VAL_MIN_PACKET_SIZE, (unsigned)VAL_MAX_PACKET_SIZE);
 }
@@ -51,36 +51,22 @@ static int strieq(const char *a, const char *b)
     return *a == 0 && *b == 0;
 }
 
-static int parse_policy(const char *s, val_resume_policy_t *out)
+static int parse_resume_mode(const char *s, val_resume_mode_t *out)
 {
     if (!s || !out)
         return -1;
-    // Accept numeric IDs
-    if (s[0] >= '0' && s[0] <= '9')
-    {
-        unsigned u = 0;
-        if (parse_uint(s, &u) != 0)
-            return -1;
-        if (u > 6)
-            return -1;
-        *out = (val_resume_policy_t)u;
-        return 0;
-    }
-    // Accept common names (case-insensitive)
-    if (strieq(s, "none"))
-        *out = VAL_RESUME_POLICY_NONE;
-    else if (strieq(s, "safe") || strieq(s, "safe_default"))
-        *out = VAL_RESUME_POLICY_SAFE_DEFAULT;
-    else if (strieq(s, "start_zero") || strieq(s, "always_start_zero"))
-        *out = VAL_RESUME_POLICY_ALWAYS_START_ZERO;
-    else if (strieq(s, "skip_if_exists") || strieq(s, "always_skip_if_exists"))
-        *out = VAL_RESUME_POLICY_ALWAYS_SKIP_IF_EXISTS;
-    else if (strieq(s, "skip_if_different"))
-        *out = VAL_RESUME_POLICY_SKIP_IF_DIFFERENT;
-    else if (strieq(s, "always_skip"))
-        *out = VAL_RESUME_POLICY_ALWAYS_SKIP;
-    else if (strieq(s, "strict_only") || strieq(s, "strict_resume_only"))
-        *out = VAL_RESUME_POLICY_STRICT_RESUME_ONLY;
+    if (strieq(s, "never"))
+        *out = VAL_RESUME_NEVER;
+    else if (strieq(s, "skip") || strieq(s, "skip_existing"))
+        *out = VAL_RESUME_SKIP_EXISTING;
+    else if (strieq(s, "tail"))
+        *out = VAL_RESUME_CRC_TAIL;
+    else if (strieq(s, "tail_or_zero"))
+        *out = VAL_RESUME_CRC_TAIL_OR_ZERO;
+    else if (strieq(s, "full"))
+        *out = VAL_RESUME_CRC_FULL;
+    else if (strieq(s, "full_or_zero"))
+        *out = VAL_RESUME_CRC_FULL_OR_ZERO;
     else
         return -1;
     return 0;
@@ -242,8 +228,9 @@ static val_validation_action_t example_validator(const val_meta_payload_t *meta,
 int main(int argc, char **argv)
 {
     // Defaults
-    size_t packet = 4096;                                // example MTU
-    val_resume_policy_t policy = VAL_RESUME_POLICY_NONE; // legacy unless specified
+    size_t packet = 4096; // example MTU
+    val_resume_mode_t resume_mode = VAL_RESUME_CRC_TAIL_OR_ZERO;
+    unsigned tail_bytes = 16384;
     int log_level = -1;
     const char *log_file_path = NULL;
 
@@ -273,18 +260,33 @@ int main(int argc, char **argv)
             }
             packet = (size_t)v;
         }
-        else if (strcmp(arg, "--policy") == 0)
+        else if (strcmp(arg, "--resume") == 0)
         {
             if (argi >= argc)
             {
                 usage(argv[0]);
                 return 1;
             }
-            if (parse_policy(argv[argi++], &policy) != 0)
+            if (parse_resume_mode(argv[argi++], &resume_mode) != 0)
             {
-                fprintf(stderr, "Invalid --policy value\n");
+                fprintf(stderr, "Invalid --resume value\n");
                 return 1;
             }
+        }
+        else if (strcmp(arg, "--tail-bytes") == 0)
+        {
+            if (argi >= argc)
+            {
+                usage(argv[0]);
+                return 1;
+            }
+            unsigned v = 0;
+            if (parse_uint(argv[argi++], &v) != 0)
+            {
+                fprintf(stderr, "Invalid --tail-bytes value\n");
+                return 1;
+            }
+            tail_bytes = v;
         }
         else if (strcmp(arg, "--no-validation") == 0)
         {
@@ -402,10 +404,9 @@ int main(int argc, char **argv)
     cfg.retries.data_retries = 2;
     cfg.retries.ack_retries = 2;
     cfg.retries.backoff_ms_base = 100;
-    // Resume configuration: keep legacy defaults unless policy provided
-    cfg.resume.mode = VAL_RESUME_CRC_VERIFY;
-    cfg.resume.verify_bytes = 16384;
-    cfg.resume.policy = policy;
+    // Resume configuration: use resume.mode defaults unless policy provided
+    cfg.resume.mode = resume_mode;
+    cfg.resume.crc_verify_bytes = tail_bytes;
 
     // Enable example metadata validation by default unless --no-validation present
     int use_validation = 1;
@@ -443,7 +444,7 @@ int main(int argc, char **argv)
         val_status_t lc = VAL_OK;
         uint32_t det = 0;
         (void)val_get_last_error(rx, &lc, &det);
-#ifdef VAL_HOST_UTILITIES
+#if VAL_ENABLE_ERROR_STRINGS
         char buf[256];
         val_format_error_report(lc, det, buf, sizeof(buf));
         fprintf(stderr, "receive failed: %s\n", buf);

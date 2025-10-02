@@ -12,7 +12,7 @@ int main(void)
     test_duplex_init(&link, sizeof(send_buf), 8);
 
     val_config_t cfg;
-    ts_make_config(&cfg, send_buf, recv_buf, sizeof(send_buf), &link, VAL_RESUME_NONE, 0);
+    ts_make_config(&cfg, send_buf, recv_buf, sizeof(send_buf), &link, VAL_RESUME_NEVER, 0);
 
     // Remove clock on purpose and expect session creation to fail (clock is always required)
     cfg.system.get_ticks_ms = NULL;
@@ -26,7 +26,7 @@ int main(void)
     }
 
     // Provide a clock and expect success
-    ts_make_config(&cfg, send_buf, recv_buf, sizeof(send_buf), &link, VAL_RESUME_NONE, 0);
+    ts_make_config(&cfg, send_buf, recv_buf, sizeof(send_buf), &link, VAL_RESUME_NEVER, 0);
     // Ensure we have a clock
     if (!cfg.system.get_ticks_ms)
     {

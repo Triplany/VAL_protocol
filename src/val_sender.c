@@ -208,16 +208,16 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
     resp.action = val_letoh32(resp.action);
     resp.resume_offset = val_letoh64(resp.resume_offset);
     resp.verify_crc = val_letoh32(resp.verify_crc);
-    resp.verify_len = val_letoh32(resp.verify_len);
+    resp.verify_len = val_letoh64(resp.verify_len);
     VAL_LOG_DEBUG(s, "send: received RESUME_RESP");
-    VAL_LOG_INFOF(s, "resume_resp: action=%u offset=%llu verify_len=%u", (unsigned)resp.action,
-                  (unsigned long long)resp.resume_offset, (unsigned)resp.verify_len);
+    VAL_LOG_INFOF(s, "resume_resp: action=%u offset=%llu verify_len=%llu", (unsigned)resp.action,
+                  (unsigned long long)resp.resume_offset, (unsigned long long)resp.verify_len);
     if (resp.action == VAL_RESUME_ACTION_VERIFY_FIRST)
     {
         // Receiver expects us to send our own CRC for the requested region
         uint32_t crc = 0;
         // Guard against malformed verify_len or resume_offset==0
-        if (resp.verify_len == 0 || resp.resume_offset < resp.verify_len)
+        if (resp.verify_len == 0 || resp.resume_offset < resp.verify_len || resp.verify_len > UINT32_MAX)
         {
             // Cannot compute a valid CRC region; treat as mismatch and restart
             VAL_LOG_WARN(s, "verify: invalid region from receiver, restarting at 0");
@@ -228,7 +228,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
             (void)rs; // best-effort
             return VAL_OK;
         }
-        st = compute_crc_region(s, filepath, resp.resume_offset, resp.verify_len, &crc);
+        st = compute_crc_region(s, filepath, resp.resume_offset, (uint32_t)resp.verify_len, &crc);
         if (st != VAL_OK)
         {
             VAL_LOG_ERRORF(s, "verify: compute crc failed %d", (int)st);
@@ -242,7 +242,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
         verify_le.action = val_htole32(verify_le.action);
         verify_le.resume_offset = val_htole64(verify_le.resume_offset);
         verify_le.verify_crc = val_htole32(verify_le.verify_crc);
-        verify_le.verify_len = val_htole32(verify_le.verify_len);
+        verify_le.verify_len = val_htole64(verify_le.verify_len);
         st = val_internal_send_packet(s, VAL_PKT_VERIFY, &verify_le, sizeof(verify_le), 0);
         if (st != VAL_OK)
         {

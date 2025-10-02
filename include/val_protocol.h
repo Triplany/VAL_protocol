@@ -64,11 +64,28 @@ extern "C"
 
     // val_status_t is defined in val_errors.h
 
+    // New resume modes - replaces all existing resume enums
     typedef enum
     {
-        VAL_RESUME_NONE = 0,
-        VAL_RESUME_APPEND = 1,
-        VAL_RESUME_CRC_VERIFY = 2,
+        VAL_RESUME_NEVER = 0,         // Always overwrite from zero
+        VAL_RESUME_SKIP_EXISTING = 1, // Skip any existing file (no verification)
+        // Tail modes: receiver requests a CRC over the last N bytes of the local file (N = min(crc_verify_bytes, local_size)).
+        //   - If CRC matches the sender's tail at the same offset, resume from local_size.
+        //   - If CRC mismatches OR the local file is larger than the incoming file size, treat as mismatch.
+        //     TAIL -> skip the file; TAIL_OR_ZERO -> restart from offset 0.
+        VAL_RESUME_CRC_TAIL = 2,         // Resume on tail match; skip on mismatch
+        VAL_RESUME_CRC_TAIL_OR_ZERO = 3, // Resume on tail match; overwrite from zero on mismatch
+        // Full modes (full-prefix semantics): receiver requests a CRC over the entire local file (prefix) when local_size ≤
+        // incoming_size.
+        //   - If CRC matches this full local prefix:
+        //       • If local_size == incoming_size, skip the file entirely (already complete).
+        //       • Otherwise, resume from offset local_size.
+        //   - If local_size > incoming_size there is no possible match; treat as mismatch.
+        //     FULL -> skip the file; FULL_OR_ZERO -> overwrite from zero.
+        //   - Core applies a verification cap for responsiveness: if the local file exceeds the cap, FULL falls back to a
+        //     "large tail" verify over the last CAP bytes (resume and mismatch policies remain those of FULL/FULL_OR_ZERO).
+        VAL_RESUME_CRC_FULL = 4,         // Skip only when full-prefix matches exactly; otherwise skip on mismatch
+        VAL_RESUME_CRC_FULL_OR_ZERO = 5, // Skip only when full-prefix matches exactly; otherwise overwrite from zero
     } val_resume_mode_t;
 
     typedef struct val_session_s val_session_t;
@@ -84,44 +101,27 @@ extern "C"
         VAL_LOG_TRACE = 5,
     } val_log_level_t;
 
-// Public feature bits (use in config.features.required/requested)
+// Public feature bits
+// Negotiation covers only optional features; core functionality is implicit and not represented by bits.
+// Optional/negotiable features start at bit 0.
+//
 #define VAL_FEAT_NONE 0u
-#define VAL_FEAT_CRC_RESUME (1u << 0)
-#define VAL_FEAT_MULTI_FILES (1u << 1)
+#ifdef VAL_ENABLE_ADVANCED_TX
+#define VAL_FEAT_ADVANCED_TX (1u << 0)
+#define VAL_BUILTIN_FEATURES VAL_FEAT_ADVANCED_TX
+#else
+#define VAL_BUILTIN_FEATURES VAL_FEAT_NONE
+#endif
 
-    // Receiver-driven resume policy (no truncation). If policy == 0, legacy resume.mode applies.
-    typedef enum
+    // Simple resume config - replaces complex resume struct
+    typedef struct
     {
-        VAL_RESUME_POLICY_NONE = 0, // Use legacy resume.mode behavior
-        VAL_RESUME_POLICY_SAFE_DEFAULT =
-            1, // Verify tail when possible; restart on mismatch; never truncate; skip when equal+match
-        VAL_RESUME_POLICY_ALWAYS_START_ZERO = 2,
-        VAL_RESUME_POLICY_ALWAYS_SKIP_IF_EXISTS = 3,
-        VAL_RESUME_POLICY_SKIP_IF_DIFFERENT = 4, // Verify; on mismatch SKIP; never overwrite
-        VAL_RESUME_POLICY_ALWAYS_SKIP = 5,       // Skip all files unconditionally
-        VAL_RESUME_POLICY_STRICT_RESUME_ONLY = 6 // Only proceed if verify allows resume; otherwise ABORT_FILE
-    } val_resume_policy_t;
-
-    // Action on verify mismatch
-    typedef enum
-    {
-        VAL_RESUME_MISMATCH_START_ZERO = 1,
-        VAL_RESUME_MISMATCH_SKIP_FILE = 2,
-        VAL_RESUME_MISMATCH_ABORT_FILE = 3,
-    } val_resume_mismatch_action_t;
-
-    // Action on filesystem anomaly (e.g., not a regular file, permission error)
-    typedef enum
-    {
-        VAL_FS_ANOMALY_SKIP_FILE = 1,
-        VAL_FS_ANOMALY_ABORT_FILE = 2,
-    } val_fs_anomaly_action_t;
-
-    // Verify algorithm selector (extensible). Currently only CRC32.
-    typedef enum
-    {
-        VAL_VERIFY_ALGO_CRC32 = 1
-    } val_verify_algo_t;
+        val_resume_mode_t mode;
+        // Tail verification window size. Used only by TAIL modes. 0 = implementation-chosen default.
+        // Default cap: the core clamps tail verification to a small window (currently 2 MiB) to keep operations fast
+        // on slow/embedded storage. Larger requests are reduced to this cap. FULL modes ignore this value.
+        uint32_t crc_verify_bytes; // For tail modes only (0 = auto-calculate)
+    } val_resume_config_t;
 
     typedef struct
     {
@@ -209,18 +209,8 @@ extern "C"
             size_t packet_size; // MTU (max frame size), not a strict per-packet size
         } buffers;
 
-        struct
-        {
-            val_resume_mode_t mode;
-            uint32_t verify_bytes;
-            // New policy-driven controls (preferred). If 'policy' is non-zero, it takes precedence over legacy 'mode'.
-            val_resume_policy_t policy;                      // default SAFE_DEFAULT if 0 during session creation
-            val_resume_mismatch_action_t on_verify_mismatch; // default depends on policy (START_ZERO for SAFE_DEFAULT)
-            val_fs_anomaly_action_t on_fs_anomaly;           // default SKIP_FILE
-            val_verify_algo_t verify_algo;                   // default CRC32
-            // Optional future hook (not yet wired): application override for per-file decision
-            // int (*on_resume_decide)(const val_meta_t* meta, const val_local_info_t* local, val_resume_policy_t policy);
-        } resume;
+        // Simple resume configuration
+        val_resume_config_t resume;
 
         struct
         {

@@ -31,8 +31,7 @@ This document reflects the current implementation in `include/` and `src/` and i
 - Docs: `README.md`, `DEVELOPMENT.md`, `PROTOCOL_FLOW.md`, `PROJECT_STRUCTURE.md`.
 
 Build options of note (set via CMake cache variables):
-- `VAL_BUILD_HOST_UTILS` (ON by default): builds `val_error_strings` and links it only into examples/tests; core library remains numeric‑only.
-- `VAL_MCU_BUILD` (OFF by default): enables size‑optimized flags and `VAL_MCU_OPTIMIZED` define for embedded builds.
+- `VAL_ENABLE_ERROR_STRINGS` (ON by default): builds `val_error_strings` and links it only into examples/tests; core library remains numeric‑only.
 
 ## Public API (short tour)
 
@@ -68,9 +67,8 @@ Header: `include/val_protocol.h` (source of truth for public constants and types
 - Buffers (caller‑owned)
   - `void* send_buffer`, `void* recv_buffer`, `size_t packet_size` (MTU; validated to [`VAL_MIN_PACKET_SIZE`, `VAL_MAX_PACKET_SIZE`])
 - Resume
-  - Legacy modes: `VAL_RESUME_NONE | VAL_RESUME_APPEND | VAL_RESUME_CRC_VERIFY` (+ `verify_bytes`)
-  - Policies (preferred): `val_resume_policy_t policy` and defaults for `on_verify_mismatch`, `on_fs_anomaly`, `verify_algo`
-  - If `policy == VAL_RESUME_POLICY_NONE`, legacy mode applies unchanged and is not overridden.
+  - Resume modes: six-mode system — `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_CRC_TAIL`, `VAL_RESUME_CRC_TAIL_OR_ZERO`, `VAL_RESUME_CRC_FULL`, `VAL_RESUME_CRC_FULL_OR_ZERO` (+ `crc_verify_bytes` for tail modes)
+  - Receiver behavior is solely driven by mode; there are no policy overrides.
 - Timeouts (adaptive)
   - Adaptive RTT-based timeouts with Karn’s algorithm. Configure only bounds:
     - `min_timeout_ms` (floor), `max_timeout_ms` (ceiling)
@@ -87,13 +85,14 @@ Header: `include/val_protocol.h` (source of truth for public constants and types
 
 ## Features and policy
 
-- Built‑in features (see `val_get_builtin_features()`):
-  - `VAL_FEAT_CRC_RESUME` — CRC‑seeded resume verification
-  - `VAL_FEAT_MULTI_FILES` — Multi‑file send/receive per session
+Features:
+  - Core behavior is implicit and not represented by feature bits.
+  - Optional (negotiated via HELLO; included in `val_get_builtin_features()` when compiled in):
+    - `VAL_FEAT_ADVANCED_TX` (bit 0) — Advanced transmitter/resume capabilities (placeholder)
 - Resume strategies
-  - Legacy modes: NONE, APPEND, CRC_VERIFY
-  - Policies: `VAL_RESUME_POLICY_*` drive receiver decisions without truncation:
-    - NONE(0) legacy behavior; SAFE_DEFAULT(1); ALWAYS_START_ZERO(2); ALWAYS_SKIP_IF_EXISTS(3); SKIP_IF_DIFFERENT(4); ALWAYS_SKIP(5); STRICT_RESUME_ONLY(6)
+  - Resume modes: NONE, APPEND, CRC_VERIFY
+  - Policies removed: receiver decisions are determined by the selected resume mode.
+  - NONE(0) uses resume.mode; SAFE_DEFAULT(1); ALWAYS_START_ZERO(2); ALWAYS_SKIP_IF_EXISTS(3); SKIP_IF_DIFFERENT(4); ALWAYS_SKIP(5); STRICT_RESUME_ONLY(6)
   - Mismatch/anomaly defaults are set during `val_session_create()` based on policy (see `src/val_core.c`).
 
 ## Protocol: wire format and flow
@@ -155,7 +154,7 @@ Error system (host vs MCU)
 
 - Files: `examples/tcp/val_example_send.c`, `examples/tcp/val_example_receive.c`, `examples/tcp/common/tcp_util.*`
 - Transport: minimal TCP helper (Winsock on Windows, BSD sockets on POSIX).
-- Command line flags (optional): `--mtu N`, `--policy NAME|ID` to configure packet size and resume policy.
+- Command line flags (optional): `--mtu N`, `--resume MODE` and `--tail-bytes N` to configure packet size and resume behavior.
 
 ## Building and running
 

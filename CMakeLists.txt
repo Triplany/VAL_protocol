@@ -5,9 +5,9 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Build options
-option(VAL_BUILD_HOST_UTILS "Build host-only error string utilities" ON)
-option(VAL_MCU_BUILD "Enable MCU-optimized build (no host utilities, optimize for size)" OFF)
+option(VAL_ENABLE_ERROR_STRINGS "Build optional error string utilities (host-only)" ON)
 option(VAL_ENABLE_METRICS "Enable compile-time protocol metrics counters and timing" OFF)
+option(VAL_ENABLE_ADVANCED_TX "Enable optional advanced transmitter/resume capabilities (sets VAL_FEAT_ADVANCED_TX)" OFF)
 
 # Platform-specific settings
 if(WIN32)
@@ -34,20 +34,18 @@ if(VAL_ENABLE_METRICS)
     target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_METRICS=1)
 endif()
 
-if(VAL_MCU_BUILD)
-    target_compile_definitions(val_protocol PUBLIC VAL_MCU_OPTIMIZED=1)
-    if(MSVC)
-        # Favor size in MSVC
-        target_compile_options(val_protocol PRIVATE /Os)
-    else()
-        target_compile_options(val_protocol PRIVATE -Os)
-    endif()
+# Wire optional features (negotiated) compiled into this build.
+# This only affects the core library; examples/tests inherit behavior via the linked library.
+if(VAL_ENABLE_ADVANCED_TX)
+    # Define the builtin optional feature mask to advertise ADVANCED_TX support at handshake.
+    # Note: The mask only contains optional/negotiable features; core behavior is implicit.
+    target_compile_definitions(val_protocol PUBLIC VAL_BUILTIN_FEATURES=VAL_FEAT_ADVANCED_TX)
 endif()
 
-if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
+if(VAL_ENABLE_ERROR_STRINGS)
     add_library(val_error_strings STATIC src/val_error_strings.c)
     target_include_directories(val_error_strings PUBLIC include)
-    target_compile_definitions(val_error_strings PRIVATE VAL_HOST_UTILITIES=1)
+    target_compile_definitions(val_error_strings PUBLIC VAL_ENABLE_ERROR_STRINGS=1)
     # Link into examples/tests but not into the core library to keep MCU footprint minimal
 endif()
 
@@ -59,7 +57,7 @@ target_include_directories(example_tcp_common PUBLIC examples/tcp/common)
 add_executable(val_example_send examples/tcp/val_example_send.c)
 target_include_directories(val_example_send PRIVATE examples/tcp/common include)
 target_link_libraries(val_example_send PRIVATE val_protocol example_tcp_common)
-if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
+if(VAL_ENABLE_ERROR_STRINGS)
     target_link_libraries(val_example_send PRIVATE val_error_strings)
 endif()
 # Always compile the examples with maximum VAL_LOG_LEVEL so core logs are not compiled out
@@ -75,7 +73,7 @@ target_compile_definitions(val_example_send PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDE
 add_executable(val_example_receive examples/tcp/val_example_receive.c)
 target_include_directories(val_example_receive PRIVATE examples/tcp/common include)
 target_link_libraries(val_example_receive PRIVATE val_protocol example_tcp_common)
-if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
+if(VAL_ENABLE_ERROR_STRINGS)
     target_link_libraries(val_example_receive PRIVATE val_error_strings)
 endif()
 # Always compile the examples with maximum VAL_LOG_LEVEL so core logs are not compiled out
@@ -102,7 +100,7 @@ function(add_val_ut name src)
     add_executable(${name} ${src} $<TARGET_OBJECTS:test_support>)
     target_include_directories(${name} PRIVATE unit_tests/support include)
     target_link_libraries(${name} PRIVATE val_protocol)
-    if(VAL_BUILD_HOST_UTILS AND NOT VAL_MCU_BUILD)
+    if(VAL_ENABLE_ERROR_STRINGS)
         target_link_libraries(${name} PRIVATE val_error_strings)
     endif()
     add_test(NAME ${name} COMMAND ${name})

@@ -97,8 +97,8 @@ int main(void)
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet, .faults = d.faults};
 
     val_config_t cfg_tx, cfg_rx;
-    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_VERIFY, 16384);
-    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_VERIFY, 16384);
+    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 16384);
+    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 16384);
     ts_set_console_logger(&cfg_tx);
     ts_set_console_logger(&cfg_rx);
 
@@ -126,6 +126,37 @@ int main(void)
     val_status_t st = val_send_files(tx, files, 1, NULL);
 
     ts_join_thread(th);
+
+#if VAL_ENABLE_METRICS
+    {
+        val_metrics_t mtx = {0}, mrx = {0};
+        if (val_get_metrics(tx, &mtx) == VAL_OK && val_get_metrics(rx, &mrx) == VAL_OK)
+        {
+            // With injected faults we expect at least one retransmission or timeout
+            if (mtx.retransmits == 0 && mtx.timeouts == 0)
+            {
+                fprintf(stderr, "expected retransmits or timeouts > 0 under fault injection\n");
+                return 8;
+            }
+            if (mtx.bytes_sent == 0 || mrx.bytes_recv == 0)
+            {
+                fprintf(stderr, "metrics bytes should be non-zero: tx=%llu rx=%llu\n", (unsigned long long)mtx.bytes_sent,
+                        (unsigned long long)mrx.bytes_recv);
+                return 9;
+            }
+            if (mtx.files_sent != 1 || mrx.files_recv != 1)
+            {
+                fprintf(stderr, "metrics files mismatch: tx=%u rx=%u\n", mtx.files_sent, mrx.files_recv);
+                return 10;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "val_get_metrics failed\n");
+            return 11;
+        }
+    }
+#endif
 
     val_session_destroy(tx);
     val_session_destroy(rx);

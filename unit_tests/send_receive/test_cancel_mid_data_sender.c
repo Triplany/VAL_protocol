@@ -100,11 +100,11 @@ int main(void)
     val_config_t cfg_tx, cfg_rx;
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = {.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
-    ts_make_config(&cfg_tx, send_a, recv_a, packet, &end_tx, VAL_RESUME_APPEND, 2048);
-    ts_make_config(&cfg_rx, send_b, recv_b, packet, &end_rx, VAL_RESUME_APPEND, 2048);
+    ts_make_config(&cfg_tx, send_a, recv_a, packet, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 2048);
+    ts_make_config(&cfg_rx, send_b, recv_b, packet, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 2048);
     // Disable resume for this test to avoid inheriting offsets from previous runs
-    cfg_tx.resume.mode = VAL_RESUME_NONE;
-    cfg_rx.resume.mode = VAL_RESUME_NONE;
+    cfg_tx.resume.mode = VAL_RESUME_NEVER;
+    cfg_rx.resume.mode = VAL_RESUME_NEVER;
 
     // Enable detailed console logging for this test on both ends
     ts_set_console_logger(&cfg_tx);

@@ -1,6 +1,6 @@
 #include "val_error_strings.h"
 
-#ifdef VAL_HOST_UTILITIES
+#if VAL_ENABLE_ERROR_STRINGS
 
 #include <stdio.h>
 
@@ -186,4 +186,4 @@ void val_format_error_report(val_status_t code, uint32_t detail, char *buffer, s
 #endif
 }
 
-#endif // VAL_HOST_UTILITIES
+#endif // VAL_ENABLE_ERROR_STRINGS

@@ -1,6 +1,6 @@
 #include "../../src/val_internal.h"
 #include "val_protocol.h"
-#ifdef VAL_HOST_UTILITIES
+#if VAL_ENABLE_ERROR_STRINGS
 #include "val_error_strings.h"
 #endif
 #include <stdio.h>
@@ -54,7 +54,7 @@ int main(void)
         unsigned low24 = detail & 0x00FFFFFFu;
         unsigned has_feat_flag = (detail & VAL_ERROR_DETAIL_FEATURE_MISSING) ? 1u : 0u;
         uint32_t mf = VAL_GET_MISSING_FEATURE(detail);
-#ifdef VAL_HOST_UTILITIES
+#if VAL_ENABLE_ERROR_STRINGS
         const char *dstr = val_error_detail_to_string(detail);
         fprintf(stderr, "DEBUG: detail=0x%08X ctx=%u low24=0x%06X FEAT_FLAG=%u decoded=0x%06X (%s)\n", (unsigned)detail, ctx,
                 low24, has_feat_flag, (unsigned)mf, dstr);
