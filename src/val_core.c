@@ -883,17 +883,80 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     uint32_t header_crc_calc = val_internal_crc32(s, &hdr_copy, sizeof(val_packet_header_t));
     if (header_crc_calc != header_crc_expected)
     {
+        // Header corruption detected. Increment metrics and attempt to resynchronize to the next valid header
+        // boundary by sliding a 1-byte window until a plausible header CRC matches and basic sanity checks pass.
         VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_HEADER);
-        VAL_LOG_ERROR(s, "recv_packet: header CRC mismatch");
+        VAL_LOG_ERROR(s, "recv_packet: header CRC mismatch (attempting resync)");
 #if VAL_ENABLE_METRICS
         s->metrics.crc_errors++;
 #endif
+        // Keep a sliding window of header-sized bytes
+        uint8_t window[sizeof(val_packet_header_t)];
+        memcpy(window, buf, sizeof(window));
+        size_t bytes_scanned = 0;
+        const size_t scan_limit = P; // don't scan more than one MTU worth of extra bytes
+        for (;;)
+        {
+            // Shift left by 1 and read one more byte
+            memmove(window, window + 1, sizeof(window) - 1);
+            size_t gotb = 0;
+            int rc2 = s->config->transport.recv(s->config->transport.io_context, window + sizeof(window) - 1, 1, &gotb,
+                                                 timeout_ms);
+            if (rc2 < 0)
+            {
+                VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
+                VAL_LOG_ERROR(s, "recv_packet: transport error during resync");
 #if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
+                LeaveCriticalSection(&s->lock);
 #else
-        pthread_mutex_unlock(&s->lock);
+                pthread_mutex_unlock(&s->lock);
 #endif
-        return VAL_ERR_CRC;
+                return VAL_ERR_IO;
+            }
+            if (gotb != 1)
+            {
+                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
+                VAL_LOG_DEBUG(s, "recv_packet: timeout while resyncing after bad header");
+#if defined(_WIN32)
+                LeaveCriticalSection(&s->lock);
+#else
+                pthread_mutex_unlock(&s->lock);
+#endif
+                val_metrics_inc_timeout(s);
+                return VAL_ERR_TIMEOUT;
+            }
+            bytes_scanned++;
+            // Check if window now contains a valid header
+            val_packet_header_t hc;
+            memcpy(&hc, window, sizeof(hc));
+            uint32_t exp = val_letoh32(hc.header_crc);
+            hc.header_crc = 0;
+            uint32_t calc = val_internal_crc32(s, &hc, sizeof(hc));
+            if (calc == exp)
+            {
+                // Basic sanity checks: reserved wire_version==0 and payload_len within MTU bounds
+                uint32_t pl = val_letoh32(((val_packet_header_t *)window)->payload_len);
+                uint8_t wire_ver = ((val_packet_header_t *)window)->wire_version;
+                if (wire_ver == 0 && pl <= (uint32_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t)))
+                {
+                    // Found a plausible header boundary. Copy into recv buffer and continue as normal.
+                    memcpy(buf, window, sizeof(window));
+                    break;
+                }
+            }
+            if (bytes_scanned > scan_limit)
+            {
+                // Give up on resync; surface CRC error to caller
+                VAL_LOG_ERROR(s, "recv_packet: resync failed after scanning limit");
+#if defined(_WIN32)
+                LeaveCriticalSection(&s->lock);
+#else
+                pthread_mutex_unlock(&s->lock);
+#endif
+                return VAL_ERR_CRC;
+            }
+        }
+        // Fallthrough with buf containing a valid header
     }
     val_packet_header_t *hdr = (val_packet_header_t *)buf; // original header bytes remain for trailer CRC
     // Verify wire_version is zero (reserved for future use)
@@ -1132,10 +1195,7 @@ val_status_t val_receive_files(val_session_t *session, const char *output_direct
 
 // EOT is internal and sent automatically by val_send_files when all files are sent.
 
-static uint32_t def_or(uint32_t v, uint32_t d)
-{
-    return v ? v : d;
-}
+// def_or(v, d) was an earlier helper; no longer used
 
 // Ensure local config.required/requested only contains negotiable (optional) features compiled-in; sanitize requested
 static inline uint32_t val__negotiable_mask(void)

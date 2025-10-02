@@ -292,6 +292,131 @@ static void ts_tp_tracef(const char *fmt, ...)
     va_end(ap);
 }
 
+static void ts_dirname(const char *path, char *out, size_t outsz)
+{
+    if (!path || !*path || !out || outsz == 0)
+    {
+        if (out && outsz)
+            out[0] = '\0';
+        return;
+    }
+    size_t n = strlen(path);
+    size_t i = n;
+    while (i > 0 && (path[i - 1] == '/' || path[i - 1] == '\\'))
+        --i;
+    while (i > 0 && !(path[i - 1] == '/' || path[i - 1] == '\\'))
+        --i;
+    if (i == 0)
+    {
+        ts_str_copy(out, outsz, ".");
+        return;
+    }
+    size_t copy = (i < outsz - 1) ? i : (outsz - 1);
+    memcpy(out, path, copy);
+    out[copy] = '\0';
+}
+
+static int file_exists(const char *path)
+{
+    if (!path || !*path)
+        return 0;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
+int ts_find_example_bins(char *rx_out, size_t rx_out_size, char *tx_out, size_t tx_out_size)
+{
+    if (!rx_out || !tx_out || rx_out_size == 0 || tx_out_size == 0)
+        return 0;
+    char art[2048];
+    if (!ts_get_artifacts_root(art, sizeof(art)))
+        return 0;
+    char exe_dir[2048];
+    ts_dirname(art, exe_dir, sizeof(exe_dir));           // <build>/<preset>/unit_tests
+    char preset_root[2048];
+    ts_dirname(exe_dir, preset_root, sizeof(preset_root)); // <build>/<preset>
+
+    char rx[4096], tx[4096];
+#if defined(_WIN32)
+    snprintf(rx, sizeof(rx), "%s\\bin\\val_example_receive.exe", preset_root);
+    snprintf(tx, sizeof(tx), "%s\\bin\\val_example_send.exe", preset_root);
+#else
+    snprintf(rx, sizeof(rx), "%s/bin/val_example_receive", preset_root);
+    snprintf(tx, sizeof(tx), "%s/bin/val_example_send", preset_root);
+#endif
+    if (file_exists(rx) && file_exists(tx))
+    {
+        ts_str_copy(rx_out, rx_out_size, rx);
+        ts_str_copy(tx_out, tx_out_size, tx);
+        return 1;
+    }
+
+    // Fallbacks for atypical layouts
+    char build_root[2048];
+    ts_dirname(preset_root, build_root, sizeof(build_root)); // <build>
+    char dbg_rx[4096], dbg_tx[4096], root_rx[4096], root_tx[4096];
+#if defined(_WIN32)
+    snprintf(dbg_rx, sizeof(dbg_rx), "%s\\Debug\\val_example_receive.exe", build_root);
+    snprintf(dbg_tx, sizeof(dbg_tx), "%s\\Debug\\val_example_send.exe", build_root);
+    snprintf(root_rx, sizeof(root_rx), "%s\\val_example_receive.exe", build_root);
+    snprintf(root_tx, sizeof(root_tx), "%s\\val_example_send.exe", build_root);
+#else
+    snprintf(dbg_rx, sizeof(dbg_rx), "%s/Debug/val_example_receive", build_root);
+    snprintf(dbg_tx, sizeof(dbg_tx), "%s/Debug/val_example_send", build_root);
+    snprintf(root_rx, sizeof(root_rx), "%s/val_example_receive", build_root);
+    snprintf(root_tx, sizeof(root_tx), "%s/val_example_send", build_root);
+#endif
+    const char *crx = NULL, *ctx = NULL;
+    if (file_exists(dbg_rx) && file_exists(dbg_tx))
+    {
+        crx = dbg_rx; ctx = dbg_tx;
+    }
+    else if (file_exists(root_rx) && file_exists(root_tx))
+    {
+        crx = root_rx; ctx = root_tx;
+    }
+    if (crx && ctx)
+    {
+        ts_str_copy(rx_out, rx_out_size, crx);
+        ts_str_copy(tx_out, tx_out_size, ctx);
+        return 1;
+    }
+    return 0;
+}
+
+void ts_str_copy(char *dst, size_t dst_size, const char *src)
+{
+    if (!dst || dst_size == 0)
+        return;
+    if (!src)
+    {
+        dst[0] = '\0';
+        return;
+    }
+    size_t n = strnlen(src, dst_size - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+void ts_str_append(char *dst, size_t dst_size, const char *src)
+{
+    if (!dst || dst_size == 0 || !src)
+        return;
+    size_t cur = strnlen(dst, dst_size);
+    if (cur >= dst_size)
+    {
+        dst[dst_size - 1] = '\0';
+        return;
+    }
+    size_t rem = dst_size - 1 - cur;
+    size_t n = strnlen(src, rem);
+    memcpy(dst + cur, src, n);
+    dst[cur + n] = '\0';
+}
+
 void ts_rand_seed_set(uint64_t seed)
 {
     // Advance the internal generator a seed-dependent number of steps to vary sequences deterministically.

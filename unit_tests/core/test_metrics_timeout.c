@@ -11,10 +11,10 @@ int main(void)
 }
 #else
 
-// Wrap receiver's send to DROP the first DATA_ACK to cause a sender timeout/retransmit, then behave normally.
+// Wrap receiver's send to DROP the first DATA_ACK to force a sender timeout/retransmit in stop-and-wait mode, then behave normally.
 static int send_delay_first_ack(void *ctx, const void *data, size_t len)
 {
-    static int delayed = 0;
+    static int drop_once = 1; // drop exactly one DATA_ACK
     test_duplex_t *d = (test_duplex_t *)ctx;
     const uint8_t *src = (const uint8_t *)data;
     uint8_t *tmp = (uint8_t *)malloc(len);
@@ -22,10 +22,10 @@ static int send_delay_first_ack(void *ctx, const void *data, size_t len)
         return -1;
     memcpy(tmp, src, len);
     // DATA_ACK type is 6 (first byte of header)
-    if (!delayed && len >= 1 && tmp[0] == 6)
+    if (drop_once > 0 && len >= 1 && tmp[0] == 6)
     {
-        // Drop this ACK: simulate one lost ACK frame
-        delayed = 1;
+        // Drop this ACK; in stop-and-wait this guarantees sender times out and retransmits the same DATA
+        drop_once--;
         free(tmp);
         return (int)len;
     }
@@ -45,19 +45,24 @@ int main(void)
     char artroot[1024];
     if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
         return 1;
+    char outdir[2048];
+    ts_str_copy(outdir, sizeof(outdir), artroot);
 #if defined(_WIN32)
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s\\mto\\out", artroot);
-    char in[2048];
-    snprintf(in, sizeof(in), "%s\\mto\\f.bin", artroot);
+    ts_str_append(outdir, sizeof(outdir), "\\mto\\out");
 #else
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s/mto/out", artroot);
+    ts_str_append(outdir, sizeof(outdir), "/mto/out");
+#endif
     char in[2048];
-    snprintf(in, sizeof(in), "%s/mto/f.bin", artroot);
+    ts_str_copy(in, sizeof(in), artroot);
+#if defined(_WIN32)
+    ts_str_append(in, sizeof(in), "\\mto\\f.bin");
+#else
+    ts_str_append(in, sizeof(in), "/mto/f.bin");
 #endif
     if (ts_ensure_dir(outdir) != 0)
         return 1;
+    // Remove previous output file if present to force data path
+    ts_remove_file(in);
     FILE *f = fopen(in, "wb");
     if (!f)
         return 2;
@@ -72,10 +77,27 @@ int main(void)
     test_duplex_t end_tx = d; // sender end (a2b outbound)
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
-    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
-    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
+    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_NEVER, 1024);
+    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_NEVER, 1024);
+    // Verbose logs to watch retransmit/timeout logic closely
+    ts_set_console_logger_with_level(&cfg_tx, VAL_LOG_TRACE);
+    ts_set_console_logger_with_level(&cfg_rx, VAL_LOG_TRACE);
 
-    // Keep defaults from ts_make_config() which are moderate; a single ACK drop will trigger a timeout + retransmit
+    // Use stop-and-wait to make a single ACK drop cause a retransmission deterministically
+    cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
+    cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
+    cfg_tx.adaptive_tx.streaming_enabled = 0;
+    cfg_tx.adaptive_tx.accept_incoming_streaming = 0;
+    cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
+    cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
+    cfg_rx.adaptive_tx.streaming_enabled = 0;
+    cfg_rx.adaptive_tx.accept_incoming_streaming = 0;
+    // Timeouts short to keep test fast
+    cfg_tx.timeouts.min_timeout_ms = 50;
+    cfg_tx.timeouts.max_timeout_ms = 200;
+    cfg_rx.timeouts.min_timeout_ms = 50;
+    cfg_rx.timeouts.max_timeout_ms = 200;
+    // Keep other defaults from ts_make_config(); our ACK drops will now reliably trigger a timeout + retransmit
     // Install delayed ACK sender on RX side
     cfg_rx.transport.send = send_delay_first_ack;
 
@@ -100,6 +122,10 @@ int main(void)
     if (mtx.timeouts == 0 || mtx.retransmits == 0)
     {
         fprintf(stderr, "expected timeouts>0 and retransmits>0; got to=%u rt=%u\n", mtx.timeouts, mtx.retransmits);
+        fprintf(stderr, "TX metrics: sent=%llu recv=%llu bytes_sent=%llu bytes_recv=%llu timeouts=%u retrans=%u crc=%u files_sent=%u handshakes=%u rtt_samples=%u\n",
+                (unsigned long long)mtx.packets_sent, (unsigned long long)mtx.packets_recv,
+                (unsigned long long)mtx.bytes_sent, (unsigned long long)mtx.bytes_recv, mtx.timeouts, mtx.retransmits,
+                mtx.crc_errors, mtx.files_sent, mtx.handshakes, mtx.rtt_samples);
         return 6;
     }
 

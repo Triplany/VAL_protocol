@@ -5,162 +5,13 @@
 
 #if defined(_WIN32)
 #include <windows.h>
-#define PATH_SEP "\\"
-#define EXE_EXT ".exe"
 #else
 #include <sys/wait.h>
 #include <unistd.h>
-#define PATH_SEP "/"
-#define EXE_EXT ""
 #endif
 
-static void dirname_of(const char *path, char *out, size_t outsz)
-{
-    if (!path || !*path || !out || outsz == 0)
-    {
-        if (out && outsz)
-            out[0] = '\0';
-        return;
-    }
-    size_t n = strlen(path);
-    size_t i = n;
-    // Trim trailing separators first
-    while (i > 0 && (path[i - 1] == '/' || path[i - 1] == '\\'))
-        --i;
-    // Now walk back to previous separator
-    while (i > 0 && !(path[i - 1] == '/' || path[i - 1] == '\\'))
-        --i;
-    if (i == 0)
-    {
-        snprintf(out, outsz, ".");
-        return;
-    }
-    size_t copy = (i < outsz - 1) ? i : (outsz - 1);
-    memcpy(out, path, copy);
-    out[copy] = '\0';
-}
-
-static int file_exists(const char *path)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return 0;
-    fclose(f);
-    return 1;
-}
-
-// Join a directory and filename with exactly one path separator, returning a newly allocated string.
-// Caller must free the returned pointer.
-static char *join_path(const char *dir, const char *filename)
-{
-    if (!dir)
-        dir = "";
-    if (!filename)
-        filename = "";
-    size_t ld = strlen(dir);
-    size_t lf = strlen(filename);
-    int need_sep = 1;
-    if (ld == 0)
-        need_sep = 0;
-    else
-    {
-        char last = dir[ld - 1];
-        if (last == '/' || last == '\\')
-            need_sep = 0;
-    }
-    size_t total = ld + (size_t)need_sep + lf + 1;
-    char *out = (char *)malloc(total);
-    if (!out)
-        return NULL;
-    size_t pos = 0;
-    if (ld)
-    {
-        memcpy(out + pos, dir, ld);
-        pos += ld;
-    }
-    if (need_sep)
-        out[pos++] = PATH_SEP[0];
-    if (lf)
-    {
-        memcpy(out + pos, filename, lf);
-        pos += lf;
-    }
-    out[pos] = '\0';
-    return out;
-}
-
-// Find example executables relative to the test exe dir
-static int find_example_bins(char *rx_path, size_t rx_sz, char *tx_path, size_t tx_sz)
-{
-    char art[2048];
-    if (!ts_get_artifacts_root(art, sizeof(art)))
-        return 0;
-    // artifacts root = <exe_dir>/ut_artifacts
-    char exe_dir[2048];
-    dirname_of(art, exe_dir, sizeof(exe_dir));
-
-    // Compute build_root = dirname(dirname(exe_dir))  i.e., .../build/<config root>
-    char parent1[2048];
-    dirname_of(exe_dir, parent1, sizeof(parent1)); // unit_tests
-    char build_root[2048];
-    dirname_of(parent1, build_root, sizeof(build_root)); // build root
-
-    // Candidates to try (absolute):
-    char c_debug_rx[4096], c_debug_tx[4096], c_sc_rx[4096], c_sc_tx[4096], c_sc2_rx[4096], c_sc2_tx[4096], c_cwd_rx[64],
-        c_cwd_tx[64], c_rel1_rx[4096], c_rel1_tx[4096];
-    // Current working directory (CTest runs from build root on single-config generators)
-    snprintf(c_cwd_rx, sizeof(c_cwd_rx), "val_example_receive" EXE_EXT);
-    snprintf(c_cwd_tx, sizeof(c_cwd_tx), "val_example_send" EXE_EXT);
-    snprintf(c_debug_rx, sizeof(c_debug_rx), "%s" PATH_SEP "Debug" PATH_SEP "val_example_receive" EXE_EXT, build_root);
-    snprintf(c_debug_tx, sizeof(c_debug_tx), "%s" PATH_SEP "Debug" PATH_SEP "val_example_send" EXE_EXT, build_root);
-    snprintf(c_sc_rx, sizeof(c_sc_rx), "%s" PATH_SEP "val_example_receive" EXE_EXT, build_root);
-    snprintf(c_sc_tx, sizeof(c_sc_tx), "%s" PATH_SEP "val_example_send" EXE_EXT, build_root);
-    // Single-config generators (e.g., Makefiles/Ninja): executables typically live in the parent directory of unit_tests
-    snprintf(c_sc2_rx, sizeof(c_sc2_rx), "%s" PATH_SEP "val_example_receive" EXE_EXT, parent1);
-    snprintf(c_sc2_tx, sizeof(c_sc2_tx), "%s" PATH_SEP "val_example_send" EXE_EXT, parent1);
-    // Relative from exe_dir two levels up to top Debug
-    snprintf(c_rel1_rx, sizeof(c_rel1_rx),
-             "%s" PATH_SEP ".." PATH_SEP ".." PATH_SEP "Debug" PATH_SEP "val_example_receive" EXE_EXT, exe_dir);
-    snprintf(c_rel1_tx, sizeof(c_rel1_tx), "%s" PATH_SEP ".." PATH_SEP ".." PATH_SEP "Debug" PATH_SEP "val_example_send" EXE_EXT,
-             exe_dir);
-
-    const char *rx = NULL, *tx = NULL;
-    if (file_exists(c_debug_rx) && file_exists(c_debug_tx))
-    {
-        rx = c_debug_rx;
-        tx = c_debug_tx;
-    }
-    else if (file_exists(c_sc_rx) && file_exists(c_sc_tx))
-    {
-        rx = c_sc_rx;
-        tx = c_sc_tx;
-    }
-    else if (file_exists(c_sc2_rx) && file_exists(c_sc2_tx))
-    {
-        rx = c_sc2_rx;
-        tx = c_sc2_tx;
-    }
-    else if (file_exists(c_cwd_rx) && file_exists(c_cwd_tx))
-    {
-        rx = c_cwd_rx;
-        tx = c_cwd_tx;
-    }
-    else if (file_exists(c_rel1_rx) && file_exists(c_rel1_tx))
-    {
-        rx = c_rel1_rx;
-        tx = c_rel1_tx;
-    }
-    else
-    {
-        fprintf(stderr, "candidates tried:\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n", c_debug_rx, c_debug_tx,
-                c_sc_rx, c_sc_tx, c_sc2_rx, c_sc2_tx, c_cwd_rx, c_cwd_tx, c_rel1_rx, c_rel1_tx);
-        return 0;
-    }
-
-    snprintf(rx_path, rx_sz, "%s", rx);
-    snprintf(tx_path, tx_sz, "%s", tx);
-    return 1;
-}
+// Join using centralized helper; caller must free
+static char *join_path(const char *dir, const char *filename) { return ts_join_path_dyn(dir, filename); }
 
 static int write_pattern_file(const char *path, size_t size)
 {
@@ -283,7 +134,7 @@ static int run_sender(const char *tx_path, const char *host, unsigned short port
 int main(void)
 {
     char rx_path[4096], tx_path[4096];
-    if (!find_example_bins(rx_path, sizeof(rx_path), tx_path, sizeof(tx_path)))
+    if (!ts_find_example_bins(rx_path, sizeof(rx_path), tx_path, sizeof(tx_path)))
     {
         fprintf(stderr, "could not locate example binaries\n");
         return 1;

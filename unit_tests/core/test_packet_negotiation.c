@@ -2,8 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-// Peek into session internals to validate negotiated effective_packet_size
-#include "../../src/val_internal.h"
 
 #include <stdarg.h>
 
@@ -153,28 +151,21 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     val_config_t cfg_tx, cfg_rx;
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
-    ts_make_config(&cfg_tx, sb_tx, rb_tx, sender_pkt, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
-    ts_make_config(&cfg_rx, sb_rx, rb_rx, receiver_pkt, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
+    ts_make_config(&cfg_tx, sb_tx, rb_tx, sender_pkt, &end_tx, VAL_RESUME_NEVER, 1024);
+    ts_make_config(&cfg_rx, sb_rx, rb_rx, receiver_pkt, &end_rx, VAL_RESUME_NEVER, 1024);
 
-    val_session_t *tx = NULL, *rx = NULL;
-    uint32_t dtx = 0, drx = 0;
-    val_status_t rctx = val_session_create(&cfg_tx, &tx, &dtx);
-    val_status_t rcrx = val_session_create(&cfg_rx, &rx, &drx);
-    if (rctx != VAL_OK || rcrx != VAL_OK || !tx || !rx)
+    val_session_t *tx = NULL;
+    val_session_t *rx = NULL;
+    if (val_session_create(&cfg_tx, &tx, NULL) != VAL_OK || val_session_create(&cfg_rx, &rx, NULL) != VAL_OK)
     {
-        fprintf(stderr, "session create failed (tx rc=%d d=0x%08X, rx rc=%d d=0x%08X)\n", (int)rctx, (unsigned)dtx, (int)rcrx,
-                (unsigned)drx);
-        free(sb_tx);
-        free(rb_tx);
-        free(sb_rx);
-        free(rb_rx);
-        test_duplex_free(&d);
         free(basedir);
         free(outdir);
         free(inpath);
         free(outpath);
+        fprintf(stderr, "session create failed\n");
         return 1;
     }
+
     ts_thread_t th = ts_start_receiver(rx, outdir);
     const char *files[1] = {inpath};
     val_status_t st = val_send_files(tx, files, 1, NULL);
@@ -202,8 +193,17 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
 
     // Validate negotiated effective packet size on both sessions equals min(sender_pkt, receiver_pkt)
     size_t expected = sender_pkt < receiver_pkt ? sender_pkt : receiver_pkt;
-    size_t eff_tx = tx->effective_packet_size;
-    size_t eff_rx = rx->effective_packet_size;
+    size_t eff_tx = 0, eff_rx = 0;
+    if (val_get_effective_packet_size(tx, &eff_tx) != VAL_OK ||
+        val_get_effective_packet_size(rx, &eff_rx) != VAL_OK)
+    {
+        fprintf(stderr, "failed to query effective packet size\n");
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
+        return 1;
+    }
     if (eff_tx != expected || eff_rx != expected)
     {
         fprintf(stderr, "negotiation mismatch: expected %zu got tx=%zu rx=%zu\n", expected, eff_tx, eff_rx);
@@ -265,35 +265,13 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     // For reverse direction, the endpoint that was previously RX (end_rx) becomes TX
     test_duplex_t end_tx2 = end_rx;
     test_duplex_t end_rx2 = end_tx;
-    ts_make_config(&cfg_tx2, sb_tx2, rb_tx2, receiver_pkt, &end_tx2, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
-    ts_make_config(&cfg_rx2, sb_rx2, rb_rx2, sender_pkt, &end_rx2, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
-    val_session_t *tx2 = NULL, *rx2 = NULL;
-    uint32_t dtx2 = 0, drx2 = 0;
-    val_status_t rctx2 = val_session_create(&cfg_tx2, &tx2, &dtx2);
-    val_status_t rcrx2 = val_session_create(&cfg_rx2, &rx2, &drx2);
-    if (rctx2 != VAL_OK || rcrx2 != VAL_OK || !tx2 || !rx2)
+    ts_make_config(&cfg_tx2, sb_tx2, rb_tx2, receiver_pkt, &end_tx2, VAL_RESUME_NEVER, 1024);
+    ts_make_config(&cfg_rx2, sb_rx2, rb_rx2, sender_pkt, &end_rx2, VAL_RESUME_NEVER, 1024);
+    val_session_t *tx2 = NULL;
+    val_session_t *rx2 = NULL;
+    if (val_session_create(&cfg_tx2, &tx2, NULL) != VAL_OK || val_session_create(&cfg_rx2, &rx2, NULL) != VAL_OK)
     {
-        fprintf(stderr, "session create 2 failed (tx rc=%d d=0x%08X, rx rc=%d d=0x%08X)\n", (int)rctx2, (unsigned)dtx2,
-                (int)rcrx2, (unsigned)drx2);
-        // Cleanup everything allocated so far
-        free(outdir2);
-        free(inpath2);
-        free(outpath2);
-        val_session_destroy(tx);
-        val_session_destroy(rx);
-        free(sb_tx);
-        free(rb_tx);
-        free(sb_rx);
-        free(rb_rx);
-        free(sb_tx2);
-        free(rb_tx2);
-        free(sb_rx2);
-        free(rb_rx2);
-        test_duplex_free(&d);
-        free(basedir);
-        free(outdir);
-        free(inpath);
-        free(outpath);
+        fprintf(stderr, "session create 2 failed\n");
         return 1;
     }
     ts_thread_t th2 = ts_start_receiver(rx2, outdir2);
@@ -325,8 +303,20 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
         return 1;
     }
     // Validate negotiation again (min of original sizes)
-    size_t eff_tx2 = tx2->effective_packet_size;
-    size_t eff_rx2 = rx2->effective_packet_size;
+    size_t eff_tx2 = 0, eff_rx2 = 0;
+    if (val_get_effective_packet_size(tx2, &eff_tx2) != VAL_OK ||
+        val_get_effective_packet_size(rx2, &eff_rx2) != VAL_OK)
+    {
+        fprintf(stderr, "failed to query effective packet size (2)\n");
+        free(outdir2);
+        free(inpath2);
+        free(outpath2);
+        free(basedir);
+        free(outdir);
+        free(inpath);
+        free(outpath);
+        return 1;
+    }
     if (eff_tx2 != expected || eff_rx2 != expected)
     {
         fprintf(stderr, "reverse negotiation mismatch: expected %zu got tx=%zu rx=%zu\n", expected, eff_tx2, eff_rx2);

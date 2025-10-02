@@ -95,16 +95,17 @@ Run (PowerShell):
 
 ```powershell
 # Receiver (port 9000, output to D:\\out, MTU 8192, resume tail-or-zero with 16 KiB)
-.\build\windows-release\Release\val_example_receive.exe --mtu 8192 --resume tail_or_zero --tail-bytes 16384 9000 D:\\out
+.\build\windows-release\bin\val_example_receive.exe --mtu 8192 --resume tail_or_zero --tail-bytes 16384 9000 D:\\out
 
 # Sender (connect to localhost, same resume settings)
-.\build\windows-release\Release\val_example_send.exe --mtu 8192 --resume tail_or_zero --tail-bytes 16384 127.0.0.1 9000 D:\\files\a.bin D:\\files\b.bin
+.\build\windows-release\bin\val_example_send.exe --mtu 8192 --resume tail_or_zero --tail-bytes 16384 127.0.0.1 9000 D:\\files\a.bin D:\\files\b.bin
 ```
 
 On Linux/WSL, use the provided `linux-*` presets in `CMakePresets.json` and run the corresponding binaries.
 
 Notes
 - The repository root should stay clean. All build outputs and test artifacts go under `build/<preset>/...`.
+- Executables are emitted to `build/<preset>/bin` and libraries to `build/<preset>/lib` (no extra `Debug/` level for Visual Studio generators).
 - If you previously had stray `Testing/` or `out/` folders at the root, they were from older ad-hoc runs; they are ignored by `.gitignore` and no longer created by the current CMake setup.
 
 ## Status

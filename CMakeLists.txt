@@ -4,6 +4,20 @@ project(val_protocol C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Place built artifacts under a flat bin/lib layout inside the build tree
+# This avoids Visual Studio's extra per-config subfolder (e.g., Debug/) so
+# executables are in <build>/bin and libraries in <build>/lib.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+# Ensure multi-config generators (VS) don't append the config subdir
+foreach(cfg Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER ${cfg} CFGU)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CFGU} ${CMAKE_BINARY_DIR}/bin)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CFGU} ${CMAKE_BINARY_DIR}/bin)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CFGU} ${CMAKE_BINARY_DIR}/lib)
+endforeach()
+
 # Build options
 option(VAL_ENABLE_ERROR_STRINGS "Build optional error string utilities (host-only)" ON)
 option(VAL_ENABLE_METRICS "Enable compile-time protocol metrics counters and timing" OFF)

@@ -3,7 +3,6 @@
   "configurePresets": [
     {
       "name": "windows-debug",
-      
       "displayName": "Windows Debug",
       "description": "Windows build with MSVC",
       "generator": "Visual Studio 17 2022",
@@ -13,9 +12,8 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_TOOLCHAIN_FILE": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows",
-            "VCPKG_MANIFEST_MODE": "ON",      
-    "VCPKG_MANIFEST_INSTALL": "ON"       
-
+        "VCPKG_MANIFEST_MODE": "ON",
+        "VCPKG_MANIFEST_INSTALL": "ON"
       }
     },
     {
@@ -29,17 +27,16 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_TOOLCHAIN_FILE": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows",
-                    "VCPKG_MANIFEST_MODE": "ON",      
-    "VCPKG_MANIFEST_INSTALL": "ON"       
-
+        "VCPKG_MANIFEST_MODE": "ON",
+        "VCPKG_MANIFEST_INSTALL": "ON"
       }
     },
     {
       "name": "linux-debug",
       "displayName": "Linux Debug",
-      "description": "Linux build via WSL2",
+      "description": "Linux build via WSL2 or native",
       "generator": "Unix Makefiles",
-      "binaryDir": "$env{HOME}/build/${sourceDirName}/linux-debug",
+      "binaryDir": "${sourceDir}/build/linux-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_C_COMPILER": "/usr/bin/gcc",
@@ -51,9 +48,9 @@
     {
       "name": "linux-release",
       "displayName": "Linux Release",
-      "description": "Linux release build via WSL2",
+      "description": "Linux release build via WSL2 or native",
       "generator": "Unix Makefiles",
-      "binaryDir": "$env{HOME}/build/${sourceDirName}/linux-release",
+      "binaryDir": "${sourceDir}/build/linux-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_C_COMPILER": "/usr/bin/gcc",
@@ -61,12 +58,62 @@
         "CMAKE_TOOLCHAIN_FILE": "$env{HOME}/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux"
       }
+    },
+    {
+      "name": "windows-debug-metrics",
+      "displayName": "Windows Debug (metrics)",
+      "description": "Windows Debug with metrics enabled (same build folder)",
+      "inherits": "windows-debug",
+      "cacheVariables": {
+        "VAL_ENABLE_METRICS": "ON"
+      }
+    },
+    {
+      "name": "windows-release-metrics",
+      "displayName": "Windows Release (metrics)",
+      "description": "Windows Release with metrics enabled (same build folder)",
+      "inherits": "windows-release",
+      "cacheVariables": {
+        "VAL_ENABLE_METRICS": "ON"
+      }
+    },
+    {
+      "name": "linux-debug-metrics",
+      "displayName": "Linux Debug (metrics)",
+      "description": "Linux Debug with metrics enabled (same build folder)",
+      "inherits": "linux-debug",
+      "cacheVariables": {
+        "VAL_ENABLE_METRICS": "ON"
+      }
+    },
+    {
+      "name": "linux-release-metrics",
+      "displayName": "Linux Release (metrics)",
+      "description": "Linux Release with metrics enabled (same build folder)",
+      "inherits": "linux-release",
+      "cacheVariables": {
+        "VAL_ENABLE_METRICS": "ON"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "windows-debug", "configurePreset": "windows-debug" },
-    { "name": "windows-release", "configurePreset": "windows-release" },
+    { "name": "windows-debug", "configurePreset": "windows-debug", "configuration": "Debug" },
+    { "name": "windows-release", "configurePreset": "windows-release", "configuration": "Release" },
     { "name": "linux-debug",  "configurePreset": "linux-debug" },
-    { "name": "linux-release", "configurePreset": "linux-release" }
+    { "name": "linux-release", "configurePreset": "linux-release" },
+    { "name": "windows-debug-metrics", "configurePreset": "windows-debug-metrics", "configuration": "Debug" },
+    { "name": "windows-release-metrics", "configurePreset": "windows-release-metrics", "configuration": "Release" },
+    { "name": "linux-debug-metrics",  "configurePreset": "linux-debug-metrics" },
+    { "name": "linux-release-metrics", "configurePreset": "linux-release-metrics" }
+  ],
+  "testPresets": [
+    { "name": "windows-debug", "configurePreset": "windows-debug", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "windows-release", "configurePreset": "windows-release", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } },
+    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } },
+    { "name": "windows-debug-metrics", "configurePreset": "windows-debug-metrics", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "windows-release-metrics", "configurePreset": "windows-release-metrics", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "linux-debug-metrics", "configurePreset": "linux-debug-metrics", "output": { "outputOnFailure": true } },
+    { "name": "linux-release-metrics", "configurePreset": "linux-release-metrics", "output": { "outputOnFailure": true } }
   ]
 }

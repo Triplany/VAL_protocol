@@ -21,18 +21,19 @@ int main(void)
         fprintf(stderr, "failed artifacts root\n");
         return 1;
     }
+    char outdir[2048];
+    ts_str_copy(outdir, sizeof(outdir), artroot);
 #if defined(_WIN32)
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s\\metrics\\out", artroot);
-    char in[2048];
-    snprintf(in, sizeof(in), "%s\\metrics\\m.bin", artroot);
-    const char *out = "%s\\metrics\\out\\m.bin";
+    ts_str_append(outdir, sizeof(outdir), "\\metrics\\out");
 #else
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s/metrics/out", artroot);
+    ts_str_append(outdir, sizeof(outdir), "/metrics/out");
+#endif
     char in[2048];
-    snprintf(in, sizeof(in), "%s/metrics/m.bin", artroot);
-    const char *out = "%s/metrics/out/m.bin";
+    ts_str_copy(in, sizeof(in), artroot);
+#if defined(_WIN32)
+    ts_str_append(in, sizeof(in), "\\metrics\\m.bin");
+#else
+    ts_str_append(in, sizeof(in), "/metrics/m.bin");
 #endif
     if (ts_ensure_dir(outdir) != 0)
     {

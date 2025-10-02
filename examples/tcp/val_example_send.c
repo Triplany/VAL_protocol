@@ -1,5 +1,6 @@
 #include "common/tcp_util.h"
 #include "val_protocol.h"
+#include "val_error_strings.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>

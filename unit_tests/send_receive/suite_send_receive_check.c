@@ -259,27 +259,31 @@ static int test_packet_size_sweep(void)
         test_duplex_t d;
         test_duplex_init(&d, packet, depth);
 #if defined(_WIN32)
-        char basepath[256];
-        snprintf(basepath, sizeof(basepath), ".\\ut_artifacts\\sweep_%zu", packet);
-        _mkdir(".\\ut_artifacts");
-        _mkdir(basepath);
-        _mkdir(".\\ut_artifacts\\sweep_out");
-        const char *outdir = ".\\ut_artifacts\\sweep_out";
-        char inpath[260];
-        char outpath[260];
-        snprintf(inpath, sizeof(inpath), "%s\\input.bin", basepath);
-        snprintf(outpath, sizeof(outpath), "%s\\input.bin", outdir);
+    char basepath[512];
+    _mkdir(".\\ut_artifacts");
+    snprintf(basepath, sizeof(basepath), ".\\ut_artifacts\\sweep_%zu", packet);
+    _mkdir(basepath);
+    _mkdir(".\\ut_artifacts\\sweep_out");
+    const char *outdir = ".\\ut_artifacts\\sweep_out";
+    char inpath[512];
+    char outpath[512];
+    ts_str_copy(inpath, sizeof(inpath), basepath);
+    ts_str_append(inpath, sizeof(inpath), "\\input.bin");
+    ts_str_copy(outpath, sizeof(outpath), outdir);
+    ts_str_append(outpath, sizeof(outpath), "\\input.bin");
 #else
-        char basepath[256];
-        snprintf(basepath, sizeof(basepath), "./ut_artifacts/sweep_%zu", packet);
-        mkdir("./ut_artifacts", 0777);
-        mkdir(basepath, 0777);
-        mkdir("./ut_artifacts/sweep_out", 0777);
-        const char *outdir = "./ut_artifacts/sweep_out";
-        char inpath[260];
-        char outpath[260];
-        snprintf(inpath, sizeof(inpath), "%s/input.bin", basepath);
-        snprintf(outpath, sizeof(outpath), "%s/input.bin", outdir);
+    char basepath[512];
+    mkdir("./ut_artifacts", 0777);
+    snprintf(basepath, sizeof(basepath), "./ut_artifacts/sweep_%zu", packet);
+    mkdir(basepath, 0777);
+    mkdir("./ut_artifacts/sweep_out", 0777);
+    const char *outdir = "./ut_artifacts/sweep_out";
+    char inpath[512];
+    char outpath[512];
+    ts_str_copy(inpath, sizeof(inpath), basepath);
+    ts_str_append(inpath, sizeof(inpath), "/input.bin");
+    ts_str_copy(outpath, sizeof(outpath), outdir);
+    ts_str_append(outpath, sizeof(outpath), "/input.bin");
 #endif
         // write input
         {

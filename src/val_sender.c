@@ -753,6 +753,8 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
             // Record transmission error for adaptive tracking
             val_internal_record_transmission_error(s);
             val_metrics_inc_retrans(s);
+            // Count a timeout event when we decide to retransmit due to missing/late ACK
+            val_metrics_inc_timeout(s);
             s->timing.in_retransmit = 1;
             size_t to_read = (size_t)((size - last_acked) < (uint64_t)max_payload ? (size - last_acked) : (uint64_t)max_payload);
             long curpos2 = s->config->filesystem.ftell(s->config->filesystem.fs_context, f);

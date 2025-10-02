@@ -45,6 +45,7 @@ static val_validation_action_t val_validate_metadata(val_session_t *session, con
 
 static val_status_t val_handle_validation_action(val_session_t *session, val_validation_action_t action, const char *filename)
 {
+    (void)filename; // currently unused; reserved for future diagnostics
     switch (action)
     {
     case VAL_VALIDATION_ACCEPT:

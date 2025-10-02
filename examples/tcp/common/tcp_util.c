@@ -21,15 +21,6 @@ static void ensure_wsa(void)
             wsa_initialized = 1;
     }
 }
-static int last_err(void)
-{
-    return WSAGetLastError();
-}
-static void set_nonblock(int fd, int nb)
-{
-    u_long m = nb ? 1 : 0;
-    ioctlsocket((SOCKET)fd, FIONBIO, &m);
-}
 static int closesock(int fd)
 {
     return closesocket((SOCKET)fd);
@@ -106,21 +97,6 @@ void tcp_sleep_ms(unsigned ms)
 #include <unistd.h>
 static void ensure_wsa(void)
 {
-}
-static int last_err(void)
-{
-    return errno;
-}
-static void set_nonblock(int fd, int nb)
-{
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0)
-        return;
-    if (nb)
-        flags |= O_NONBLOCK;
-    else
-        flags &= ~O_NONBLOCK;
-    fcntl(fd, F_SETFL, flags);
 }
 static int closesock(int fd)
 {

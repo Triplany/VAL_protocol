@@ -158,6 +158,10 @@ extern "C"
     size_t ts_env_size_bytes(const char *env_name, size_t default_value);
 
     // Extra cross-platform helpers for tests to reduce duplication
+    // Safe string copy/append into fixed-size buffers. Always NUL-terminates.
+    void ts_str_copy(char *dst, size_t dst_size, const char *src);
+    void ts_str_append(char *dst, size_t dst_size, const char *src);
+
     int ts_remove_file(const char *path);                           // ignore if not present, returns 0 on success
     int ts_write_pattern_file(const char *path, size_t size_bytes); // writes 0..255 repeating
     int ts_files_equal(const char *a, const char *b);               // returns 1 if identical, 0 otherwise
@@ -166,6 +170,9 @@ extern "C"
     // Dynamic formatting and path-join (caller must free)
     char *ts_dyn_sprintf(const char *fmt, ...);
     char *ts_join_path_dyn(const char *a, const char *b);
+    // Locate example binaries (val_example_receive/send) built by this tree.
+    // Fills absolute paths into rx_out/tx_out and returns 1 on success, 0 on failure.
+    int ts_find_example_bins(char *rx_out, size_t rx_out_size, char *tx_out, size_t tx_out_size);
     // Convenience: create standard artifacts directories for a test case
     // Produces <artifacts_root>/<case_name> and <...>/out
     int ts_build_case_dirs(const char *case_name, char *basedir, size_t basedir_sz, char *outdir, size_t outdir_sz);

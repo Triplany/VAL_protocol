@@ -20,16 +20,19 @@ int main(void)
     char artroot[1024];
     if (!ts_get_artifacts_root(artroot, sizeof(artroot)))
         return 1;
+    char outdir[2048];
+    ts_str_copy(outdir, sizeof(outdir), artroot);
 #if defined(_WIN32)
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s\\mrtt\\out", artroot);
-    char in[2048];
-    snprintf(in, sizeof(in), "%s\\mrtt\\f.bin", artroot);
+    ts_str_append(outdir, sizeof(outdir), "\\mrtt\\out");
 #else
-    char outdir[2048];
-    snprintf(outdir, sizeof(outdir), "%s/mrtt/out", artroot);
+    ts_str_append(outdir, sizeof(outdir), "/mrtt/out");
+#endif
     char in[2048];
-    snprintf(in, sizeof(in), "%s/mrtt/f.bin", artroot);
+    ts_str_copy(in, sizeof(in), artroot);
+#if defined(_WIN32)
+    ts_str_append(in, sizeof(in), "\\mrtt\\f.bin");
+#else
+    ts_str_append(in, sizeof(in), "/mrtt/f.bin");
 #endif
     if (ts_ensure_dir(outdir) != 0)
         return 1;

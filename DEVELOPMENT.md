@@ -172,8 +172,8 @@ Presets in `CMakePresets.json` cover Windows and Linux/WSL.
 ```powershell
 cmake -S . -B build\windows-release -G "Visual Studio 17 2022" -A x64
 cmake --build build\windows-release --config Release -j
-.\build\windows-release\Release\val_example_receive.exe --help
-.\build\windows-release\Release\val_example_send.exe --help
+.\build\windows-release\bin\val_example_receive.exe --help
+.\build\windows-release\bin\val_example_send.exe --help
 ```
 
 ### Linux / WSL2
@@ -184,6 +184,28 @@ cmake --build --preset linux-release
 ./build/linux-release/val_example_receive --help
 ./build/linux-release/val_example_send --help
 ```
+
+### Metrics builds
+
+- You can enable lightweight internal metrics at configure time; outputs remain in the same build folder (no separate "-metrics" directories):
+
+  - Windows (existing build dir): reconfigure in-place, then build and test
+    - In VS Code: run task "configure-build-and-test (metrics windows-debug)"
+    - Or terminal:
+      - `cmake -S . -B build\windows-debug -G "Visual Studio 17 2022" -A x64 -DVAL_ENABLE_METRICS=ON`
+      - `cmake --build build\windows-debug --config Debug`
+      - `ctest --test-dir build\windows-debug --build-config Debug --output-on-failure`
+
+  - Linux:
+    - In VS Code: run task "configure-build-and-test (metrics linux-debug)"
+    - Or terminal:
+      - `cmake -S . -B build/linux-debug -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug -DVAL_ENABLE_METRICS=ON`
+      - `cmake --build build/linux-debug`
+      - `ctest --test-dir build/linux-debug --output-on-failure`
+
+- Optional presets exist (e.g., `windows-debug-metrics`, `linux-debug-metrics`) that inherit the base presets and only toggle `VAL_ENABLE_METRICS`. If your build directory was initially configured without presets, you might see a CMake "generator platform" mismatch when trying to re-run the configure preset in-place. In that case, either:
+  - use the tasks above that pass `-DVAL_ENABLE_METRICS=ON` directly, or
+  - perform a one-time clean configure (delete `build/<preset>/CMakeCache.txt` and `CMakeFiles/`, or configure into a fresh `build/<preset>`).
 
 ## Tests
 

@@ -98,23 +98,41 @@ static int run_mode_and_check(val_tx_mode_t mode, unsigned expected_cap)
         return 1;
     }
 #if defined(_WIN32)
-    char basedir[512];
-    snprintf(basedir, sizeof(basedir), "%s\\wire_audit", root);
-    char modedir[512];
-    snprintf(modedir, sizeof(modedir), "%s\\mode_%u", basedir, (unsigned)mode);
-    char outdir[512];
-    snprintf(outdir, sizeof(outdir), "%s\\out", modedir);
-    char inpath[512];
-    snprintf(inpath, sizeof(inpath), "%s\\in.bin", modedir);
+    char basedir[1024];
+    ts_str_copy(basedir, sizeof(basedir), root);
+    ts_str_append(basedir, sizeof(basedir), "\\wire_audit");
+    char modedir[1024];
+    ts_str_copy(modedir, sizeof(modedir), basedir);
+    ts_str_append(modedir, sizeof(modedir), "\\mode_");
+    {
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "%u", (unsigned)mode);
+    ts_str_append(modedir, sizeof(modedir), tmp);
+    }
+    char outdir[1024];
+    ts_str_copy(outdir, sizeof(outdir), modedir);
+    ts_str_append(outdir, sizeof(outdir), "\\out");
+    char inpath[1024];
+    ts_str_copy(inpath, sizeof(inpath), modedir);
+    ts_str_append(inpath, sizeof(inpath), "\\in.bin");
 #else
-    char basedir[512];
-    snprintf(basedir, sizeof(basedir), "%s/wire_audit", root);
-    char modedir[512];
-    snprintf(modedir, sizeof(modedir), "%s/mode_%u", basedir, (unsigned)mode);
-    char outdir[512];
-    snprintf(outdir, sizeof(outdir), "%s/out", modedir);
-    char inpath[512];
-    snprintf(inpath, sizeof(inpath), "%s/in.bin", modedir);
+    char basedir[1024];
+    ts_str_copy(basedir, sizeof(basedir), root);
+    ts_str_append(basedir, sizeof(basedir), "/wire_audit");
+    char modedir[1024];
+    ts_str_copy(modedir, sizeof(modedir), basedir);
+    ts_str_append(modedir, sizeof(modedir), "/mode_");
+    {
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "%u", (unsigned)mode);
+    ts_str_append(modedir, sizeof(modedir), tmp);
+    }
+    char outdir[1024];
+    ts_str_copy(outdir, sizeof(outdir), modedir);
+    ts_str_append(outdir, sizeof(outdir), "/out");
+    char inpath[1024];
+    ts_str_copy(inpath, sizeof(inpath), modedir);
+    ts_str_append(inpath, sizeof(inpath), "/in.bin");
 #endif
     if (ts_ensure_dir(basedir) != 0 || ts_ensure_dir(modedir) != 0 || ts_ensure_dir(outdir) != 0)
     {
@@ -130,12 +148,14 @@ static int run_mode_and_check(val_tx_mode_t mode, unsigned expected_cap)
     // Proactively remove any stale outputs from prior runs of the same mode
     {
         // Construct out file path to remove; receiver writes the same filename as input by default
-        char outpath[512];
+    char outpath[1024];
 #if defined(_WIN32)
-        snprintf(outpath, sizeof(outpath), "%s\\in.bin", outdir);
+    ts_str_copy(outpath, sizeof(outpath), outdir);
+    ts_str_append(outpath, sizeof(outpath), "\\in.bin");
         DeleteFileA(outpath);
 #else
-        snprintf(outpath, sizeof(outpath), "%s/in.bin", outdir);
+    ts_str_copy(outpath, sizeof(outpath), outdir);
+    ts_str_append(outpath, sizeof(outpath), "/in.bin");
         (void)remove(outpath);
 #endif
         // Also remove input if present to avoid partial leftovers
