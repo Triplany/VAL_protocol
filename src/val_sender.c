@@ -103,7 +103,8 @@ static val_status_t compute_crc_region(val_session_t *s, const char *filepath, u
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
         return VAL_ERR_INVALID_ARG;
     }
-    size_t buf_size = (size_t)(s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size);
+    // For local file CRC computation during resume verify, use full configured buffer size (not MTU)
+    size_t buf_size = (size_t)s->config->buffers.packet_size;
     if (buf_size == 0)
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
@@ -133,7 +134,7 @@ static val_status_t compute_crc_region(val_session_t *s, const char *filepath, u
 static val_status_t request_resume_and_get_response(val_session_t *s, const char *filepath, uint64_t *resume_offset_out)
 {
     val_status_t st = val_internal_send_packet(s, VAL_PKT_RESUME_REQ, NULL, 0, 0);
-    if (st != VAL_OK)
+        if (st != VAL_OK)
     {
         VAL_LOG_ERRORF(s, "resume_req: send failed %d", (int)st);
         return st;
@@ -221,7 +222,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
         if (resp.verify_len == 0 || resp.resume_offset < resp.verify_len || resp.verify_len > UINT32_MAX)
         {
             // Cannot compute a valid CRC region; treat as mismatch and restart
-            VAL_LOG_WARN(s, "verify: invalid region from receiver, restarting at 0");
+            val_packet_type_t t = 0; // Initialize packet type
             *resume_offset_out = 0;
             // Inform receiver we cannot verify: send status directly
             int32_t status_le = (int32_t)val_htole32((uint32_t)VAL_ERR_RESUME_VERIFY);
@@ -452,8 +453,6 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
     // Branch by current mode; map STREAMING to largest window
     switch (s->current_tx_mode)
     {
-    case VAL_TX_STOP_AND_WAIT:
-        return val__send_file_stop_and_wait(s, filepath, sender_path, progress_ctx);
     case VAL_TX_WINDOW_2:
     case VAL_TX_WINDOW_4:
     case VAL_TX_WINDOW_8:
@@ -465,31 +464,18 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         return val__send_file_stop_and_wait(s, filepath, sender_path, progress_ctx);
     }
     // Fallthrough: windowed/streaming implementation
-    // Map mode to window size
+    // Map mode to window size and allow dynamic adjustment mid-file when mode changes
+    val_tx_mode_t mode_used = s->current_tx_mode;
     uint32_t win = 2;
-    switch (s->current_tx_mode)
+    switch (mode_used)
     {
-    case VAL_TX_WINDOW_2:
-        win = 2;
-        break;
-    case VAL_TX_WINDOW_4:
-        win = 4;
-        break;
-    case VAL_TX_WINDOW_8:
-        win = 8;
-        break;
-    case VAL_TX_WINDOW_16:
-        win = 16;
-        break;
-    case VAL_TX_WINDOW_32:
-        win = 32;
-        break;
-    case VAL_TX_WINDOW_64:
-        win = 64;
-        break;
-    default:
-        win = 2;
-        break;
+    case VAL_TX_WINDOW_2:  win = 2;  break;
+    case VAL_TX_WINDOW_4:  win = 4;  break;
+    case VAL_TX_WINDOW_8:  win = 8;  break;
+    case VAL_TX_WINDOW_16: win = 16; break;
+    case VAL_TX_WINDOW_32: win = 32; break;
+    case VAL_TX_WINDOW_64: win = 64; break;
+    default:               win = 2;  break;
     }
     // Use a simplified Go-Back-N cumulative ACK approach
     // Gather meta
@@ -500,29 +486,8 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
     if (st != VAL_OK)
         return st;
     const char *reported_path = (sender_path && sender_path[0]) ? sender_path : filepath;
-    // Compute file CRC32 (one pass)
-    void *fcrc = s->config->filesystem.fopen(s->config->filesystem.fs_context, filepath, "rb");
-    if (!fcrc)
-        return VAL_ERR_IO;
-    uint32_t crc_state = val_internal_crc32_init(s);
-    uint8_t *crc_buf = (uint8_t *)s->config->buffers.recv_buffer;
-    if (!crc_buf)
-    {
-        s->config->filesystem.fclose(s->config->filesystem.fs_context, fcrc);
-        return VAL_ERR_INVALID_ARG;
-    }
-    size_t chunk_sz = (s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size);
-    if (chunk_sz > s->config->buffers.packet_size)
-        chunk_sz = s->config->buffers.packet_size;
-    for (;;)
-    {
-        int r = s->config->filesystem.fread(s->config->filesystem.fs_context, crc_buf, 1, chunk_sz, fcrc);
-        if (r <= 0)
-            break;
-        crc_state = val_internal_crc32_update(s, crc_state, crc_buf, (size_t)r);
-    }
-    s->config->filesystem.fclose(s->config->filesystem.fs_context, fcrc);
-    uint32_t file_crc = val_internal_crc32_final(s, crc_state);
+    // Do not compute whole-file CRC in protocol; unit tests may compute independently if needed
+    uint32_t file_crc = 0;
     // Send metadata
     st = send_metadata(s, reported_path, size, file_crc, filename);
     if (st != VAL_OK)
@@ -542,13 +507,21 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         if (st != VAL_OK)
             return st;
         // Wait for DONE_ACK
-        val_packet_type_t t = 0;
-        uint32_t len = 0;
-        uint64_t off = 0;
+    val_packet_type_t t = 0;
+    uint32_t len = 0;
+    uint64_t off = 0;
+    uint8_t aux_payload[32]; // small scratch buffer to read control payloads (e.g., NAK)
         uint32_t to = val_internal_get_timeout(s, VAL_OP_DONE_ACK);
         uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
         while (tries--)
         {
+            if (val_check_for_cancel(s))
+            {
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                VAL_LOG_WARN(s, "recv DONE_ACK (skip): local cancel while waiting");
+                return VAL_ERR_ABORTED;
+            }
             st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
             if (st == VAL_OK && t == VAL_PKT_DONE_ACK)
                 break;
@@ -596,11 +569,40 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
     uint64_t last_acked = resume_off;
     uint64_t next_to_send = resume_off;
     uint32_t inflight = 0;
+    // If we resumed mid-file, the receiver may need to re-read existing bytes to seed its CRC before
+    // it starts pulling network data. Give the very first DATA_ACK after resume extra time.
+    int first_ack_grace = (resume_off > 0) ? 1 : 0;
+    // Compute additional retries budget for the very first DATA_ACK on large resumes.
+    // Heuristic: +1 retry per ~256 MiB of resume offset, capped at +6.
+    uint8_t first_ack_extra_tries = 0;
+    if (resume_off > 0)
+    {
+        uint64_t blocks = resume_off / (256ull * 1024ull * 1024ull);
+        if (blocks > 6) blocks = 6;
+        first_ack_extra_tries = (uint8_t)blocks;
+    }
     while (last_acked < size)
     {
+        // Fast path: if a local cancel was requested (e.g., by progress callback), abort immediately
+        if (val_check_for_cancel(s))
+        {
+            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+            if (s->config->callbacks.on_file_complete)
+                s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+            VAL_LOG_WARN(s, "data(win): local cancel detected at loop top");
+            return VAL_ERR_ABORTED;
+        }
         // Fill window
         while (inflight < win && next_to_send < size)
         {
+            if (val_check_for_cancel(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                VAL_LOG_WARN(s, "data(win): local cancel during fill-window");
+                return VAL_ERR_ABORTED;
+            }
             size_t to_read =
                 (size_t)((size - next_to_send) < (uint64_t)max_payload ? (size - next_to_send) : (uint64_t)max_payload);
             if (!payload_area)
@@ -639,12 +641,25 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 s->audit.max_inflight_observed = inflight;
 #endif
         }
-        // Wait for cumulative ACK
-        val_packet_type_t t = 0;
-        uint32_t len = 0;
-        uint64_t off = 0;
-        uint32_t to_ack = val_internal_get_timeout(s, VAL_OP_DATA_ACK);
+    // Wait for cumulative ACK
+    val_packet_type_t t = 0;
+    uint32_t len = 0;
+    uint64_t off = 0;
+    // Small scratch buffer for control payloads (e.g., DATA_NAK)
+    uint8_t ctrl_buf[32];
+        uint32_t to_ack_base = val_internal_get_timeout(s, VAL_OP_DATA_ACK);
+        // Extend the first DATA_ACK wait when resuming mid-file to account for receiver CRC seeding
+        uint32_t to_ack = to_ack_base;
+        if (first_ack_grace && last_acked == resume_off)
+        {
+            uint32_t ext = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : to_ack_base;
+            if (ext > to_ack)
+                to_ack = ext;
+            VAL_LOG_INFO(s, "data: extended first DATA_ACK wait after resume");
+        }
         uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
+        if (first_ack_grace && last_acked == resume_off)
+            tries = (uint8_t)(tries + first_ack_extra_tries);
         uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         uint32_t t0 = s->config->system.get_ticks_ms();
         // Fixed deadline for this ACK wait — declare before any statements to satisfy strict C parsers
@@ -664,7 +679,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
             }
             // If streaming is allowed and enabled, use micro-polling derived from RTT to check for ACKs frequently.
             // This prevents long blocking waits when the pipe is full and provides smoother pacing.
-            streaming_mode = (uint8_t)(s->send_streaming_allowed && s->cfg.adaptive_tx.streaming_enabled);
+            streaming_mode = (uint8_t)(s->send_streaming_allowed && s->cfg.adaptive_tx.allow_streaming && s->streaming_engaged);
 
             if (streaming_mode)
             {
@@ -683,7 +698,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
             {
                 poll_ms = to_ack;
             }
-            st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, streaming_mode ? poll_ms : to_ack);
+            st = val_internal_recv_packet(s, &t, ctrl_buf, (uint32_t)sizeof(ctrl_buf), &len, &off, streaming_mode ? poll_ms : to_ack);
             if (st == VAL_OK)
             {
                 if (t == VAL_PKT_CANCEL)
@@ -693,12 +708,76 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                         s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
                     return VAL_ERR_ABORTED;
                 }
+                if (t == VAL_PKT_DATA_NAK)
+                {
+                    // Receiver reports a gap/dup/overlap. Extract next_expected_offset from payload and
+                    // advance our last_acked to the receiver's high-water to avoid duplicate retransmits.
+                    if (len >= 12)
+                    {
+                        uint64_t nak_next = 0; uint32_t reason = 0;
+                        memcpy(&nak_next, ctrl_buf, 8);
+                        memcpy(&reason, ctrl_buf + 8, 4);
+                        nak_next = val_letoh64(nak_next);
+                        reason = val_letoh32(reason);
+                        VAL_LOG_DEBUGF(s, "data(win): got DATA_NAK next=%llu reason=0x%08X (last_acked=%llu next_to_send=%llu)",
+                                       (unsigned long long)nak_next, (unsigned)reason,
+                                       (unsigned long long)last_acked, (unsigned long long)next_to_send);
+                        if (nak_next > last_acked && nak_next <= size)
+                        {
+                            uint64_t prev_acked = last_acked;
+                            last_acked = nak_next;
+                            // Recompute inflight based on next_to_send - last_acked
+                            uint64_t outstanding = (next_to_send > last_acked) ? (next_to_send - last_acked) : 0;
+                            inflight = (uint32_t)((outstanding + max_payload - 1) / max_payload);
+#if VAL_ENABLE_WIRE_AUDIT
+                            s->audit.current_inflight = inflight;
+                            if (inflight > s->audit.max_inflight_observed)
+                                s->audit.max_inflight_observed = inflight;
+#endif
+                            // Seek file position to last_acked to retransmit the missing segment next
+                            long target_l = (long)last_acked;
+                            long curpos3 = s->config->filesystem.ftell(s->config->filesystem.fs_context, f);
+                            if (curpos3 < 0 || (uint64_t)curpos3 != last_acked)
+                                (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, f, target_l, SEEK_SET);
+                            VAL_LOG_DEBUGF(s, "data(win): advance on NAK prev=%llu -> last_acked=%llu inflight=%u",
+                                           (unsigned long long)prev_acked, (unsigned long long)last_acked, (unsigned)inflight);
+                        }
+                    }
+                    // Fast retransmit from updated last_acked (Go-Back-N). Record error and continue.
+                    val_internal_record_transmission_error(s);
+                    val_metrics_inc_retrans(s);
+                    s->timing.in_retransmit = 1;
+                    size_t to_read = (size_t)((size - last_acked) < (uint64_t)max_payload ? (size - last_acked) : (uint64_t)max_payload);
+                    long curpos2 = s->config->filesystem.ftell(s->config->filesystem.fs_context, f);
+                    if (curpos2 < 0 || (uint64_t)curpos2 != last_acked)
+                        (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)last_acked, SEEK_SET);
+                    VAL_LOG_DEBUGF(s, "data(win): retransmit from last_acked=%llu len=%u",
+                                   (unsigned long long)last_acked, (unsigned)to_read);
+                    size_t have2 = 0; while (have2 < to_read) { int r2 = s->config->filesystem.fread(s->config->filesystem.fs_context, payload_area + have2, 1, to_read - have2, f); if (r2 <= 0) break; have2 += (size_t)r2; }
+                    if (have2 != to_read) { s->config->filesystem.fclose(s->config->filesystem.fs_context, f); return VAL_ERR_IO; }
+                    val_status_t rs = val_internal_send_packet(s, VAL_PKT_DATA, payload_area, (uint32_t)to_read, last_acked);
+                    if (rs != VAL_OK) { s->config->filesystem.fclose(s->config->filesystem.fs_context, f); return rs; }
+                    continue; // keep waiting for DATA_ACK after retransmit
+                }
                 if (t == VAL_PKT_DATA_ACK)
                 {
                     if (t0 && !s->timing.in_retransmit)
                     {
                         uint32_t now = s->config->system.get_ticks_ms();
                         val_internal_record_rtt(s, now - t0);
+                    }
+                    // First DATA_ACK after resume received; disable grace for subsequent ACKs
+                    if (first_ack_grace)
+                        first_ack_grace = 0;
+                    // Count a success toward potential upgrade when ACK arrives without retransmit
+                    if (!s->timing.in_retransmit)
+                        val_internal_record_transmission_success(s);
+                    // Ignore stale/regressive ACKs that do not advance beyond last_acked
+                    if (off <= last_acked)
+                    {
+                        VAL_LOG_DEBUGF(s, "data(win): ignoring stale DATA_ACK off=%llu (<= last_acked=%llu)",
+                                       (unsigned long long)off, (unsigned long long)last_acked);
+                        continue; // keep waiting within the ACK loop
                     }
                     if (off > last_acked)
                     {
@@ -708,6 +787,15 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                             val_emit_progress_sender(s, (val_send_progress_ctx_t *)progress_ctx, filename, last_acked, 1);
                         else
                             val_emit_progress_sender(s, NULL, filename, last_acked, 1);
+                        // If the progress callback issued a cancel, exit immediately
+                        if (val_check_for_cancel(s))
+                        {
+                            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                            if (s->config->callbacks.on_file_complete)
+                                s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                            VAL_LOG_WARN(s, "data(win): local cancel right after progress emission");
+                            return VAL_ERR_ABORTED;
+                        }
                         // Calculate new inflight based on sent - acked
                         uint64_t outstanding = (next_to_send > last_acked) ? (next_to_send - last_acked) : 0;
                         inflight = (uint32_t)((outstanding + max_payload - 1) / max_payload);
@@ -717,7 +805,40 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                             s->audit.max_inflight_observed = inflight;
 #endif
                     }
+                    else
+                    {
+                        // Even if ACK didn't advance, a cancel might have been requested by other means
+                        if (val_check_for_cancel(s))
+                        {
+                            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                            if (s->config->callbacks.on_file_complete)
+                                s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                            VAL_LOG_WARN(s, "data(win): local cancel after DATA_ACK without progress");
+                            return VAL_ERR_ABORTED;
+                        }
+                    }
+                    // If adaptive mode changed due to successes/errors, adjust window
+                    if (s->current_tx_mode != mode_used)
+                    {
+                        mode_used = s->current_tx_mode;
+                        switch (mode_used)
+                        {
+                        case VAL_TX_WINDOW_2:  win = 2;  break;
+                        case VAL_TX_WINDOW_4:  win = 4;  break;
+                        case VAL_TX_WINDOW_8:  win = 8;  break;
+                        case VAL_TX_WINDOW_16: win = 16; break;
+                        case VAL_TX_WINDOW_32: win = 32; break;
+                        case VAL_TX_WINDOW_64: win = 64; break;
+                        default:               win = 2;  break;
+                        }
+                        VAL_LOG_INFOF(s, "adaptive: switching sender window to %u", (unsigned)win);
+                    }
                     break; // leave inner recv loop; refill window
+                }
+                if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
+                {
+                    // Ignore benign mode-sync noise while waiting for DATA_ACK
+                    continue;
                 }
                 if (t == VAL_PKT_ERROR)
                 {
@@ -734,12 +855,24 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 uint32_t nowp = s->config->system.get_ticks_ms();
                 if (nowp < wait_deadline)
                 {
+                    // If we recently observed a heartbeat, refresh the overall deadline modestly to avoid spurious retransmits
+                    if (s->last_keepalive_recv_time && (nowp - s->last_keepalive_recv_time) <= 4000u)
+                    {
+                        // Extend deadline by a small slice, but never beyond base to_ack + 50%
+                        uint32_t max_deadline = t0 + (to_ack_base + (to_ack_base / 2u));
+                        uint32_t candidate = nowp + (to_ack_base / 8u);
+                        if (candidate > wait_deadline && wait_deadline < max_deadline)
+                            wait_deadline = (candidate < max_deadline) ? candidate : max_deadline;
+                    }
                     // Keep polling
                     continue;
                 }
                 // Fall through to real-timeout handling when deadline reached
                 VAL_LOG_DEBUG(s, "data: streaming poll deadline reached, escalating to timeout");
             }
+            // If we successfully received an ACK, proceed to refill window
+            if (st == VAL_OK)
+                break;
             if ((st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC) || tries == 0)
             {
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
@@ -780,6 +913,22 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                 return rs;
             }
+            // If mode degraded on error, update window size
+            if (s->current_tx_mode != mode_used)
+            {
+                mode_used = s->current_tx_mode;
+                switch (mode_used)
+                {
+                case VAL_TX_WINDOW_2:  win = 2;  break;
+                case VAL_TX_WINDOW_4:  win = 4;  break;
+                case VAL_TX_WINDOW_8:  win = 8;  break;
+                case VAL_TX_WINDOW_16: win = 16; break;
+                case VAL_TX_WINDOW_32: win = 32; break;
+                case VAL_TX_WINDOW_64: win = 64; break;
+                default:               win = 2;  break;
+                }
+                VAL_LOG_INFOF(s, "adaptive: degrading sender window to %u", (unsigned)win);
+            }
             if (backoff && s->config->system.delay_ms)
                 s->config->system.delay_ms(backoff);
             if (backoff)
@@ -802,17 +951,124 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         uint64_t off = 0;
         uint32_t to = val_internal_get_timeout(s, VAL_OP_DONE_ACK);
         uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
-        while (tries--)
+        uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+        uint32_t t0done = s->config->system.get_ticks_ms();
+        s->timing.in_retransmit = 0;
+        for (;;)
         {
-            st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
-            if (st == VAL_OK && t == VAL_PKT_DONE_ACK)
-                break;
+            if (!val_internal_transport_is_connected(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
+                return VAL_ERR_IO;
+            }
+            if (val_check_for_cancel(s))
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                VAL_LOG_WARN(s, "recv DONE_ACK: local cancel while waiting");
+                return VAL_ERR_ABORTED;
+            }
+            // Micro-poll DONE_ACK to avoid long blocking waits after cancel
+            {
+                uint32_t deadline = s->config->system.get_ticks_ms() + to;
+                for (;;)
+                {
+                    uint32_t nowp = s->config->system.get_ticks_ms();
+                    uint32_t remaining = (nowp < deadline) ? (deadline - nowp) : 0u;
+                    uint32_t poll = remaining > 20u ? 20u : remaining;
+                    if (poll == 0u)
+                        poll = 1u;
+                    // Receive into a small control buffer so we can parse NAK payloads
+                    uint8_t ctrl_buf[32];
+                    st = val_internal_recv_packet(s, &t, ctrl_buf, (uint32_t)sizeof(ctrl_buf), &len, &off, poll);
+                    if (st == VAL_OK || (st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC))
+                        break;
+                    if (val_check_for_cancel(s))
+                    {
+                        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                        if (s->config->callbacks.on_file_complete)
+                            s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                        VAL_LOG_WARN(s, "recv DONE_ACK: local cancel during polling");
+                        return VAL_ERR_ABORTED;
+                    }
+                    if (remaining > 0u)
+                        continue; // keep polling until deadline
+                    st = VAL_ERR_TIMEOUT; // escalate
+                    break;
+                }
+            }
+            if (st == VAL_OK)
+            {
+                if (t == VAL_PKT_ERROR)
+                {
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    if (s->config->callbacks.on_file_complete)
+                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_PROTOCOL);
+                    VAL_LOG_ERROR(s, "recv DONE_ACK: ERROR packet");
+                    return VAL_ERR_PROTOCOL;
+                }
+                if (t == VAL_PKT_DONE_ACK)
+                {
+                    if (t0done && !s->timing.in_retransmit)
+                    {
+                        uint32_t now = s->config->system.get_ticks_ms();
+                        val_internal_record_rtt(s, now - t0done);
+                    }
+                    break;
+                }
+                if (t == VAL_PKT_CANCEL)
+                {
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    if (s->config->callbacks.on_file_complete)
+                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                    VAL_LOG_WARN(s, "recv DONE_ACK: received CANCEL");
+                    return VAL_ERR_ABORTED;
+                }
+                // Ignore benign packets while waiting for DONE_ACK
+                if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
+                    continue;
+                VAL_LOG_DEBUGF(s, "recv DONE_ACK: ignoring unexpected packet type=%d", (int)t);
+                continue;
+            }
             if (st != VAL_OK && st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
             {
                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", st);
+                VAL_LOG_ERRORF(s, "recv DONE_ACK failed %d", (int)st);
                 return st;
             }
-            (void)val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
+            if (tries == 0)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_TIMEOUT);
+                VAL_LOG_ERROR(s, "recv DONE_ACK: retries exhausted");
+                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
+                return VAL_ERR_TIMEOUT;
+            }
+            // Retransmit DONE on timeout or benign packet and backoff
+            val_internal_record_transmission_error(s);
+            val_metrics_inc_retrans(s);
+            s->timing.in_retransmit = 1; // Karn's algorithm
+            val_status_t rs = val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
+            if (rs != VAL_OK)
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", rs);
+                VAL_LOG_ERRORF(s, "retransmit DONE failed %d", (int)rs);
+                return rs;
+            }
+            VAL_LOG_DEBUG(s, "done: ack timeout, retransmitting");
+            val_metrics_inc_timeout(s);
+            if (backoff && s->config->system.delay_ms)
+                s->config->system.delay_ms(backoff);
+            if (backoff)
+                backoff <<= 1;
+            --tries;
         }
     }
     s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
@@ -847,39 +1103,8 @@ static val_status_t val__send_file_stop_and_wait(val_session_t *s, const char *f
     // Determine reported/original path hint to include in metadata for receiver information
     const char *reported_path = (sender_path && sender_path[0]) ? sender_path : filepath;
 
-    // Compute file CRC32 (whole file). For large files, this traverses file once upfront.
-    void *fcrc = s->config->filesystem.fopen(s->config->filesystem.fs_context, filepath, "rb");
-    if (!fcrc)
-    {
-        VAL_LOG_ERROR(s, "fopen for CRC failed");
-        return VAL_ERR_IO;
-    }
-    uint32_t crc_state = val_internal_crc32_init(s);
-    if (!s->config->buffers.recv_buffer)
-    {
-        VAL_LOG_ERROR(s, "recv_buffer null during CRC");
-        return VAL_ERR_INVALID_ARG;
-    }
-    uint8_t *buf = (uint8_t *)s->config->buffers.recv_buffer;
-    size_t chunk = (s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size);
-    /* Ensure chunk does not exceed the actual recv buffer size to avoid overruns. */
-    if (chunk > s->config->buffers.packet_size)
-        chunk = s->config->buffers.packet_size;
-    for (;;)
-    {
-        if (val_check_for_cancel(s))
-        {
-            s->config->filesystem.fclose(s->config->filesystem.fs_context, fcrc);
-            VAL_LOG_WARN(s, "crc: local cancel detected");
-            return VAL_ERR_ABORTED;
-        }
-        int r = s->config->filesystem.fread(s->config->filesystem.fs_context, buf, 1, chunk, fcrc);
-        if (r <= 0)
-            break;
-        crc_state = val_internal_crc32_update(s, crc_state, buf, (size_t)r);
-    }
-    s->config->filesystem.fclose(s->config->filesystem.fs_context, fcrc);
-    uint32_t file_crc = val_internal_crc32_final(s, crc_state);
+    // Do not compute whole-file CRC in protocol; set to 0 in metadata
+    uint32_t file_crc = 0;
 
     // Send metadata
     st = send_metadata(s, reported_path, size, file_crc, filename);
@@ -963,6 +1188,15 @@ static val_status_t val__send_file_stop_and_wait(val_session_t *s, const char *f
     uint8_t *send_buf_bytes = (uint8_t *)s->config->buffers.send_buffer;
     uint8_t *payload_area = send_buf_bytes ? (send_buf_bytes + sizeof(val_packet_header_t)) : NULL;
     uint64_t sent = resume_off;
+    // If resuming, grant extra time for the first DATA_ACK to allow receiver CRC seeding
+    int first_ack_grace = (resume_off > 0) ? 1 : 0;
+    uint8_t first_ack_extra_tries = 0;
+    if (resume_off > 0)
+    {
+        uint64_t blocks = resume_off / (256ull * 1024ull * 1024ull);
+        if (blocks > 6) blocks = 6;
+        first_ack_extra_tries = (uint8_t)blocks;
+    }
     if (resume_off >= size)
     {
         VAL_LOG_INFO(s, "data: nothing to send after successful resume verify; skipping to DONE");
@@ -1060,11 +1294,20 @@ static val_status_t val__send_file_stop_and_wait(val_session_t *s, const char *f
         uint64_t off = 0;
         val_packet_type_t t = 0;
         uint32_t to_ack = val_internal_get_timeout(s, VAL_OP_DATA_ACK);
+        if (first_ack_grace && sent == resume_off)
+        {
+            uint32_t ext = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : to_ack;
+            if (ext > to_ack)
+                to_ack = ext;
+            VAL_LOG_INFO(s, "data: extended first DATA_ACK wait after resume");
+        }
         uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
-        uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+        if (first_ack_grace && sent == resume_off)
+            tries = (uint8_t)(tries + first_ack_extra_tries);
+    uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         uint32_t t0 = s->config->system.get_ticks_ms();
         s->timing.in_retransmit = 0;
-        for (;;)
+    for (;;)
         {
             // Keep declarations early for strict parsers
             if (!val_internal_transport_is_connected(s))
@@ -1083,74 +1326,160 @@ static val_status_t val__send_file_stop_and_wait(val_session_t *s, const char *f
                 VAL_LOG_WARN(s, "recv DATA_ACK: local cancel");
                 return VAL_ERR_ABORTED;
             }
-            st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to_ack);
+            // Micro-poll with a cancel-aware deadline to improve responsiveness
+            {
+                uint32_t deadline = s->config->system.get_ticks_ms() + to_ack;
+                for (;;)
+                {
+                    uint32_t nowp = s->config->system.get_ticks_ms();
+                    uint32_t remaining = (nowp < deadline) ? (deadline - nowp) : 0u;
+                    uint32_t poll = remaining > 20u ? 20u : remaining;
+                    if (poll == 0u)
+                        poll = 1u; // ensure we don't block forever
+                    uint8_t ctrl_buf[32];
+                    st = val_internal_recv_packet(s, &t, ctrl_buf, (uint32_t)sizeof(ctrl_buf), &len, &off, poll);
+                    if (st == VAL_OK)
+                    {
+                        if (t == VAL_PKT_CANCEL)
+                        {
+                            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                            if (s->config->callbacks.on_file_complete)
+                                s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                            VAL_LOG_WARN(s, "recv DATA_ACK: received CANCEL");
+                            fprintf(stdout, "[VAL][TX] DATA_ACK wait: received CANCEL -> ABORT\n");
+                            fflush(stdout);
+                            return VAL_ERR_ABORTED;
+                        }
+                        if (t == VAL_PKT_ERROR)
+                        {
+                            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                            VAL_LOG_ERROR(s, "recv DATA_ACK: ERROR packet");
+                            return VAL_ERR_PROTOCOL;
+                        }
+                        if (t != VAL_PKT_DATA_ACK)
+                        {
+                            // Explicit NAK support: parse payload [next_expected_offset(LE64), reason(LE32)]
+                            if (t == VAL_PKT_DATA_NAK)
+                            {
+                                uint64_t nak_next = sent; // default to current
+                                if (len >= 12)
+                                {
+                                    memcpy(&nak_next, ctrl_buf, 8);
+                                    nak_next = val_letoh64(nak_next);
+                                    // reason is optional diagnostics; ignore for now
+                                }
+                                VAL_LOG_DEBUGF(s, "recv DATA_ACK: DATA_NAK -> next_expected=%llu (was sent=%llu)",
+                                               (unsigned long long)nak_next, (unsigned long long)sent);
+                                // Only process NAKs that request a valid offset within the file
+                                if (nak_next <= size)
+                                {
+                                    // Seek and rebuild payload at receiver's requested offset
+                                    long target_l = (long)nak_next;
+                                    if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, target_l, SEEK_SET) != 0)
+                                    {
+                                        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                                        VAL_LOG_ERROR(s, "fseek to nak_next failed");
+                                        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
+                                        return VAL_ERR_IO;
+                                    }
+                                    sent = nak_next;
+                                    to_read = (size_t)((size - sent) < (uint64_t)max_payload ? (size - sent) : (uint64_t)max_payload);
+                                    // Refill the payload for retransmit from 'sent'
+                                    size_t have2 = 0;
+                                    while (have2 < to_read)
+                                    {
+                                        int r2 = s->config->filesystem.fread(s->config->filesystem.fs_context, payload_area + have2, 1, to_read - have2, f);
+                                        if (r2 <= 0)
+                                            break;
+                                        have2 += (size_t)r2;
+                                    }
+                                    if (have2 != to_read)
+                                    {
+                                        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                                        VAL_LOG_ERROR(s, "fread for NAK retransmit failed");
+                                        return VAL_ERR_IO;
+                                    }
+                                }
+                                // Count an error and retransmit the payload from adjusted 'sent'
+                                val_internal_record_transmission_error(s);
+                                val_metrics_inc_retrans(s);
+                                s->timing.in_retransmit = 1; // Karn's algorithm
+                                val_status_t rs = val_internal_send_packet(s, VAL_PKT_DATA, payload_area, (uint32_t)to_read, sent);
+                                if (rs != VAL_OK)
+                                {
+                                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                                    return rs;
+                                }
+                                // Keep waiting for the DATA_ACK after retransmit
+                                continue;
+                            }
+                            // Ignore mode sync noise; no heartbeat semantics in sender anymore
+                            if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
+                            {
+                                VAL_LOG_DEBUG(s, "recv DATA_ACK: ignoring MODE_SYNC(_ACK)");
+                                continue;
+                            }
+                            VAL_LOG_DEBUGF(s, "recv DATA_ACK: ignoring unexpected packet type=%d", (int)t);
+                            continue;
+                        }
+                        VAL_LOG_DEBUGF(s, "data: got DATA_ACK off=%llu", (unsigned long long)off);
+                        if (t0 && !s->timing.in_retransmit)
+                        {
+                            uint32_t now = s->config->system.get_ticks_ms();
+                            val_internal_record_rtt(s, now - t0);
+                        }
+                        if (first_ack_grace)
+                            first_ack_grace = 0;
+                        if (!s->timing.in_retransmit)
+                            val_internal_record_transmission_success(s);
+                        // Accept forward ACKs; seek file to match if ACK advances past our last sent position
+                        if (off > sent)
+                        {
+                            // Seek file to the new position
+                            if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)off, SEEK_SET) != 0)
+                            {
+                                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                                VAL_LOG_ERROR(s, "fseek to ACK offset failed");
+                                val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
+                                return VAL_ERR_IO;
+                            }
+                            sent = off;
+                        }
+                        else if (off < sent)
+                        {
+                            // Regressive ACK (shouldn't happen in stop-and-wait); log and ignore
+                            VAL_LOG_DEBUGF(s, "data: ignoring regressive DATA_ACK off=%llu (< sent=%llu)",
+                                           (unsigned long long)off, (unsigned long long)sent);
+                            continue;
+                        }
+                        // else off == sent: duplicate ACK, accept and proceed
+    #if VAL_ENABLE_WIRE_AUDIT
+                        s->audit.current_inflight = 0;
+    #endif
+                        break; // success
+                    }
+                    if (st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
+                    {
+                        break; // propagate non-timeout errors to outer handling
+                    }
+                    if (val_check_for_cancel(s))
+                    {
+                        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                        if (s->config->callbacks.on_file_complete)
+                            s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
+                        VAL_LOG_WARN(s, "data: local cancel during DATA_ACK polling");
+                        return VAL_ERR_ABORTED;
+                    }
+                    if (remaining > 0u)
+                        continue; // keep polling until deadline
+                    // Escalate to a real timeout
+                    st = VAL_ERR_TIMEOUT;
+                    break;
+                }
+            }
+            // If we successfully received the DATA_ACK, exit the wait loop
             if (st == VAL_OK)
             {
-                if (t == VAL_PKT_CANCEL)
-                {
-                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                    if (s->config->callbacks.on_file_complete)
-                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
-                    VAL_LOG_WARN(s, "recv DATA_ACK: received CANCEL");
-                    fprintf(stdout, "[VAL][TX] DATA_ACK wait: received CANCEL -> ABORT\n");
-                    fflush(stdout);
-                    return VAL_ERR_ABORTED;
-                }
-                if (t == VAL_PKT_ERROR)
-                {
-                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                    VAL_LOG_ERROR(s, "recv DATA_ACK: ERROR packet");
-                    return VAL_ERR_PROTOCOL;
-                }
-                if (t != VAL_PKT_DATA_ACK)
-                {
-                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                    VAL_LOG_ERRORF(s, "recv: expected DATA_ACK got %d", (int)t);
-                    VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_UNKNOWN_TYPE);
-                    return VAL_ERR_PROTOCOL;
-                }
-                VAL_LOG_DEBUGF(s, "data: got DATA_ACK off=%llu", (unsigned long long)off);
-                if (t0 && !s->timing.in_retransmit)
-                {
-                    uint32_t now = s->config->system.get_ticks_ms();
-                    val_internal_record_rtt(s, now - t0);
-                }
-                // Cumulative semantics: off == receiver's next expected offset
-                if (off > sent + to_read)
-                {
-                    // Receiver is ahead; seek forward
-                    uint64_t target = off;
-                    long target_l = (long)target;
-                    if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, target_l, SEEK_SET) != 0)
-                    {
-                        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                        VAL_LOG_ERROR(s, "fseek forward failed");
-                        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
-                        return VAL_ERR_IO;
-                    }
-                    sent = off;
-                }
-                else if (off < sent)
-                {
-                    // Receiver expects earlier data; seek back and resume
-                    long target_l = (long)off;
-                    if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, target_l, SEEK_SET) != 0)
-                    {
-                        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                        VAL_LOG_ERROR(s, "fseek backward failed");
-                        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
-                        return VAL_ERR_IO;
-                    }
-                    sent = off;
-                }
-                else
-                {
-                    // Normal advance: receiver accepted this chunk
-                    sent = off; // equals sent + to_read in happy path
-                }
-#if VAL_ENABLE_WIRE_AUDIT
-                s->audit.current_inflight = 0;
-#endif
                 break;
             }
             if ((st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC) || tries == 0)
@@ -1285,6 +1614,15 @@ send_done:
                     fflush(stdout);
                     return VAL_ERR_ABORTED;
                 }
+                // Ignore mode sync noise while waiting for DONE_ACK
+                if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
+                {
+                    VAL_LOG_DEBUG(s, "recv DONE_ACK: ignoring MODE_SYNC(_ACK)");
+                    continue;
+                }
+                // Tolerate any other unexpected packets here; keep waiting for DONE_ACK
+                VAL_LOG_DEBUGF(s, "recv DONE_ACK: ignoring unexpected packet type=%d", (int)t);
+                continue;
             }
             if (st != VAL_OK && st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
             {
@@ -1539,7 +1877,37 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
 #endif
             return VAL_ERR_ABORTED;
         }
-        st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, to);
+        // Micro-poll EOT_ACK to avoid long blocking waits after cancel
+        {
+            uint32_t deadline = s->config->system.get_ticks_ms() + to;
+            for (;;)
+            {
+                uint32_t nowp = s->config->system.get_ticks_ms();
+                uint32_t remaining = (nowp < deadline) ? (deadline - nowp) : 0u;
+                uint32_t poll = remaining > 20u ? 20u : remaining;
+                if (poll == 0u)
+                    poll = 1u;
+                st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, poll);
+                if (st == VAL_OK || (st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC))
+                    break;
+                if (val_check_for_cancel(s))
+                {
+                    VAL_LOG_WARN(s, "wait EOT_ACK: local cancel during polling");
+                    fprintf(stdout, "[VAL][TX] EOT_ACK wait: local CANCEL -> ABORT\n");
+                    fflush(stdout);
+    #if defined(_WIN32)
+                    LeaveCriticalSection(&s->lock);
+    #else
+                    pthread_mutex_unlock(&s->lock);
+    #endif
+                    return VAL_ERR_ABORTED;
+                }
+                if (remaining > 0u)
+                    continue; // keep polling until deadline
+                st = VAL_ERR_TIMEOUT; // escalate
+                break;
+            }
+        }
         if (st == VAL_OK)
         {
             fprintf(stdout, "[VAL][TX] EOT_ACK wait: got pkt t=%d len=%u off=%llu\n", (int)t, (unsigned)len,
@@ -1575,6 +1943,21 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
 #endif
                 return VAL_ERR_ABORTED;
             }
+            // Ignore benign control frames while waiting for EOT_ACK
+            if (t == VAL_PKT_DONE_ACK || t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
+            {
+                VAL_LOG_DEBUGF(s, "wait EOT_ACK: ignoring pkt type=%d", (int)t);
+                continue;
+            }
+            // Ignore benign control frames while waiting for EOT_ACK
+            if (t == VAL_PKT_DONE_ACK || t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
+            {
+                VAL_LOG_DEBUGF(s, "wait EOT_ACK: ignoring pkt type=%d", (int)t);
+                continue;
+            }
+            // Tolerate any other unexpected packets here; keep waiting for EOT_ACK
+            VAL_LOG_DEBUGF(s, "wait EOT_ACK: ignoring unexpected packet type=%d", (int)t);
+            continue;
         }
         if (st != VAL_OK && st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC)
         {

@@ -40,6 +40,10 @@ set_property(TEST ut_adaptive_transmission PROPERTY LABELS "heavy")
 add_ctest_exe(ut_adaptive_demo core/test_adaptive_demo.c)
 set_property(TEST ut_adaptive_demo PROPERTY LABELS "quick")
 
+# Initial mode negotiation behavior
+add_ctest_exe(ut_initial_mode_negotiation core/test_initial_mode_negotiation.c)
+set_property(TEST ut_initial_mode_negotiation PROPERTY LABELS "quick")
+
 # Streaming negotiation/veto behavior
 add_ctest_exe(ut_streaming_veto core/test_streaming_veto.c)
 set_property(TEST ut_streaming_veto PROPERTY LABELS "quick")

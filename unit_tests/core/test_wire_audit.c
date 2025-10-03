@@ -64,14 +64,12 @@ static int run_mode_and_check(val_tx_mode_t mode, unsigned expected_cap)
     // Adaptive caps: force fixed mode for this test to keep invariants deterministic
     tx_cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     tx_cfg.adaptive_tx.preferred_initial_mode = mode;
-    tx_cfg.adaptive_tx.streaming_enabled = 1;
-    tx_cfg.adaptive_tx.accept_incoming_streaming = 1;
+    tx_cfg.adaptive_tx.allow_streaming = 1;
     tx_cfg.adaptive_tx.degrade_error_threshold = 1000; // avoid automatic changes
     tx_cfg.adaptive_tx.recovery_success_threshold = 1000;
     rx_cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     rx_cfg.adaptive_tx.preferred_initial_mode = mode;
-    rx_cfg.adaptive_tx.streaming_enabled = 1;
-    rx_cfg.adaptive_tx.accept_incoming_streaming = 1;
+    rx_cfg.adaptive_tx.allow_streaming = 1;
 
     val_session_t *tx = NULL, *rx = NULL;
     if (val_session_create(&tx_cfg, &tx, NULL) != VAL_OK || val_session_create(&rx_cfg, &rx, NULL) != VAL_OK)

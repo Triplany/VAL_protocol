@@ -75,25 +75,7 @@ void val_internal_logf(val_session_t *s, int level, const char *file, int line, 
 // Numeric-only error log helper (no strings)
 #define VAL_LOG_ERROR_CODE(s, code, detail) VAL_LOG_CRITF((s), "ERR:%d DET:0x%08X", (int)(code), (unsigned)(detail))
 
-// Packet Types
-typedef enum
-{
-    VAL_PKT_HELLO = 1,       // session/version negotiation
-    VAL_PKT_SEND_META = 2,   // filename, size, path
-    VAL_PKT_RESUME_REQ = 3,  // sender asks resume options
-    VAL_PKT_RESUME_RESP = 4, // receiver responds with action
-    VAL_PKT_DATA = 5,        // file data chunk
-    VAL_PKT_DATA_ACK = 6,    // ack for data chunk
-    VAL_PKT_VERIFY = 7,      // crc verify request/response
-    VAL_PKT_DONE = 8,        // file complete
-    VAL_PKT_ERROR = 9,
-    VAL_PKT_EOT = 10,      // end of transmission
-    VAL_PKT_EOT_ACK = 11,  // ack for end of transmission
-    VAL_PKT_DONE_ACK = 12, // ack for end of file
-    // Adaptive mode sync (Phase 3; reserved in Phase 1)
-    VAL_PKT_MODE_SYNC = 13,
-    VAL_PKT_MODE_SYNC_ACK = 14,
-} val_packet_type_t;
+// Packet Types are declared in public header (val_packet_type_t)
 
 typedef enum
 {
@@ -169,6 +151,10 @@ struct val_session_s
     // Streaming negotiation (directional)
     uint8_t send_streaming_allowed; // we may stream when we are sender to peer
     uint8_t recv_streaming_allowed; // we accept peer streaming to us
+    // Streaming runtime state: engaged when at fastest rung and sustained successes
+    uint8_t streaming_engaged;
+    // Peer runtime streaming state (best-effort, from MODE_SYNC)
+    uint8_t peer_streaming_engaged;
     // Performance counters
     uint32_t consecutive_errors;
     uint32_t consecutive_successes;
@@ -188,6 +174,9 @@ struct val_session_s
     // Mode sync state
     uint32_t mode_sync_sequence;
     uint32_t last_mode_sync_time;
+    // Streaming keepalive timestamps (ms since ticks)
+    uint32_t last_keepalive_send_time; // last time we sent a keepalive (receiver side)
+    uint32_t last_keepalive_recv_time; // last time we observed a keepalive from peer (sender side)
 #if VAL_ENABLE_METRICS
     // Metrics counters (zeroed at session create)
     val_metrics_t metrics;
@@ -230,6 +219,7 @@ typedef struct
     uint32_t sequence;            // sync sequence
     uint32_t consecutive_errors;  // recent error count
     uint32_t consecutive_success; // recent success count
+    uint32_t flags;               // bit0: streaming_engaged (sender side)
 } val_mode_sync_t;
 
 typedef struct
@@ -385,20 +375,22 @@ static inline void val_metrics_inc_files_recv(val_session_t *s)
     if (s)
         s->metrics.files_recv++;
 }
-static inline void val_metrics_add_sent(val_session_t *s, size_t bytes)
+static inline void val_metrics_add_sent(val_session_t *s, size_t bytes, uint8_t type)
 {
     if (s)
     {
         s->metrics.packets_sent++;
         s->metrics.bytes_sent += (uint64_t)bytes;
+        s->metrics.send_by_type[(unsigned)(type & 31u)]++;
     }
 }
-static inline void val_metrics_add_recv(val_session_t *s, size_t bytes)
+static inline void val_metrics_add_recv(val_session_t *s, size_t bytes, uint8_t type)
 {
     if (s)
     {
         s->metrics.packets_recv++;
         s->metrics.bytes_recv += (uint64_t)bytes;
+        s->metrics.recv_by_type[(unsigned)(type & 31u)]++;
     }
 }
 #else
@@ -430,15 +422,17 @@ static inline void val_metrics_inc_files_recv(val_session_t *s)
 {
     (void)s;
 }
-static inline void val_metrics_add_sent(val_session_t *s, size_t bytes)
+static inline void val_metrics_add_sent(val_session_t *s, size_t bytes, uint8_t type)
 {
     (void)s;
     (void)bytes;
+    (void)type;
 }
-static inline void val_metrics_add_recv(val_session_t *s, size_t bytes)
+static inline void val_metrics_add_recv(val_session_t *s, size_t bytes, uint8_t type)
 {
     (void)s;
     (void)bytes;
+    (void)type;
 }
 #endif
 

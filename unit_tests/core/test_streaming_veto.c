@@ -51,13 +51,11 @@ static int run_veto_case(void)
     // Configure adaptive TX/window and streaming flags.
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;
-    cfg_tx.adaptive_tx.streaming_enabled = 1;         // sender would like to stream
-    cfg_tx.adaptive_tx.accept_incoming_streaming = 1; // accept peer streaming (unrelated to this direction)
+    cfg_tx.adaptive_tx.allow_streaming = 1;         // sender would like to stream and accept peer
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;
-    cfg_rx.adaptive_tx.streaming_enabled = 1;         // receiver advertising capability is fine
-    cfg_rx.adaptive_tx.accept_incoming_streaming = 0; // VETO: do not allow peer to stream to me
+    cfg_rx.adaptive_tx.allow_streaming = 0;         // VETO: do not allow peer to stream to me
 
     // Optional: keep logs lower noise in CI
     // ts_set_console_logger_with_level(&cfg_tx, VAL_LOG_WARNING);

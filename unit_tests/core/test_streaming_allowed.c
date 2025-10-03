@@ -37,13 +37,11 @@ static int run_allowed_case(void)
     // Enable streaming on both sides and allow incoming
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;
-    cfg_tx.adaptive_tx.streaming_enabled = 1;
-    cfg_tx.adaptive_tx.accept_incoming_streaming = 1;
+    cfg_tx.adaptive_tx.allow_streaming = 1;
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;
-    cfg_rx.adaptive_tx.streaming_enabled = 1;
-    cfg_rx.adaptive_tx.accept_incoming_streaming = 1;
+    cfg_rx.adaptive_tx.allow_streaming = 1;
 
     val_session_t *tx = NULL, *rx = NULL;
     if (val_session_create(&cfg_tx, &tx, NULL) != VAL_OK || val_session_create(&cfg_rx, &rx, NULL) != VAL_OK)

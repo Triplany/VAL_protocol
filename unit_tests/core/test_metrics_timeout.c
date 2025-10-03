@@ -86,12 +86,10 @@ int main(void)
     // Use stop-and-wait to make a single ACK drop cause a retransmission deterministically
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
-    cfg_tx.adaptive_tx.streaming_enabled = 0;
-    cfg_tx.adaptive_tx.accept_incoming_streaming = 0;
+    cfg_tx.adaptive_tx.allow_streaming = 0;
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
-    cfg_rx.adaptive_tx.streaming_enabled = 0;
-    cfg_rx.adaptive_tx.accept_incoming_streaming = 0;
+    cfg_rx.adaptive_tx.allow_streaming = 0;
     // Timeouts short to keep test fast
     cfg_tx.timeouts.min_timeout_ms = 50;
     cfg_tx.timeouts.max_timeout_ms = 200;

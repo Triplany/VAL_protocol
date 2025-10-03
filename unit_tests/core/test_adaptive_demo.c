@@ -213,8 +213,7 @@ static void test_adaptive_negotiation(void)
     // Set up adaptive transmission - local supports streaming
     config.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     config.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_16;
-    config.adaptive_tx.streaming_enabled = 1;
-    config.adaptive_tx.accept_incoming_streaming = 1;
+    config.adaptive_tx.allow_streaming = 1;
     config.adaptive_tx.degrade_error_threshold = 2;
     config.adaptive_tx.recovery_success_threshold = 5;
     config.adaptive_tx.mode_sync_interval = 50;

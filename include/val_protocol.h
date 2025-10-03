@@ -20,6 +20,36 @@ extern "C"
 #define VAL_MAX_PATH 127u
 // Emergency cancel (ASCII CAN)
 #define VAL_PKT_CANCEL 0x18u
+
+    // Public packet type identifiers (on-wire type field). Values must match core.
+    typedef enum
+    {
+        VAL_PKT_HELLO = 1,       // session/version negotiation
+        VAL_PKT_SEND_META = 2,   // filename, size, path
+        VAL_PKT_RESUME_REQ = 3,  // sender asks resume options
+        VAL_PKT_RESUME_RESP = 4, // receiver responds with action
+        VAL_PKT_DATA = 5,        // file data chunk
+        VAL_PKT_DATA_ACK = 6,    // ack for data chunk (cumulative)
+        VAL_PKT_VERIFY = 7,      // crc verify request/response
+        VAL_PKT_DONE = 8,        // file complete
+        VAL_PKT_ERROR = 9,       // error report
+        VAL_PKT_EOT = 10,        // end of transmission (batch)
+        VAL_PKT_EOT_ACK = 11,    // ack for end of transmission
+        VAL_PKT_DONE_ACK = 12,   // ack for end of file
+        // Adaptive mode sync heartbeat/control
+        VAL_PKT_MODE_SYNC = 13,
+        VAL_PKT_MODE_SYNC_ACK = 14,
+        VAL_PKT_DATA_NAK = 15,   // negative ack with next_expected_offset and reason bits
+    } val_packet_type_t;
+
+    // Optional flags for DATA_ACK payload semantics (when payload is present)
+    // For now, most ACKs remain header-only with offset used as rx_highwater.
+    // These flags are reserved for future use to distinguish heartbeat vs EOF.
+    typedef enum
+    {
+        VAL_ACK_FLAG_HEARTBEAT = 1u << 0,
+        VAL_ACK_FLAG_EOF       = 1u << 1,
+    } val_ack_flags_t;
     // Metadata payload shared with application callbacks (public)
     typedef struct
     {
@@ -149,11 +179,10 @@ extern "C"
         // Window rungs (discrete). These replace any prior mixed "streaming" enum.
         val_tx_mode_t max_performance_mode;   // Max window rung supported by this endpoint (cap)
         val_tx_mode_t preferred_initial_mode; // Initial rung (clamped to cap). If out of range, defaults to cap
-        // Streaming pacing preference (sender side). The receiver may veto via handshake negotiation.
-        // When enabled and allowed by peer, the sender interleaves short ACK polls derived from RTT to keep the pipe full.
-        uint8_t streaming_enabled; // 0 = off, 1 = on (default recommended: 1 on desktop, 0/1 on MCU)
-        // Receiver policy: whether this endpoint accepts an incoming sender streaming to it.
-        uint8_t accept_incoming_streaming; // 0 = peer must not stream to me; 1 = allowed (default: 1)
+        // Streaming policy: single switch governs both sending and accepting streaming.
+        // If 1, we will stream when sending and we allow the peer to stream to us.
+        // If 0, we will not stream when sending and we require the peer not to stream to us.
+        uint8_t allow_streaming; // 0 = disallow streaming in either direction for this session; 1 = allow
         // Optional +1 MTU retransmit cache for faster Go-Back-N recovery (MCU default: 0)
         uint8_t retransmit_cache_enabled; // 0/1
         uint8_t reserved0;
@@ -311,6 +340,20 @@ extern "C"
     // Returns VAL_OK and writes to out_mode on success; VAL_ERR_INVALID_ARG on bad inputs.
     val_status_t val_get_current_tx_mode(val_session_t *session, val_tx_mode_t *out_mode);
 
+    // Query whether streaming pacing is currently engaged for this session when we are the sender.
+    // Returns VAL_OK and writes 0/1 to out_streaming_engaged on success; VAL_ERR_INVALID_ARG on bad inputs.
+    // Note: Streaming is an overlay on top of the fastest window rung and may toggle based on runtime conditions
+    // (e.g., sustained successes at max rung engage streaming; any error disengages it).
+    val_status_t val_is_streaming_engaged(val_session_t *session, int *out_streaming_engaged);
+
+    // Best-effort: Query whether the peer has engaged streaming pacing (observed via MODE_SYNC flags).
+    // Returns VAL_OK and writes 0/1 to out_peer_streaming_engaged on success; VAL_ERR_INVALID_ARG on bad inputs.
+    val_status_t val_is_peer_streaming_engaged(val_session_t *session, int *out_peer_streaming_engaged);
+
+    // Get the peer's last-known adaptive transmission mode (as reported via handshake or mode sync).
+    // This reflects the other side's TX window rung. Returns VAL_OK and writes to out_mode on success.
+    val_status_t val_get_peer_tx_mode(val_session_t *session, val_tx_mode_t *out_mode);
+
     // Query negotiated streaming permissions for this session.
     // On success, writes 0/1 to out_send_allowed (we may stream when sending) and out_recv_allowed (we accept peer streaming).
     // Returns VAL_ERR_INVALID_ARG on bad inputs.
@@ -390,6 +433,10 @@ extern "C"
         uint64_t packets_recv;
         uint64_t bytes_sent;
         uint64_t bytes_recv;
+        // Per-packet-type counters (index by on-wire type byte; sized for safety)
+        // Includes core packet types (HELLO..MODE_SYNC_ACK) and CANCEL (0x18)
+        uint64_t send_by_type[32];
+        uint64_t recv_by_type[32];
         // Reliability/timing
         uint32_t timeouts;
         uint32_t retransmits;

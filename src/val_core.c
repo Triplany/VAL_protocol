@@ -165,6 +165,62 @@ val_status_t val_get_current_tx_mode(val_session_t *session, val_tx_mode_t *out_
     return VAL_OK;
 }
 
+// Public: expose peer's last-known transmitter mode (thread-safe)
+val_status_t val_get_peer_tx_mode(val_session_t *session, val_tx_mode_t *out_mode)
+{
+    if (!session || !out_mode)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    *out_mode = session->peer_tx_mode;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
+// Public: expose whether streaming pacing is currently engaged (thread-safe)
+val_status_t val_is_streaming_engaged(val_session_t *session, int *out_streaming_engaged)
+{
+    if (!session || !out_streaming_engaged)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    *out_streaming_engaged = session->streaming_engaged ? 1 : 0;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
+val_status_t val_is_peer_streaming_engaged(val_session_t *session, int *out_peer_streaming_engaged)
+{
+    if (!session || !out_peer_streaming_engaged)
+        return VAL_ERR_INVALID_ARG;
+#if defined(_WIN32)
+    EnterCriticalSection(&session->lock);
+#else
+    pthread_mutex_lock(&session->lock);
+#endif
+    *out_peer_streaming_engaged = session->peer_streaming_engaged ? 1 : 0;
+#if defined(_WIN32)
+    LeaveCriticalSection(&session->lock);
+#else
+    pthread_mutex_unlock(&session->lock);
+#endif
+    return VAL_OK;
+}
+
 // Public: expose negotiated streaming permissions (thread-safe)
 val_status_t val_get_streaming_allowed(val_session_t *session, int *out_send_allowed, int *out_recv_allowed)
 {
@@ -502,6 +558,8 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     // Initialize adaptive TX scaffolding
     s->current_tx_mode = VAL_TX_STOP_AND_WAIT;
     s->peer_tx_mode = VAL_TX_STOP_AND_WAIT;
+    s->peer_streaming_engaged = 0;
+    s->streaming_engaged = 0;
     s->min_negotiated_mode = VAL_TX_WINDOW_2;      // placeholder until handshake
     s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT; // always supported
     s->send_streaming_allowed = 0;
@@ -520,6 +578,8 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     s->total_file_size = 0;
     s->mode_sync_sequence = 0;
     s->last_mode_sync_time = 0;
+    s->last_keepalive_send_time = 0;
+    s->last_keepalive_recv_time = 0;
 #if VAL_ENABLE_METRICS
     memset(&s->metrics, 0, sizeof(s->metrics));
 #endif
@@ -822,7 +882,7 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
         return VAL_ERR_IO;
     }
     // Metrics: count one packet and bytes on successful low-level send
-    val_metrics_add_sent(s, total_len);
+    val_metrics_add_sent(s, total_len, (uint8_t)type);
 #if VAL_ENABLE_WIRE_AUDIT
     if ((unsigned)type < 16u)
     {
@@ -831,7 +891,7 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
     }
 #endif
     // Best-effort flush after control packets where timely delivery matters
-    if (type == VAL_PKT_DONE || type == VAL_PKT_EOT || type == VAL_PKT_HELLO || type == VAL_PKT_ERROR)
+    if (type == VAL_PKT_DONE || type == VAL_PKT_EOT || type == VAL_PKT_HELLO || type == VAL_PKT_ERROR || type == VAL_PKT_CANCEL)
     {
         val_internal_transport_flush(s);
     }
@@ -865,7 +925,8 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     }
     if (got != sizeof(val_packet_header_t))
     {
-        VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
+        // Benign timeout while waiting for a header; record without emitting a CRITICAL numeric log
+        val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
         VAL_LOG_DEBUG(s, "recv_packet: header timeout");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -915,7 +976,8 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
             }
             if (gotb != 1)
             {
-                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
+                // Resync timeout — record without CRITICAL numeric log
+                val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
                 VAL_LOG_DEBUG(s, "recv_packet: timeout while resyncing after bad header");
 #if defined(_WIN32)
                 LeaveCriticalSection(&s->lock);
@@ -1002,7 +1064,8 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         }
         if (got2 != payload_len)
         {
-            VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
+            // Payload read timeout — record without CRITICAL numeric log
+            val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
             VAL_LOG_DEBUG(s, "recv_packet: payload timeout");
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
@@ -1030,7 +1093,8 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     }
     if (got3 != sizeof(trailer_crc))
     {
-        VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_DATA);
+        // Trailer read timeout — record without CRITICAL numeric log
+        val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
         VAL_LOG_DEBUG(s, "recv_packet: trailer timeout");
 #if defined(_WIN32)
         LeaveCriticalSection(&s->lock);
@@ -1056,8 +1120,10 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #endif
         return VAL_ERR_CRC;
     }
+    // Capture the raw type byte before releasing the lock to ensure stable accounting
+    uint8_t type_byte = hdr->type;
     if (type)
-        *type = (val_packet_type_t)hdr->type;
+        *type = (val_packet_type_t)type_byte;
     if (offset_out)
         *offset_out = val_letoh64(hdr->offset);
     if (payload_len_out)
@@ -1088,11 +1154,11 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     pthread_mutex_unlock(&s->lock);
 #endif
     // Metrics: count one packet and total bytes received for this packet (hdr+payload+trailer)
-    val_metrics_add_recv(s, (size_t)(sizeof(val_packet_header_t) + payload_len + sizeof(uint32_t)));
+    val_metrics_add_recv(s, (size_t)(sizeof(val_packet_header_t) + payload_len + sizeof(uint32_t)), type_byte);
 #if VAL_ENABLE_WIRE_AUDIT
-    if ((unsigned)hdr->type < 16u)
+    if ((unsigned)type_byte < 16u)
     {
-        s->audit.recv[(unsigned)hdr->type]++;
+        s->audit.recv[(unsigned)type_byte]++;
     }
 #endif
     return VAL_OK;
@@ -1260,9 +1326,8 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     hello.max_performance_mode = (uint8_t)s->cfg.adaptive_tx.max_performance_mode;
     hello.preferred_initial_mode = (uint8_t)s->cfg.adaptive_tx.preferred_initial_mode;
     hello.mode_sync_interval = s->cfg.adaptive_tx.mode_sync_interval;
-    uint8_t tx_cap = (s->cfg.adaptive_tx.streaming_enabled ? 1u : 0u);
-    uint8_t rx_acc = (s->cfg.adaptive_tx.accept_incoming_streaming ? 2u : 0u);
-    hello.streaming_flags = (uint8_t)(tx_cap | rx_acc);
+    // Single policy: if we allow streaming, advertise both TX-capable and RX-accept bits
+    hello.streaming_flags = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 0x3u : 0x0u);
     hello.reserved_streaming[0] = 0;
     hello.reserved_streaming[1] = 0;
     hello.reserved_streaming[2] = 0;
@@ -1373,17 +1438,24 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     val_tx_mode_t negotiated_cap = (local_max > peer_max) ? local_max : peer_max;
     s->min_negotiated_mode = negotiated_cap;       // best performance both support (largest window rung allowed)
     s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT; // smallest rung always supported
-    // Streaming allowed from us to peer if we can stream and peer accepts incoming streaming
+    // Streaming allowed from us to peer if we allow streaming and peer accepts incoming streaming
     uint8_t peer_rx_accept = (peer_h.streaming_flags & 2u) ? 1u : 0u;
-    uint8_t local_tx_cap = (s->cfg.adaptive_tx.streaming_enabled ? 1u : 0u);
-    s->send_streaming_allowed = (uint8_t)(local_tx_cap && peer_rx_accept);
-    // Streaming we accept when peer sends to us (we advertise our accept flag)
-    s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.accept_incoming_streaming ? 1u : 0u);
-    // Initial window rung selection
-    val_tx_mode_t pref = s->cfg.adaptive_tx.preferred_initial_mode;
-    if (pref < negotiated_cap || pref > VAL_TX_STOP_AND_WAIT)
-        pref = negotiated_cap;
-    s->current_tx_mode = pref;
+    uint8_t local_allow = (s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
+    s->send_streaming_allowed = (uint8_t)(local_allow && peer_rx_accept);
+    // Streaming we accept when peer sends to us (single policy governs acceptance)
+    s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
+    // Initial window rung selection (conservative): pick the slower (numerically larger) of our preferred
+    // and the peer's preferred, clamped to the negotiated cap. This avoids jumping to a rung faster than
+    // the peer would like immediately after handshake.
+    val_tx_mode_t local_pref = s->cfg.adaptive_tx.preferred_initial_mode;
+    val_tx_mode_t peer_pref = (val_tx_mode_t)peer_h.preferred_initial_mode;
+    // Clamp each preference to the negotiated cap and enum bounds
+    if (local_pref < negotiated_cap || local_pref > VAL_TX_STOP_AND_WAIT)
+        local_pref = negotiated_cap;
+    if (peer_pref < negotiated_cap || peer_pref > VAL_TX_STOP_AND_WAIT)
+        peer_pref = negotiated_cap;
+    val_tx_mode_t init_mode = (local_pref > peer_pref) ? local_pref : peer_pref; // slower of the two
+    s->current_tx_mode = init_mode;
     s->peer_tx_mode = s->current_tx_mode;
     // features compatibility: ensure required features supported. For now, just note the peer features; could gate behavior
     // later.
@@ -1482,9 +1554,8 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     hello.max_performance_mode = (uint8_t)s->cfg.adaptive_tx.max_performance_mode;
     hello.preferred_initial_mode = (uint8_t)s->cfg.adaptive_tx.preferred_initial_mode;
     hello.mode_sync_interval = s->cfg.adaptive_tx.mode_sync_interval;
-    uint8_t tx_cap = (s->cfg.adaptive_tx.streaming_enabled ? 1u : 0u);
-    uint8_t rx_acc = (s->cfg.adaptive_tx.accept_incoming_streaming ? 2u : 0u);
-    hello.streaming_flags = (uint8_t)(tx_cap | rx_acc);
+    // Single policy: if we allow streaming, advertise both TX-capable and RX-accept bits
+    hello.streaming_flags = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 0x3u : 0x0u);
     hello.reserved_streaming[0] = 0;
     hello.reserved_streaming[1] = 0;
     hello.reserved_streaming[2] = 0;
@@ -1527,16 +1598,22 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
         val_tx_mode_t negotiated_cap = (local_max > peer_max) ? local_max : peer_max;
         s->min_negotiated_mode = negotiated_cap;
         s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT;
-        // Streaming allowed from us to peer if we can stream and peer accepts
-        uint8_t peer_rx_accept = (peer_h.streaming_flags & 2u) ? 1u : 0u;
-        uint8_t local_tx_cap = (s->cfg.adaptive_tx.streaming_enabled ? 1u : 0u);
-        s->send_streaming_allowed = (uint8_t)(local_tx_cap && peer_rx_accept);
-        // What we accept for inbound is our advertised flag
-        s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.accept_incoming_streaming ? 1u : 0u);
-        val_tx_mode_t pref = s->cfg.adaptive_tx.preferred_initial_mode;
-        if (pref < negotiated_cap || pref > VAL_TX_STOP_AND_WAIT)
-            pref = negotiated_cap;
-        s->current_tx_mode = pref;
+    // Streaming allowed from us to peer if we allow streaming and peer accepts
+    uint8_t peer_rx_accept = (peer_h.streaming_flags & 2u) ? 1u : 0u;
+    uint8_t local_allow = (s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
+    s->send_streaming_allowed = (uint8_t)(local_allow && peer_rx_accept);
+    // What we accept for inbound is governed by our single policy
+    s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
+        // Initial window rung selection (conservative): pick the slower (numerically larger) of our preferred
+        // and the peer's preferred, clamped to the negotiated cap.
+        val_tx_mode_t local_pref = s->cfg.adaptive_tx.preferred_initial_mode;
+        val_tx_mode_t peer_pref = (val_tx_mode_t)peer_h.preferred_initial_mode;
+        if (local_pref < negotiated_cap || local_pref > VAL_TX_STOP_AND_WAIT)
+            local_pref = negotiated_cap;
+        if (peer_pref < negotiated_cap || peer_pref > VAL_TX_STOP_AND_WAIT)
+            peer_pref = negotiated_cap;
+        val_tx_mode_t init_mode = (local_pref > peer_pref) ? local_pref : peer_pref; // slower of the two
+        s->current_tx_mode = init_mode;
         s->peer_tx_mode = s->current_tx_mode;
     }
     return st;
@@ -1603,8 +1680,9 @@ static val_tx_mode_t upgrade_mode(val_tx_mode_t current, val_tx_mode_t max_allow
     default:
         return current; // already at max
     }
-    // Don't exceed negotiated capabilities
-    return (next <= max_allowed) ? next : current;
+    // Don't exceed negotiated capabilities. Lower enum = faster rung.
+    // Allow upgrades while 'next' is not faster than the fastest allowed (i.e., next >= max_allowed numerically).
+    return (next >= max_allowed) ? next : current;
 }
 
 void val_internal_record_transmission_error(val_session_t *s)
@@ -1614,6 +1692,7 @@ void val_internal_record_transmission_error(val_session_t *s)
 
     s->consecutive_errors++;
     s->consecutive_successes = 0; // reset success counter
+    s->streaming_engaged = 0; // drop back to non-streaming pacing on any error
 
     // Check if we should degrade mode
     uint16_t threshold = s->cfg.adaptive_tx.degrade_error_threshold;
@@ -1625,7 +1704,16 @@ void val_internal_record_transmission_error(val_session_t *s)
         val_tx_mode_t new_mode = degrade_mode(s->current_tx_mode);
         VAL_LOG_INFOF(s, "adaptive: degrading mode from %u to %u after %u errors", (unsigned)s->current_tx_mode,
                       (unsigned)new_mode, s->consecutive_errors);
-        s->current_tx_mode = new_mode;
+    s->current_tx_mode = new_mode;
+    s->peer_tx_mode = s->current_tx_mode; // local view: our peers may want to know our new mode
+    // Best-effort mode sync (Phase 1: fire-and-forget)
+    val_mode_sync_t ms = {0};
+    ms.current_mode = (uint32_t)new_mode;
+    ms.sequence = ++s->mode_sync_sequence;
+    ms.consecutive_errors = s->consecutive_errors;
+    ms.consecutive_success = s->consecutive_successes;
+    ms.flags = s->streaming_engaged ? 1u : 0u;
+    (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, &ms, sizeof(ms), 0);
         s->consecutive_errors = 0; // reset after mode change
         s->packets_since_mode_change = 0;
 
@@ -1661,6 +1749,15 @@ void val_internal_record_transmission_success(val_session_t *s)
             VAL_LOG_INFOF(s, "adaptive: upgrading mode from %u to %u after %u successes", (unsigned)s->current_tx_mode,
                           (unsigned)new_mode, s->consecutive_successes);
             s->current_tx_mode = new_mode;
+            s->peer_tx_mode = s->current_tx_mode; // local view: our peers may want to know our new mode
+            // Best-effort mode sync (Phase 1: fire-and-forget)
+            val_mode_sync_t ms = {0};
+            ms.current_mode = (uint32_t)new_mode;
+            ms.sequence = ++s->mode_sync_sequence;
+            ms.consecutive_errors = s->consecutive_errors;
+            ms.consecutive_success = s->consecutive_successes;
+            ms.flags = s->streaming_engaged ? 1u : 0u;
+            (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, &ms, sizeof(ms), 0);
             s->consecutive_successes = 0; // reset after mode change
             s->packets_since_mode_change = 0;
 
@@ -1671,6 +1768,29 @@ void val_internal_record_transmission_success(val_session_t *s)
                 // For simplicity, just reset tracking when changing modes
                 if (s->tracking_slots)
                     memset(s->tracking_slots, 0, sizeof(val_inflight_packet_t) * s->max_tracking_slots);
+            }
+        }
+    }
+    // Escalate to streaming pacing after reaching fastest rung and sustained successes
+    if (s->send_streaming_allowed && s->cfg.adaptive_tx.allow_streaming)
+    {
+        // Engage streaming only when at fastest negotiated rung and one more threshold worth of clean successes
+        if (!s->streaming_engaged && s->current_tx_mode == s->min_negotiated_mode)
+        {
+            uint16_t stream_threshold = s->cfg.adaptive_tx.recovery_success_threshold ? s->cfg.adaptive_tx.recovery_success_threshold : 10;
+            if (s->consecutive_successes >= stream_threshold)
+            {
+                s->streaming_engaged = 1;
+                // Notify peer via mode sync with streaming flag set
+                val_mode_sync_t ms2 = {0};
+                ms2.current_mode = (uint32_t)s->current_tx_mode;
+                ms2.sequence = ++s->mode_sync_sequence;
+                ms2.consecutive_errors = s->consecutive_errors;
+                ms2.consecutive_success = s->consecutive_successes;
+                ms2.flags = 1u; // streaming engaged
+                (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, &ms2, sizeof(ms2), 0);
+                VAL_LOG_INFO(s, "adaptive: engaging streaming pacing at max window rung");
+                s->consecutive_successes = 0; // reset after escalation
             }
         }
     }

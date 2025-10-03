@@ -144,8 +144,7 @@ static int test_mode_negotiation_receiver_limits(void)
 
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_tx.adaptive_tx.streaming_enabled = 1;
-    cfg_tx.adaptive_tx.accept_incoming_streaming = 1;
+    cfg_tx.adaptive_tx.allow_streaming = 1;
     cfg_tx.adaptive_tx.degrade_error_threshold = 3;
     cfg_tx.adaptive_tx.recovery_success_threshold = 5;
     cfg_tx.adaptive_tx.mode_sync_interval = 25;
@@ -155,8 +154,7 @@ static int test_mode_negotiation_receiver_limits(void)
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_4;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_4;
-    cfg_rx.adaptive_tx.streaming_enabled = 1;
-    cfg_rx.adaptive_tx.accept_incoming_streaming = 1;
+    cfg_rx.adaptive_tx.allow_streaming = 1;
     cfg_rx.adaptive_tx.mode_sync_interval = 25;
     cfg_rx.adaptive_tx.allocator.alloc = NULL;
     cfg_rx.adaptive_tx.allocator.free = NULL;
@@ -281,8 +279,8 @@ static int test_key_window_sizes(void)
         // Force specific mode
         cfg_tx.adaptive_tx.max_performance_mode = mode;
         cfg_tx.adaptive_tx.preferred_initial_mode = mode;
-        cfg_tx.adaptive_tx.streaming_enabled = 1;
-        cfg_tx.adaptive_tx.accept_incoming_streaming = 1;
+    cfg_tx.adaptive_tx.allow_streaming = 1;
+    cfg_tx.adaptive_tx.allow_streaming = 1;
         cfg_tx.adaptive_tx.degrade_error_threshold = 100;
         cfg_tx.adaptive_tx.recovery_success_threshold = 100;
         cfg_tx.adaptive_tx.mode_sync_interval = 25;
@@ -292,8 +290,8 @@ static int test_key_window_sizes(void)
 
         cfg_rx.adaptive_tx.max_performance_mode = mode;
         cfg_rx.adaptive_tx.preferred_initial_mode = mode;
-        cfg_rx.adaptive_tx.streaming_enabled = 1;
-        cfg_rx.adaptive_tx.accept_incoming_streaming = 1;
+    cfg_rx.adaptive_tx.allow_streaming = 1;
+    cfg_rx.adaptive_tx.allow_streaming = 1;
         cfg_rx.adaptive_tx.mode_sync_interval = 25;
         cfg_rx.adaptive_tx.allocator.alloc = NULL;
         cfg_rx.adaptive_tx.allocator.free = NULL;
@@ -413,16 +411,16 @@ static int test_adaptive_mode_transitions_small(void)
     // Make adaptation fast and visible; use WINDOW_64 as highest-performance rung
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_tx.adaptive_tx.streaming_enabled = 1;
-    cfg_tx.adaptive_tx.accept_incoming_streaming = 1;
+    cfg_tx.adaptive_tx.allow_streaming = 1;
+    cfg_tx.adaptive_tx.allow_streaming = 1;
     cfg_tx.adaptive_tx.degrade_error_threshold = 1;    // on first trouble
     cfg_tx.adaptive_tx.recovery_success_threshold = 2; // quick recovery
     cfg_tx.adaptive_tx.mode_sync_interval = 10;
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_rx.adaptive_tx.streaming_enabled = 1;
-    cfg_rx.adaptive_tx.accept_incoming_streaming = 1;
+    cfg_rx.adaptive_tx.allow_streaming = 1;
+    cfg_rx.adaptive_tx.allow_streaming = 1;
     cfg_rx.adaptive_tx.mode_sync_interval = 10;
 
     val_session_t *tx = NULL, *rx = NULL;
