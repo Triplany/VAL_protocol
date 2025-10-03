@@ -713,8 +713,10 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
         }
     // ACK coalescing state (per-file)
         uint32_t pkts_since_ack = 0;
-    // Streaming heartbeat state (per-file)
+    // Streaming heartbeat state (per-file): send sparse ACKs only when idle
     uint32_t hb_last_ms = 0;
+    uint32_t last_ack_ms = 0;   // timestamp of last DATA_ACK we sent
+    uint32_t last_data_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0; // last DATA receipt
         // Map peer's current TX mode (window rung) to a window size used as the ACK stride
         // We cannot ACK less frequently than once per window, otherwise sender will stall at in-flight cap.
         uint32_t ack_stride = 2;
@@ -746,20 +748,23 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
                 for (;;)
                 {
-                    // Streaming: send sparse heartbeat DATA_ACK (liveness/progress) instead of MODE_SYNC keepalive
+                    // Streaming: send sparse heartbeat DATA_ACK (liveness) only when idle
                     if (s->recv_streaming_allowed && s->peer_streaming_engaged)
                     {
-                        uint32_t base = (s->timing.samples_taken ? s->timing.srtt_ms
-                                                                  : (s->cfg.timeouts.min_timeout_ms ? s->cfg.timeouts.min_timeout_ms : 40));
-                        uint32_t interval = base * 2u;
-                        if (interval < 250u) interval = 250u;
-                        if (interval > 1000u) interval = 1000u;
+                        // Heartbeat only every few seconds regardless of RTT; defaults to 3s
+                        uint32_t interval = 3000u;
                         uint32_t nowhb = s->config->system.get_ticks_ms();
-                        if (hb_last_ms == 0 || (nowhb - hb_last_ms) >= interval)
+                        // Gate heartbeats to avoid extra ACKs during active flow:
+                        // - only if no DATA received recently
+                        // - and we haven't sent an ACK recently
+                        int idle_no_data = (last_data_ms == 0 || (nowhb - last_data_ms) >= interval);
+                        int no_recent_ack = (last_ack_ms == 0 || (nowhb - last_ack_ms) >= interval);
+                        if (idle_no_data && no_recent_ack && (hb_last_ms == 0 || (nowhb - hb_last_ms) >= interval))
                         {
                             VAL_LOG_DEBUGF(s, "data: heartbeat DATA_ACK off=%llu", (unsigned long long)written);
                             (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
                             hb_last_ms = nowhb;
+                            last_ack_ms = nowhb;
                         }
                     }
                     if (!val_internal_transport_is_connected(s))
@@ -812,6 +817,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             }
             if (t == VAL_PKT_DATA)
             {
+                if (s->config->system.get_ticks_ms)
+                    last_data_ms = s->config->system.get_ticks_ms();
                 // Determine ordering before mutating 'written'
                 int in_order = (off == written) ? 1 : 0;
                 int dup_or_overlap = (off < written) ? 1 : 0;
@@ -845,6 +852,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                                 s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                             return st2;
                         }
+                        if (s->config->system.get_ticks_ms)
+                            last_ack_ms = s->config->system.get_ticks_ms();
                         pkts_since_ack = 0;
                         // Continue to next iteration to process DONE
                         continue;
@@ -857,6 +866,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     VAL_LOG_DEBUGF(s, "data: duplicate/overlap -> reaffirm DATA_ACK off=%llu",
                                    (unsigned long long)written);
                     (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
+                    if (s->config->system.get_ticks_ms)
+                        last_ack_ms = s->config->system.get_ticks_ms();
                 }
                 else /* sender_ahead */
                 {
@@ -872,6 +883,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     (void)val_internal_send_packet(s, VAL_PKT_DATA_NAK, payload, sizeof(payload), 0);
                     // Also send an ACK at our current high-water to help the sender resync
                     (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
+                    if (s->config->system.get_ticks_ms)
+                        last_ack_ms = s->config->system.get_ticks_ms();
                 }
                 if (s->config->callbacks.on_progress)
                 {
@@ -921,8 +934,28 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 if (in_order && written >= total)
                     force_ack = 1;
                 int streaming = (s->recv_streaming_allowed && s->peer_streaming_engaged) ? 1 : 0;
-                // ACK cadence: always ACK at least once per window regardless of streaming to avoid sender stalling
-                if (force_ack || pkts_since_ack >= ack_stride)
+                // ACK policy when streaming:
+                // - Still ACK at least once per peer window (ack_stride) to keep sender's pipeline moving.
+                // - Also force an ACK at EOF.
+                if (streaming)
+                {
+                    // In streaming mode, do NOT ACK per window; only ACK on EOF (force_ack)
+                    if (force_ack)
+                    {
+                        VAL_LOG_DEBUGF(s, "data: streaming DATA_ACK off=%llu", (unsigned long long)written);
+                        val_status_t st2 = val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
+                        if (st2 != VAL_OK)
+                        {
+                            if (!skipping && f)
+                                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                            return st2;
+                        }
+                        if (s->config->system.get_ticks_ms)
+                            last_ack_ms = s->config->system.get_ticks_ms();
+                        pkts_since_ack = 0;
+                    }
+                }
+                else if (force_ack || pkts_since_ack >= ack_stride)
                 {
                     VAL_LOG_DEBUGF(s, "data: sending DATA_ACK off=%llu", (unsigned long long)written);
                     val_status_t st2 = val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
@@ -932,6 +965,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                             s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                         return st2;
                     }
+                    if (s->config->system.get_ticks_ms)
+                        last_ack_ms = s->config->system.get_ticks_ms();
                     pkts_since_ack = 0;
                 }
             }

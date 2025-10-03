@@ -265,7 +265,7 @@ static void test_adaptive_negotiation(void)
     val_internal_record_transmission_error(session);
     printf("After 2 errors - mode: %d, consecutive_errors: %d\n", session->current_tx_mode, session->consecutive_errors);
 
-    if (session->current_tx_mode > session->min_negotiated_mode)
+    if (val_tx_mode_window(session->current_tx_mode) < val_tx_mode_window(session->min_negotiated_mode))
         printf("PASS: Mode degraded after error threshold\n");
     else
         printf("NOTE: Mode at lowest negotiated level, cannot degrade further\n");
@@ -282,7 +282,7 @@ static void test_adaptive_negotiation(void)
                session->consecutive_successes);
     }
 
-    if (session->current_tx_mode < degraded_mode)
+    if (val_tx_mode_window(session->current_tx_mode) > val_tx_mode_window(degraded_mode))
         printf("PASS: Mode upgraded after success threshold\n");
     else
         printf("NOTE: Mode unchanged - may already be at optimal level\n");

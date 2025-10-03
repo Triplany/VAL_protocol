@@ -22,14 +22,18 @@ A small, robust, blocking-I/O file transfer protocol library in C. Frames are fi
   - Tail modes use a trailing verification window (`crc_verify_bytes`); FULL modes verify a full prefix (with internal caps for large files).
   - Sizes/offsets on wire are 64‑bit LE.
 - Adaptive transmitter
-  - Window-only rungs: `VAL_TX_WINDOW_64/32/16/8/4/2` and `VAL_TX_STOP_AND_WAIT` (fastest has the lowest enum value).
+  - Window-only rungs: `VAL_TX_WINDOW_64/32/16/8/4/2` and `VAL_TX_STOP_AND_WAIT` (larger enum = larger window; STOP_AND_WAIT (1) is the slowest).
   - Streaming is not a distinct mode; it’s sender pacing. If both sides agree, the sender uses RTT-derived micro-polling between ACK waits to keep the pipe full.
   - Streaming negotiation happens in HELLO via compact `streaming_flags`:
     - bit0: this endpoint can stream when sending
     - bit1: this endpoint accepts an incoming peer that streams to it
     - Effective permissions are directional and can be queried with `val_get_streaming_allowed()`.
   - RTT-derived pacing: poll interval ≈ SRTT/4 clamped to 2–20 ms; falls back to a conservative value when no samples exist.
-  - `val_get_current_tx_mode(session, &out_mode)` exposes the current window rung for tests/telemetry; `val_get_streaming_allowed(session, &send_ok, &recv_ok)` exposes negotiated streaming permissions.
+  - Accessors:
+    - `val_get_current_tx_mode(session, &out_mode)` — current window rung
+    - `val_get_streaming_allowed(session, &send_ok, &recv_ok)` — negotiated permissions
+    - `val_is_streaming_engaged(session, &engaged)` — whether pacing is currently engaged on this side
+    - `val_get_peer_tx_mode(session, &out_mode)`, `val_is_peer_streaming_engaged(session, &engaged)` — best-effort peer state
 - Diagnostics (optional, compile‑time)
   - Metrics: `VAL_ENABLE_METRICS` — packet/byte counters, timeouts, retransmits, crc errors, etc.
   - Wire audit: `VAL_ENABLE_WIRE_AUDIT` — per‑packet send/recv counters and inflight window snapshot.

@@ -503,24 +503,8 @@ static uint32_t validate_config_details(const val_config_t *cfg)
 
 static uint32_t calculate_tracking_slots(val_tx_mode_t mode)
 {
-    switch (mode)
-    {
-    case VAL_TX_WINDOW_64:
-        return 64;
-    case VAL_TX_WINDOW_32:
-        return 32;
-    case VAL_TX_WINDOW_16:
-        return 16;
-    case VAL_TX_WINDOW_8:
-        return 8;
-    case VAL_TX_WINDOW_4:
-        return 4;
-    case VAL_TX_WINDOW_2:
-        return 2;
-    case VAL_TX_STOP_AND_WAIT:
-    default:
-        return 0;
-    }
+    uint32_t window = val_tx_mode_window(val_tx_mode_sanitize(mode));
+    return (window > 1u) ? window : 0u;
 }
 
 val_status_t val_session_create(const val_config_t *config, val_session_t **out_session, uint32_t *out_detail)
@@ -1428,14 +1412,12 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     s->metrics.handshakes++;
 #endif
     // Adaptive TX negotiation (window rung + streaming flags)
-    val_tx_mode_t local_max = s->cfg.adaptive_tx.max_performance_mode;
-    if (local_max < VAL_TX_WINDOW_64 || local_max > VAL_TX_STOP_AND_WAIT)
-        local_max = VAL_TX_STOP_AND_WAIT;
-    val_tx_mode_t peer_max = (val_tx_mode_t)peer_h.max_performance_mode;
-    if (peer_max < VAL_TX_WINDOW_64 || peer_max > VAL_TX_STOP_AND_WAIT)
-        peer_max = VAL_TX_STOP_AND_WAIT;
-    // Choose the conservative window rung cap shared by both: numerically max() because lower enum is faster
-    val_tx_mode_t negotiated_cap = (local_max > peer_max) ? local_max : peer_max;
+    val_tx_mode_t local_max = val_tx_mode_sanitize(s->cfg.adaptive_tx.max_performance_mode);
+    val_tx_mode_t peer_max = val_tx_mode_sanitize((val_tx_mode_t)peer_h.max_performance_mode);
+    uint32_t local_max_window = val_tx_mode_window(local_max);
+    uint32_t peer_max_window = val_tx_mode_window(peer_max);
+    uint32_t shared_window = (local_max_window < peer_max_window) ? local_max_window : peer_max_window;
+    val_tx_mode_t negotiated_cap = val_tx_mode_from_window(shared_window);
     s->min_negotiated_mode = negotiated_cap;       // best performance both support (largest window rung allowed)
     s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT; // smallest rung always supported
     // Streaming allowed from us to peer if we allow streaming and peer accepts incoming streaming
@@ -1447,14 +1429,16 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     // Initial window rung selection (conservative): pick the slower (numerically larger) of our preferred
     // and the peer's preferred, clamped to the negotiated cap. This avoids jumping to a rung faster than
     // the peer would like immediately after handshake.
-    val_tx_mode_t local_pref = s->cfg.adaptive_tx.preferred_initial_mode;
-    val_tx_mode_t peer_pref = (val_tx_mode_t)peer_h.preferred_initial_mode;
-    // Clamp each preference to the negotiated cap and enum bounds
-    if (local_pref < negotiated_cap || local_pref > VAL_TX_STOP_AND_WAIT)
+    val_tx_mode_t local_pref = val_tx_mode_sanitize(s->cfg.adaptive_tx.preferred_initial_mode);
+    val_tx_mode_t peer_pref = val_tx_mode_sanitize((val_tx_mode_t)peer_h.preferred_initial_mode);
+    if (val_tx_mode_window(local_pref) > shared_window)
         local_pref = negotiated_cap;
-    if (peer_pref < negotiated_cap || peer_pref > VAL_TX_STOP_AND_WAIT)
+    if (val_tx_mode_window(peer_pref) > shared_window)
         peer_pref = negotiated_cap;
-    val_tx_mode_t init_mode = (local_pref > peer_pref) ? local_pref : peer_pref; // slower of the two
+    uint32_t init_window = (val_tx_mode_window(local_pref) < val_tx_mode_window(peer_pref))
+                               ? val_tx_mode_window(local_pref)
+                               : val_tx_mode_window(peer_pref);
+    val_tx_mode_t init_mode = val_tx_mode_from_window(init_window);
     s->current_tx_mode = init_mode;
     s->peer_tx_mode = s->current_tx_mode;
     // features compatibility: ensure required features supported. For now, just note the peer features; could gate behavior
@@ -1589,13 +1573,12 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
         s->metrics.handshakes++;
 #endif
         // Adaptive TX negotiation (window rung + streaming flags)
-        val_tx_mode_t local_max = s->cfg.adaptive_tx.max_performance_mode;
-        if (local_max < VAL_TX_WINDOW_64 || local_max > VAL_TX_STOP_AND_WAIT)
-            local_max = VAL_TX_STOP_AND_WAIT;
-        val_tx_mode_t peer_max = (val_tx_mode_t)peer_h.max_performance_mode;
-        if (peer_max < VAL_TX_WINDOW_64 || peer_max > VAL_TX_STOP_AND_WAIT)
-            peer_max = VAL_TX_STOP_AND_WAIT;
-        val_tx_mode_t negotiated_cap = (local_max > peer_max) ? local_max : peer_max;
+        val_tx_mode_t local_max = val_tx_mode_sanitize(s->cfg.adaptive_tx.max_performance_mode);
+        val_tx_mode_t peer_max = val_tx_mode_sanitize((val_tx_mode_t)peer_h.max_performance_mode);
+        uint32_t local_max_window = val_tx_mode_window(local_max);
+        uint32_t peer_max_window = val_tx_mode_window(peer_max);
+        uint32_t shared_window = (local_max_window < peer_max_window) ? local_max_window : peer_max_window;
+        val_tx_mode_t negotiated_cap = val_tx_mode_from_window(shared_window);
         s->min_negotiated_mode = negotiated_cap;
         s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT;
     // Streaming allowed from us to peer if we allow streaming and peer accepts
@@ -1606,13 +1589,16 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
         // Initial window rung selection (conservative): pick the slower (numerically larger) of our preferred
         // and the peer's preferred, clamped to the negotiated cap.
-        val_tx_mode_t local_pref = s->cfg.adaptive_tx.preferred_initial_mode;
-        val_tx_mode_t peer_pref = (val_tx_mode_t)peer_h.preferred_initial_mode;
-        if (local_pref < negotiated_cap || local_pref > VAL_TX_STOP_AND_WAIT)
+        val_tx_mode_t local_pref = val_tx_mode_sanitize(s->cfg.adaptive_tx.preferred_initial_mode);
+        val_tx_mode_t peer_pref = val_tx_mode_sanitize((val_tx_mode_t)peer_h.preferred_initial_mode);
+        if (val_tx_mode_window(local_pref) > shared_window)
             local_pref = negotiated_cap;
-        if (peer_pref < negotiated_cap || peer_pref > VAL_TX_STOP_AND_WAIT)
+        if (val_tx_mode_window(peer_pref) > shared_window)
             peer_pref = negotiated_cap;
-        val_tx_mode_t init_mode = (local_pref > peer_pref) ? local_pref : peer_pref; // slower of the two
+        uint32_t init_window = (val_tx_mode_window(local_pref) < val_tx_mode_window(peer_pref))
+                                   ? val_tx_mode_window(local_pref)
+                                   : val_tx_mode_window(peer_pref);
+        val_tx_mode_t init_mode = val_tx_mode_from_window(init_window);
         s->current_tx_mode = init_mode;
         s->peer_tx_mode = s->current_tx_mode;
     }
@@ -1633,56 +1619,29 @@ val_status_t val_internal_send_error(val_session_t *s, val_status_t code, uint32
 // Adaptive transmission mode management
 static val_tx_mode_t degrade_mode(val_tx_mode_t current)
 {
-    switch (current)
-    {
-    case VAL_TX_WINDOW_64:
-        return VAL_TX_WINDOW_32;
-    case VAL_TX_WINDOW_32:
-        return VAL_TX_WINDOW_16;
-    case VAL_TX_WINDOW_16:
-        return VAL_TX_WINDOW_8;
-    case VAL_TX_WINDOW_8:
-        return VAL_TX_WINDOW_4;
-    case VAL_TX_WINDOW_4:
-        return VAL_TX_WINDOW_2;
-    case VAL_TX_WINDOW_2:
+    uint32_t window = val_tx_mode_window(current);
+    if (window <= 1u)
         return VAL_TX_STOP_AND_WAIT;
-    case VAL_TX_STOP_AND_WAIT:
-    default:
-        return VAL_TX_STOP_AND_WAIT; // can't degrade further
-    }
+    if (window <= 2u)
+        return VAL_TX_STOP_AND_WAIT;
+    window /= 2u;
+    if (window < 2u)
+        window = 2u;
+    return val_tx_mode_from_window(window);
 }
 
 static val_tx_mode_t upgrade_mode(val_tx_mode_t current, val_tx_mode_t max_allowed)
 {
-    val_tx_mode_t next;
-    switch (current)
-    {
-    case VAL_TX_STOP_AND_WAIT:
-        next = VAL_TX_WINDOW_2;
-        break;
-    case VAL_TX_WINDOW_2:
-        next = VAL_TX_WINDOW_4;
-        break;
-    case VAL_TX_WINDOW_4:
-        next = VAL_TX_WINDOW_8;
-        break;
-    case VAL_TX_WINDOW_8:
-        next = VAL_TX_WINDOW_16;
-        break;
-    case VAL_TX_WINDOW_16:
-        next = VAL_TX_WINDOW_32;
-        break;
-    case VAL_TX_WINDOW_32:
-        next = VAL_TX_WINDOW_64;
-        break;
-    case VAL_TX_WINDOW_64:
-    default:
-        return current; // already at max
-    }
-    // Don't exceed negotiated capabilities. Lower enum = faster rung.
-    // Allow upgrades while 'next' is not faster than the fastest allowed (i.e., next >= max_allowed numerically).
-    return (next >= max_allowed) ? next : current;
+    uint32_t current_window = val_tx_mode_window(current);
+    uint32_t max_window = val_tx_mode_window(max_allowed);
+    if (current_window >= max_window)
+        return val_tx_mode_from_window(max_window);
+    if (current_window == 0u)
+        current_window = 1u;
+    uint32_t next_window = current_window * 2u;
+    if (next_window > max_window)
+        next_window = max_window;
+    return val_tx_mode_from_window(next_window);
 }
 
 void val_internal_record_transmission_error(val_session_t *s)

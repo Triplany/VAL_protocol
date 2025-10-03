@@ -106,7 +106,7 @@ Resume configuration (public `val_resume_mode_t`):
 
 - Endianness: all on‑wire multi‑byte integers are little‑endian.
 - Framing: fixed header (with header CRC) + variable payload (0..N) + trailer CRC32 over header+payload (no padding).
-  - Header layout (base/core): `type`, `wire_version` (=0), `payload_len`, `seq`, `offset`, `header_crc`.
+  - Header layout (base/core): `type`, `wire_version` (=0, validated by receivers), `payload_len`, `seq`, `offset`, `header_crc`.
 - DATA_ACK semantics: cumulative; ACK.offset is the next expected offset (total bytes durably written).
 
 ### Packet types (high‑level)
@@ -226,6 +226,7 @@ cmake --build --preset linux-release
   - Streaming is pacing, not a distinct mode. When negotiated, the sender uses RTT-derived micro-polling between ACK waits (≈SRTT/4 clamped 2–20 ms) up to a fixed per-wait deadline; on deadline expiry it escalates to a full timeout and retries with exponential backoff.
   - Negotiation occurs via HELLO `streaming_flags` (bit0: can stream when sending; bit1: accepts incoming streaming). Effective permissions are directional and can be queried with `val_get_streaming_allowed()`.
   - `val_get_current_tx_mode(session, &out_mode)` exposes the current window rung to tests/telemetry.
+  - Additional accessors: `val_is_streaming_engaged(session, &engaged)`, `val_is_peer_streaming_engaged(session, &engaged)`, and `val_get_peer_tx_mode(session, &mode)`.
 - Compile‑time diagnostics:
   - Metrics (`VAL_ENABLE_METRICS`): wire counters (packets/bytes), timeouts, retransmits, CRC errors, file counts, RTT samples.
   - Wire audit (`VAL_ENABLE_WIRE_AUDIT`): per‑packet send/recv counters and inflight window auditing.

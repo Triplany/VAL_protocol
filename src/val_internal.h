@@ -212,6 +212,72 @@ typedef struct val_inflight_packet_s
     uint8_t state; // 0=SENT,1=ACKED,2=TIMEOUT
 } val_inflight_packet_t;
 
+// Transmission mode helpers
+static inline int val_tx_mode_is_valid(val_tx_mode_t mode)
+{
+    switch (mode)
+    {
+    case VAL_TX_WINDOW_64:
+    case VAL_TX_WINDOW_32:
+    case VAL_TX_WINDOW_16:
+    case VAL_TX_WINDOW_8:
+    case VAL_TX_WINDOW_4:
+    case VAL_TX_WINDOW_2:
+    case VAL_TX_STOP_AND_WAIT:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static inline val_tx_mode_t val_tx_mode_sanitize(val_tx_mode_t mode)
+{
+    return val_tx_mode_is_valid(mode) ? mode : VAL_TX_STOP_AND_WAIT;
+}
+
+static inline uint32_t val_tx_mode_window(val_tx_mode_t mode)
+{
+    switch (mode)
+    {
+    case VAL_TX_WINDOW_64:     return 64u;
+    case VAL_TX_WINDOW_32:     return 32u;
+    case VAL_TX_WINDOW_16:     return 16u;
+    case VAL_TX_WINDOW_8:      return 8u;
+    case VAL_TX_WINDOW_4:      return 4u;
+    case VAL_TX_WINDOW_2:      return 2u;
+    case VAL_TX_STOP_AND_WAIT: return 1u;
+    default:                   return 1u;
+    }
+}
+
+static inline val_tx_mode_t val_tx_mode_from_window(uint32_t window)
+{
+    switch (window)
+    {
+    case 64u: return VAL_TX_WINDOW_64;
+    case 32u: return VAL_TX_WINDOW_32;
+    case 16u: return VAL_TX_WINDOW_16;
+    case 8u:  return VAL_TX_WINDOW_8;
+    case 4u:  return VAL_TX_WINDOW_4;
+    case 2u:  return VAL_TX_WINDOW_2;
+    case 1u:  return VAL_TX_STOP_AND_WAIT;
+    default:
+        if (window >= 64u)
+            return VAL_TX_WINDOW_64;
+        if (window >= 32u)
+            return VAL_TX_WINDOW_32;
+        if (window >= 16u)
+            return VAL_TX_WINDOW_16;
+        if (window >= 8u)
+            return VAL_TX_WINDOW_8;
+        if (window >= 4u)
+            return VAL_TX_WINDOW_4;
+        if (window >= 2u)
+            return VAL_TX_WINDOW_2;
+        return VAL_TX_STOP_AND_WAIT;
+    }
+}
+
 // Mode synchronization payloads
 typedef struct
 {

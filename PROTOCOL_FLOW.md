@@ -221,10 +221,16 @@ These keep the fixed‑size framing and stop‑and‑wait simplicity while enabl
 
 ## Adaptive TX and streaming pacing
 
-- Adaptive transmitter uses window-only rungs: 64, 32, 16, 8, 4, 2, and stop-and-wait (1 in flight). Faster rungs have lower enum values.
+- Adaptive transmitter uses window-only rungs: 64, 32, 16, 8, 4, 2, and stop-and-wait (1 in flight). Larger enum value = larger window = higher throughput potential. STOP_AND_WAIT (1) is the slowest rung.
 - Streaming is sender pacing, not a separate mode. When negotiated, the sender interleaves short ACK polls derived from RTT during DATA_ACK waits to keep the window full without long blocking sleeps.
 - Negotiation: HELLO carries a compact `streaming_flags` byte.
   - bit0: this endpoint can stream when sending to the peer
   - bit1: this endpoint accepts an incoming peer that streams to it
   - Effective permissions are directional and can be queried at runtime via `val_get_streaming_allowed()`.
 - Pacing policy: poll interval ≈ SRTT/4 clamped to [2, 20] ms (falls back to a conservative value before enough samples). Each ACK wait has a fixed deadline; if the deadline elapses, the code escalates to a real timeout and retries with exponential backoff.
+
+Windowed send/ACK behavior
+- Sender maintains up to `window` in-flight DATA packets and advances the send pointer as DATA_ACKs arrive.
+- DATA_ACK is cumulative: ACK.offset is the next expected byte offset; sender may drop any already-ACKed inflight and continue filling the window.
+- On gaps, duplicates, or soft resync, the receiver re-ACKs its current `written` offset without writing out-of-order data.
+- On timeout, the sender retries with exponential backoff; a DATA_NAK may prompt a targeted rewind to the indicated offset.

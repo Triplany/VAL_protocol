@@ -44,6 +44,13 @@ int main(void)
     val_config_t cfg_tx, cfg_rx;
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_NEVER, 0);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_NEVER, 0);
+    // Favor a modest window to keep runtime well below watchdog even if defaults change
+    cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
+    cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
+    cfg_tx.adaptive_tx.allow_streaming = 1;
+    cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
+    cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
+    cfg_rx.adaptive_tx.allow_streaming = 1;
     cfg_tx.timeouts.min_timeout_ms = 100;
     cfg_tx.timeouts.max_timeout_ms = 5000;
     cfg_tx.retries.handshake_retries = 8;

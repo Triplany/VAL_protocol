@@ -36,6 +36,17 @@ set_property(TEST ut_adaptive_timeouts PROPERTY LABELS "quick")
 add_ctest_exe(ut_adaptive_transmission core/test_adaptive_transmission.c)
 set_property(TEST ut_adaptive_transmission PROPERTY LABELS "heavy")
 
+# Split adaptive streaming transitions into focused tests
+add_ctest_exe(ut_adaptive_escalate core/test_adaptive_escalate.c)
+set_property(TEST ut_adaptive_escalate PROPERTY LABELS "quick")
+add_ctest_exe(ut_adaptive_deescalate core/test_adaptive_deescalate.c)
+set_property(TEST ut_adaptive_deescalate PROPERTY LABELS "quick")
+add_ctest_exe(ut_adaptive_reescalate core/test_adaptive_reescalate.c)
+set_property(TEST ut_adaptive_reescalate PROPERTY LABELS "quick")
+
+# Adaptive: escalate to streaming, degrade to windowed, and recover back
+# Remove the combined escalation test in favor of the split ones
+
 # Adaptive transmission demo (lightweight, quick)
 add_ctest_exe(ut_adaptive_demo core/test_adaptive_demo.c)
 set_property(TEST ut_adaptive_demo PROPERTY LABELS "quick")
@@ -51,6 +62,10 @@ set_property(TEST ut_streaming_veto PROPERTY LABELS "quick")
 # Positive streaming negotiation (both sides allow streaming)
 add_ctest_exe(ut_streaming_allowed core/test_streaming_allowed.c)
 set_property(TEST ut_streaming_allowed PROPERTY LABELS "quick")
+
+# Streaming ACK cadence (requires wire audit to assert counts; otherwise still runs as integrity check)
+add_ctest_exe(ut_streaming_ack_cadence core/test_streaming_ack_cadence.c)
+set_property(TEST ut_streaming_ack_cadence PROPERTY LABELS "quick")
 
 # Wire audit (requires VAL_ENABLE_WIRE_AUDIT build option to assert invariants)
 add_ctest_exe(ut_wire_audit core/test_wire_audit.c)

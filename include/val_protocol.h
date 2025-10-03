@@ -165,13 +165,13 @@ extern "C"
     // Adaptive transmission window rungs (fastest has the lowest numeric value)
     typedef enum
     {
-        VAL_TX_WINDOW_64 = 0,     // 64-packet window
-        VAL_TX_WINDOW_32 = 1,     // 32-packet window
-        VAL_TX_WINDOW_16 = 2,     // 16-packet window
-        VAL_TX_WINDOW_8 = 3,      // 8-packet window
-        VAL_TX_WINDOW_4 = 4,      // 4-packet window
-        VAL_TX_WINDOW_2 = 5,      // 2-packet window
-        VAL_TX_STOP_AND_WAIT = 6, // 1 in flight
+        VAL_TX_WINDOW_64 = 64,     // 64-packet window
+        VAL_TX_WINDOW_32 = 32,     // 32-packet window
+        VAL_TX_WINDOW_16 = 16,     // 16-packet window
+        VAL_TX_WINDOW_8  = 8,      // 8-packet window
+        VAL_TX_WINDOW_4  = 4,      // 4-packet window
+        VAL_TX_WINDOW_2  = 2,      // 2-packet window
+        VAL_TX_STOP_AND_WAIT = 1,  // 1 in flight (stop-and-wait)
     } val_tx_mode_t;
 
     typedef struct

@@ -450,7 +450,7 @@ static int test_adaptive_mode_transitions_small(void)
         printf("FAIL: Could not read current TX mode after phase 1\n");
         goto cleanup;
     }
-    printf("DEBUG: Mode after high-loss phase: %d (lower is higher performance)\n", (int)mode_after_loss);
+    printf("DEBUG: Mode after high-loss phase: %d (numeric equals window size; higher is higher performance)\n", (int)mode_after_loss);
 
     // Phase 2: remove loss and send another tiny file; expect an upgrade relative to phase 1
     end_tx.faults.drop_frame_per_million = 0;
@@ -482,8 +482,8 @@ static int test_adaptive_mode_transitions_small(void)
     }
     printf("DEBUG: Mode after recovery phase: %d\n", (int)mode_after_recovery);
 
-    // Expect that recovery moved us toward higher performance (numerically smaller enum)
-    if (!(mode_after_recovery <= mode_after_loss))
+    // Expect that recovery moved us toward higher performance (numerically larger window enum)
+    if (!(mode_after_recovery >= mode_after_loss))
     {
         printf("FAIL: Expected upgrade after loss removal (mode %d -> %d)\n", (int)mode_after_loss, (int)mode_after_recovery);
         goto cleanup;
