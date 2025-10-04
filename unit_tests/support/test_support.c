@@ -1,5 +1,6 @@
 #include "test_support.h"
 #include "../../src/val_internal.h"
+#include "../support/transport_profiles.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -717,6 +718,12 @@ static int net_sim_recv(void *buffer, size_t buffer_size, size_t *received, uint
 int test_tp_send(void *ctx, const void *data, size_t len)
 {
     test_duplex_t *d = (test_duplex_t *)ctx;
+
+    // Update transport simulator stats if active
+    if (transport_sim_get_profile() != NULL) {
+        transport_sim_record_packet_sent(len);
+    }
+
     // Use simulation when any knob is enabled; otherwise preserve legacy behavior
     if (g_net.enable_partial_send || g_net.enable_reorder || g_net.enable_jitter)
     {
@@ -740,8 +747,17 @@ int test_tp_send(void *ctx, const void *data, size_t len)
 int test_tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received, uint32_t timeout_ms)
 {
     test_duplex_t *d = (test_duplex_t *)ctx;
-    if (g_net.enable_partial_recv || g_net.enable_reorder || g_net.enable_jitter)
-        return net_sim_recv(buffer, buffer_size, received, timeout_ms, d);
+    if (g_net.enable_partial_recv || g_net.enable_reorder || g_net.enable_jitter) {
+        int result = net_sim_recv(buffer, buffer_size, received, timeout_ms, d);
+
+        // Update transport simulator stats if active - successful receive
+        if (transport_sim_get_profile() != NULL && result == 0 && received && *received > 0) {
+            transport_sim_record_packet_received(*received);
+        }
+
+        return result;
+    }
+
     int ok = test_fifo_pop_exact(d->b2a, (uint8_t *)buffer, buffer_size, timeout_ms);
     if (!ok)
     {
@@ -753,6 +769,12 @@ int test_tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received, 
     }
     if (received)
         *received = buffer_size;
+
+    // Update transport simulator stats if active - successful receive
+    if (transport_sim_get_profile() != NULL && received && *received > 0) {
+        transport_sim_record_packet_received(*received);
+    }
+
     ts_tp_tracef("LEGACY RECV d=%p DONE size=%zu", (void *)d, buffer_size);
     return 0;
 }

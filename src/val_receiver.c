@@ -77,6 +77,11 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     s->timing.in_retransmit = 0;
     for (;;)
     {
+        VAL_HEALTH_RECORD_OPERATION(s);
+        val_status_t health = val_internal_check_health(s);
+        if (health != VAL_OK)
+            return health;
+            
         if (!val_internal_transport_is_connected(s))
         {
             VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
@@ -93,6 +98,7 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
             }
             VAL_LOG_DEBUG(s, "verify: waiting for sender CRC");
             val_metrics_inc_timeout(s);
+            VAL_HEALTH_RECORD_RETRY(s);
             if (backoff && s->config->system.delay_ms)
                 s->config->system.delay_ms(backoff);
             if (backoff)
@@ -490,6 +496,11 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
             for (;;)
             {
+                VAL_HEALTH_RECORD_OPERATION(s);
+                val_status_t health = val_internal_check_health(s);
+                if (health != VAL_OK)
+                    return health;
+                    
                 if (!val_internal_transport_is_connected(s))
                 {
                     VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
@@ -539,6 +550,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 }
                 VAL_LOG_DEBUG(s, "recv: waiting for metadata");
                 val_metrics_inc_timeout(s);
+                VAL_HEALTH_RECORD_RETRY(s);
                 if (backoff && s->config->system.delay_ms)
                     s->config->system.delay_ms(backoff);
                 if (backoff)
@@ -748,6 +760,15 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
                 for (;;)
                 {
+                    VAL_HEALTH_RECORD_OPERATION(s);
+                    val_status_t health = val_internal_check_health(s);
+                    if (health != VAL_OK)
+                    {
+                        if (!skipping && f)
+                            s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                        return health;
+                    }
+                        
                     // Streaming: send sparse heartbeat DATA_ACK (liveness) only when idle
                     if (s->recv_streaming_allowed && s->peer_streaming_engaged)
                     {
@@ -808,6 +829,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     }
                     if (st == VAL_ERR_TIMEOUT)
                         val_metrics_inc_timeout(s);
+                    VAL_HEALTH_RECORD_RETRY(s);
                     if (backoff && s->config->system.delay_ms)
                         s->config->system.delay_ms(backoff);
                     if (backoff)

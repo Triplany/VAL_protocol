@@ -1,3 +1,14 @@
+/**
+ * @file val_errors.h
+ * @brief VAL Protocol Error Codes and Detail Masks
+ * 
+ * @version 0.7.0
+ * @copyright MIT License - Copyright 2025 Arthur T Lee
+ * 
+ * Dedicated to Valerie Lee - for all her support over the years
+ * allowing me to chase my ideas.
+ */
+
 #ifndef VAL_ERRORS_H
 #define VAL_ERRORS_H
 
@@ -24,6 +35,8 @@ typedef enum
     VAL_ERR_MODE_NEGOTIATION_FAILED = -12,
     VAL_ERR_MODE_SYNC_FAILED = -13,
     VAL_ERR_UNSUPPORTED_TX_MODE = -14,
+    // Connection quality (graceful failure)
+    VAL_ERR_PERFORMANCE = -15,
 } val_status_t;
 
 // Error detail mask (32-bit) layout:
@@ -49,6 +62,7 @@ typedef enum
 #define VAL_ERROR_DETAIL_SEND_FAILED ((uint32_t)0x00000020)
 #define VAL_ERROR_DETAIL_RECV_FAILED ((uint32_t)0x00000040)
 #define VAL_ERROR_DETAIL_CONNECTION ((uint32_t)0x00000080)
+// Note: Bit 0x00000100 is first CRC detail, leaving network category full
 
 // CRC (8-15)
 #define VAL_ERROR_DETAIL_CRC_HEADER ((uint32_t)0x00000100)
@@ -69,6 +83,8 @@ typedef enum
 #define VAL_ERROR_DETAIL_MALFORMED_PKT ((uint32_t)0x00200000)
 #define VAL_ERROR_DETAIL_UNKNOWN_TYPE ((uint32_t)0x00400000)
 #define VAL_ERROR_DETAIL_PAYLOAD_SIZE ((uint32_t)0x00800000)
+// Connection health (still in protocol category)
+#define VAL_ERROR_DETAIL_EXCESSIVE_RETRIES ((uint32_t)0x01000000)
 
 // Filesystem (24-27)
 #define VAL_ERROR_DETAIL_FILE_NOT_FOUND ((uint32_t)0x01000000)

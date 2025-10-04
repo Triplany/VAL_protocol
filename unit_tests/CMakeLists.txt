@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.15)
 # Always build unit test executables and register them with CTest.
 
 function(add_ctest_exe name src)
-    add_executable(${name} ${src} support/test_support.c)
+    # Include common test support and transport simulation helpers in all unit tests
+    add_executable(${name} ${src} support/test_support.c support/transport_profiles.c)
     # Allow unit tests to include public and selected internal headers for white-box testing
     target_include_directories(${name} PRIVATE support include ${CMAKE_CURRENT_LIST_DIR}/../src ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(${name} PRIVATE val_protocol)
@@ -108,3 +109,29 @@ if(VAL_ENABLE_METRICS)
     add_ctest_exe(ut_metrics_timeout core/test_metrics_timeout.c)
     set_property(TEST ut_metrics_timeout PROPERTY LABELS "quick")
 endif()
+
+# Transport profile simulation tests
+# These tests simulate realistic transport conditions (UART, WiFi, Satellite)
+# with deterministic behavior for reproducible testing
+function(add_transport_profile_test name src)
+    add_executable(${name} ${src} support/test_support.c support/transport_profiles.c)
+    target_include_directories(${name} PRIVATE support include ${CMAKE_CURRENT_LIST_DIR}/../src ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(${name} PRIVATE val_protocol)
+    add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+endfunction()
+
+add_transport_profile_test(ut_uart_profile transport/test_uart_profile.c)
+set_property(TEST ut_uart_profile PROPERTY LABELS "quick")
+
+add_transport_profile_test(ut_wifi_profile transport/test_wifi_profile.c)
+set_property(TEST ut_wifi_profile PROPERTY LABELS "quick")
+
+add_transport_profile_test(ut_satellite_profile transport/test_satellite_profile.c)
+set_property(TEST ut_satellite_profile PROPERTY LABELS "heavy")
+
+# Diagnostic test for satellite packet loss investigation
+add_transport_profile_test(sat_diagnostic transport/test_satellite_diagnostic.c)
+
+# Stress tests for extreme network conditions (>5% loss, graceful failure validation)
+add_transport_profile_test(ut_transport_stress transport/test_transport_stress.c)
+set_property(TEST ut_transport_stress PROPERTY LABELS "stress")

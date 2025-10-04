@@ -177,6 +177,13 @@ struct val_session_s
     // Streaming keepalive timestamps (ms since ticks)
     uint32_t last_keepalive_send_time; // last time we sent a keepalive (receiver side)
     uint32_t last_keepalive_recv_time; // last time we observed a keepalive from peer (sender side)
+    // Connection health monitoring (graceful failure on extreme conditions)
+    struct
+    {
+        uint32_t operations; // Total operations attempted (incremented each send/recv/wait)
+        uint32_t retries;    // Total retries across all operations
+        uint32_t soft_trips; // Number of soft performance trips observed (reset on progress)
+    } health;
 #if VAL_ENABLE_METRICS
     // Metrics counters (zeroed at session create)
     val_metrics_t metrics;
@@ -566,6 +573,56 @@ static inline void val_internal_set_error_detailed(val_session_t *s, val_status_
 #define VAL_SET_PROTOCOL_ERROR(s, detail) val_internal_set_error_detailed((s), VAL_ERR_PROTOCOL, (detail))
 #define VAL_SET_FEATURE_ERROR(s, missing_mask)                                                                                   \
     val_internal_set_error_detailed((s), VAL_ERR_FEATURE_NEGOTIATION, VAL_SET_MISSING_FEATURE((missing_mask)))
+#define VAL_SET_PERFORMANCE_ERROR(s, detail) val_internal_set_error_detailed((s), VAL_ERR_PERFORMANCE, (detail))
+
+// Connection health monitoring: graceful failure on extreme conditions
+// Tracks retry rate and aborts if connection quality is unacceptable
+static inline val_status_t val_internal_check_health(val_session_t *s)
+{
+    if (!s)
+        return VAL_ERR_INVALID_ARG;
+
+    // Wait for initial settling period (handshake, metadata exchange)
+    // Require a larger sample size before enforcing health thresholds to avoid false positives
+    // during normal loss/retransmit bursts at start-up.
+    // Use total attempts (operations + retries) as the sample size so that frequent retries
+    // still advance the sampler and avoid dividing by an inappropriately small operations count.
+    uint32_t attempts = s->health.operations + s->health.retries;
+    if (attempts < 2u)
+    {
+        VAL_LOG_DEBUGF(s, "health: check skipped, ops=%u < 2 (attempts=%u)", s->health.operations, attempts);
+        return VAL_OK;
+    }
+
+    VAL_LOG_DEBUGF(s, "health: checking (v2) ops=%u retries=%u attempts=%u", s->health.operations, s->health.retries, attempts);
+
+    // Check retry rate: if >= ~25% of total attempts are retries, treat as unusable.
+    // This avoids tripping under moderate loss while still catching sustained extreme conditions.
+    // Use shifts to approximate 25%: attempts / 4 == attempts >> 2
+    if (s->health.retries > (attempts >> 2))
+    {
+        VAL_LOG_CRITF(s, "health: excessive retries ops=%u retries=%u attempts=%u",
+                      s->health.operations, s->health.retries, attempts);
+        VAL_SET_PERFORMANCE_ERROR(s, VAL_ERROR_DETAIL_EXCESSIVE_RETRIES);
+        return VAL_ERR_PERFORMANCE;
+    }
+
+    VAL_LOG_DEBUG(s, "health: check passed");
+    return VAL_OK;
+}
+
+// Health tracking helpers
+#define VAL_HEALTH_RECORD_OPERATION(s) do { \
+    (s)->health.operations++; \
+    VAL_LOG_DEBUGF((s), "health: operation recorded, total ops=%u retries=%u", \
+                   (s)->health.operations, (s)->health.retries); \
+} while(0)
+
+#define VAL_HEALTH_RECORD_RETRY(s) do { \
+    (s)->health.retries++; \
+    VAL_LOG_DEBUGF((s), "health: retry recorded, total ops=%u retries=%u", \
+                   (s)->health.operations, (s)->health.retries); \
+} while(0)
 
 // Internal CRC incremental helpers (for file-level CRC)
 uint32_t val_crc32_init_state(void);

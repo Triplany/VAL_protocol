@@ -21,7 +21,6 @@ endforeach()
 # Build options
 option(VAL_ENABLE_ERROR_STRINGS "Build optional error string utilities (host-only)" ON)
 option(VAL_ENABLE_METRICS "Enable compile-time protocol metrics counters and timing" OFF)
-option(VAL_ENABLE_ADVANCED_TX "Enable optional advanced transmitter/resume capabilities (sets VAL_FEAT_ADVANCED_TX)" OFF)
 option(VAL_ENABLE_WIRE_AUDIT "Enable compile-time wire audit counters and per-packet-type stats" OFF)
 
 # Platform-specific settings
@@ -55,14 +54,6 @@ endif()
 
 # Always enable wire audit in Debug builds for tests/diagnostics
 target_compile_definitions(val_protocol PUBLIC $<$<CONFIG:Debug>:VAL_ENABLE_WIRE_AUDIT=1>)
-
-# Wire optional features (negotiated) compiled into this build.
-# This only affects the core library; examples/tests inherit behavior via the linked library.
-if(VAL_ENABLE_ADVANCED_TX)
-    # Define the builtin optional feature mask to advertise ADVANCED_TX support at handshake.
-    # Note: The mask only contains optional/negotiable features; core behavior is implicit.
-    target_compile_definitions(val_protocol PUBLIC VAL_BUILTIN_FEATURES=VAL_FEAT_ADVANCED_TX)
-endif()
 
 if(VAL_ENABLE_ERROR_STRINGS)
     add_library(val_error_strings STATIC src/val_error_strings.c)
@@ -115,7 +106,8 @@ endif()
 enable_testing()
 
 add_library(test_support OBJECT
-    unit_tests/support/test_support.c)
+    unit_tests/support/test_support.c
+    unit_tests/support/transport_profiles.c)
 target_include_directories(test_support PUBLIC unit_tests/support include)
 
 function(add_val_ut name src)

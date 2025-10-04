@@ -40,6 +40,8 @@ const char *val_status_to_string(val_status_t status)
         return "MODE_SYNC_FAILED";
     case VAL_ERR_UNSUPPORTED_TX_MODE:
         return "UNSUPPORTED_TX_MODE";
+    case VAL_ERR_PERFORMANCE:
+        return "PERFORMANCE_UNACCEPTABLE";
     default:
         return "UNKNOWN";
     }
@@ -123,6 +125,8 @@ const char *val_error_detail_to_string(uint32_t d)
         append_flag(tls, sizeof(tls), &len, "UNKNOWN_TYPE");
     if (d & VAL_ERROR_DETAIL_PAYLOAD_SIZE)
         append_flag(tls, sizeof(tls), &len, "PAYLOAD_SIZE");
+    if (d & VAL_ERROR_DETAIL_EXCESSIVE_RETRIES)
+        append_flag(tls, sizeof(tls), &len, "EXCESSIVE_RETRIES");
     // Filesystem
     if (d & VAL_ERROR_DETAIL_FILE_NOT_FOUND)
         append_flag(tls, sizeof(tls), &len, "FILE_NOT_FOUND");

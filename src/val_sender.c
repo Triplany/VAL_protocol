@@ -407,8 +407,6 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
                 }
                 if (ack_ctx->first_ack_grace_flag && *ack_ctx->first_ack_grace_flag)
                     *ack_ctx->first_ack_grace_flag = 0;
-                if (!s->timing.in_retransmit)
-                    val_internal_record_transmission_success(s);
 
                 if (off <= *ack_ctx->last_acked)
                 {
@@ -417,7 +415,12 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
                     continue;
                 }
 
+                // Record success only when ACK advances our high-water mark (off > last_acked)
+                if (!s->timing.in_retransmit)
+                    val_internal_record_transmission_success(s);
                 *ack_ctx->last_acked = off;
+                // Reset soft trip counter on real forward progress
+                s->health.soft_trips = 0;
                 if (ack_ctx->progress_ctx)
                     val_emit_progress_sender(s, ack_ctx->progress_ctx, ack_ctx->filename, *ack_ctx->last_acked, 1);
                 else
@@ -469,7 +472,19 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
 
         if (streaming_mode && (st == VAL_ERR_TIMEOUT || st == VAL_ERR_CRC))
         {
-            // In streaming, do not escalate to timeout-driven rewind; simply return to allow more sends
+            // In streaming, treat timeout/CRC as a transmission error to disengage streaming and allow de-escalation,
+            // but do not rewind the window; keep sending.
+            val_internal_record_transmission_error(s);
+            if (st == VAL_ERR_TIMEOUT)
+                val_metrics_inc_timeout(s);
+            else if (st == VAL_ERR_CRC)
+                val_metrics_inc_crcerr(s);
+            // Apply any mode change immediately to sender-side window bookkeeping and request a window restart
+            *ack_ctx->mode_used = val_tx_mode_sanitize(s->current_tx_mode);
+            *ack_ctx->window_size = val_tx_mode_window(*ack_ctx->mode_used);
+            if (*ack_ctx->window_size == 0u)
+                *ack_ctx->window_size = 1u;
+            *restart_window = 1;
             return VAL_OK;
         }
 
@@ -513,6 +528,9 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
 #endif
         *restart_window = 1;
 
+        // Track retry for health monitoring
+        VAL_HEALTH_RECORD_RETRY(s);
+        
         if (ack_ctx->backoff && s->config->system.delay_ms)
             s->config->system.delay_ms(ack_ctx->backoff);
         if (ack_ctx->backoff)
@@ -543,6 +561,11 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
     val_status_t st = VAL_OK;
     for (;;)
     {
+        VAL_HEALTH_RECORD_OPERATION(s);
+        val_status_t health = val_internal_check_health(s);
+        if (health != VAL_OK)
+            return health;
+            
         val_packet_type_t t = 0;
         uint8_t buf[128];
         uint32_t len = 0;
@@ -688,6 +711,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
             return st;
         }
         val_metrics_inc_timeout(s);
+        VAL_HEALTH_RECORD_RETRY(s);
         // Nudge receiver with another RESUME_REQ on timeout
         (void)val_internal_send_packet(s, VAL_PKT_RESUME_REQ, NULL, 0, 0);
         if (backoff && s->config->system.delay_ms)
@@ -825,6 +849,40 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
             VAL_LOG_WARN(s, "data(win): local cancel detected at loop top");
             return VAL_ERR_ABORTED;
         }
+        
+        // Check connection health (graceful failure on extreme conditions)
+        VAL_HEALTH_RECORD_OPERATION(s);
+        val_status_t health = val_internal_check_health(s);
+        if (health != VAL_OK)
+        {
+            if (health == VAL_ERR_PERFORMANCE)
+            {
+                // Treat health performance trip as a soft error during active data send:
+                // trigger adaptive de-escalation and keep going instead of aborting the session.
+                VAL_LOG_WARN(s, "health: soft performance trip during data send -> de-escalate and continue");
+                val_internal_record_transmission_error(s);
+                // Track soft trip and, if too many occur without progress, escalate to hard failure
+                s->health.soft_trips++;
+                if (s->health.soft_trips >= 2)
+                {
+                    VAL_LOG_CRIT(s, "health: repeated soft performance trips -> escalating to hard failure");
+                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                    if (s->config->callbacks.on_file_complete)
+                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_PERFORMANCE);
+                    VAL_SET_PERFORMANCE_ERROR(s, VAL_ERROR_DETAIL_EXCESSIVE_RETRIES);
+                    return VAL_ERR_PERFORMANCE;
+                }
+                // Continue without closing the file; allow outer loop to refill at a smaller window.
+            }
+            else
+            {
+                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+                if (s->config->callbacks.on_file_complete)
+                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", health);
+                return health;
+            }
+        }
+        
         // Establish a window and persist retry/backoff state across restarts until target ACK is reached
         uint64_t window_start = last_acked;
         uint32_t to_ack_base = val_internal_get_timeout(s, VAL_OP_DATA_ACK);
@@ -1046,6 +1104,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
             // Retransmit DONE on timeout or benign packet and backoff
             val_internal_record_transmission_error(s);
             val_metrics_inc_retrans(s);
+            VAL_HEALTH_RECORD_RETRY(s);
             s->timing.in_retransmit = 1; // Karn's algorithm
             val_status_t rs = val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
             if (rs != VAL_OK)
@@ -1278,6 +1337,7 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
         // Retransmit EOT and backoff
         s->timing.in_retransmit = 1; // Karn's algorithm
         val_metrics_inc_retrans(s);
+        VAL_HEALTH_RECORD_RETRY(s);
         val_status_t rs = val_internal_send_packet(s, VAL_PKT_EOT, NULL, 0, 0);
         if (rs != VAL_OK)
         {

@@ -1,3 +1,30 @@
+/**
+ * @file val_protocol.h
+ * @brief VAL Protocol - Versatile Adaptive Link Protocol
+ * 
+ * A robust, blocking-I/O file transfer protocol library designed for reliable
+ * file transfers across diverse network conditions, from high-speed LANs to
+ * constrained embedded systems.
+ * 
+ * Features:
+ * - Adaptive transmission with window-based flow control (1-64 packets)
+ * - Six resume modes with CRC-verified partial transfers
+ * - Embedded-friendly: zero dynamic allocations in steady state
+ * - Transport agnostic: works over TCP, UART, USB, or any reliable byte stream
+ * - Comprehensive error handling with detailed diagnostic masks
+ * - Optional metrics collection and wire audit trails
+ * 
+ * @version 0.7.0
+ * @date 2025
+ * @copyright MIT License - Copyright 2025 Arthur T Lee
+ * 
+ * @note EARLY DEVELOPMENT - READY FOR TESTING, NOT PRODUCTION READY
+ *       Backward compatibility is not guaranteed until v1.0.
+ * 
+ * Dedicated to Valerie Lee - for all her support over the years
+ * allowing me to chase my ideas.
+ */
+
 #ifndef VAL_PROTOCOL_H
 #define VAL_PROTOCOL_H
 
@@ -142,15 +169,10 @@ extern "C"
 
 // Public feature bits
 // Negotiation covers only optional features; core functionality is implicit and not represented by bits.
-// Optional/negotiable features start at bit 0.
+// Currently no optional features are defined; all core features (windowing, streaming, resume) are implicit.
 //
 #define VAL_FEAT_NONE 0u
-#ifdef VAL_ENABLE_ADVANCED_TX
-#define VAL_FEAT_ADVANCED_TX (1u << 0)
-#define VAL_BUILTIN_FEATURES VAL_FEAT_ADVANCED_TX
-#else
 #define VAL_BUILTIN_FEATURES VAL_FEAT_NONE
-#endif
 
     // Simple resume config - replaces complex resume struct
     typedef struct

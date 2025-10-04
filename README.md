@@ -1,6 +1,56 @@
-# VAL Protocol
+````markdown
+# VAL Protocol### Documentation
 
-A small, robust, blocking-I/O file transfer protocol library in C. Frames are fixed header + variable payload (bounded by a negotiated MTU) + trailer CRC. It supports resume, cumulative ACKs, per-file CRC integrity, and avoids dynamic allocations in steady state.
+📚 **[Complete Documentation](docs/README.md)** | [Getting Started](docs/getting-started.md) | [API Reference](docs/api-reference.md) | [Protocol Spec](docs/protocol-specification.md)
+
+- **Quick Start**: [Getting Started Guide](docs/getting-started.md)
+- **API Documentation**: [Complete API Reference](docs/api-reference.md)
+- **Protocol Details**: [Protocol Specification](docs/protocol-specification.md)
+- **Implementation**: [Implementation Guide](docs/implementation-guide.md)
+- **Wire Formats**: [Message Format Reference](docs/message-formats.md)
+- **Help**: [Troubleshooting Guide](docs/troubleshooting.md)
+- **History**: [Changelog](docs/CHANGELOG.md)
+
+### Repository Structure
+
+- **Public headers**: `include/` - Public API (`val_protocol.h`, `val_errors.h`)
+- **Sources**: `src/` - Core implementation
+- **Examples**: `examples/tcp/` - Complete TCP send/receive examples
+- **Unit tests**: `unit_tests/` - Comprehensive test suite (80+ tests)
+- **Documentation**: `docs/` - Complete protocol and API documentation
+
+### Protocol Notes
+
+- **Pre-1.0 Policy**: Backward compatibility isn't guaranteed until v1.0
+- **Wire Format**: Fixed header + variable payload + trailer CRC; all multi-byte fields are little-endian
+- **Packet Header**: Includes reserved `wire_version` byte (always 0); receivers validate and reject non-zero for future compatibility
+- **Flow Control**: Cumulative DATA_ACKs, DONE_ACK, and two CRCs (header + trailer) for integritytile Adaptive Link Protocol
+
+**⚠️ EARLY DEVELOPMENT NOTICE**  
+VAL Protocol v0.7 is ready for testing and evaluation but **not production-ready**. Backward compatibility is not guaranteed until v1.0.
+
+---
+
+**MIT License** - Copyright 2025 Arthur T Lee
+
+_Dedicated to Valerie Lee - for all her support over the years allowing me to chase my ideas._
+
+---
+
+## Overview
+
+VAL Protocol is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. A small, efficient protocol featuring fixed header + variable payload (bounded by a negotiated MTU) + trailer CRC. It supports adaptive transmission with continuous streaming mode, comprehensive resume modes, cumulative ACKs, per-file CRC integrity, and avoids dynamic allocations in steady state.
+
+### Key Features
+
+- **Streaming Mode**: Continuous non-blocking transmission using ACKs as heartbeats (not flow control) - provides major speedup over pure windowing, especially powerful for memory-constrained devices (e.g., WINDOW_2 + streaming vs WINDOW_64 saves RAM while maintaining high throughput)
+- **Adaptive Transmission**: Dynamic window sizing (1-64 packets) that automatically adjusts to network conditions - minimum WINDOW_4 recommended for effective escalation/de-escalation
+- **Powerful Abstraction Layer**: Complete separation of protocol from transport, filesystem, and system - enables custom encryption, compression, in-memory transfers, any byte source
+- **Resume Support**: Six CRC-verified resume modes - tail mode (default 2MB cap), full-prefix mode (256MB cap with large-tail fallback)
+- **Embedded-Friendly**: Zero dynamic allocations in steady state, configurable memory footprint, works on bare-metal
+- **Transport Agnostic**: Works over TCP, UART, RS-485, CAN, USB CDC, or any reliable byte stream
+- **Robust Error Handling**: Comprehensive error codes with detailed 32-bit diagnostic masks
+- **Optional Diagnostics**: Compile-time metrics collection and wire audit trails
 
 - Development guide: [DEVELOPMENT.md](./DEVELOPMENT.md)
 - Packet flow reference: [PROTOCOL_FLOW.md](./PROTOCOL_FLOW.md)
@@ -14,8 +64,7 @@ A small, robust, blocking-I/O file transfer protocol library in C. Frames are fi
 ## Features (from source)
 
 - Feature bits: see `include/val_protocol.h` and `val_get_builtin_features()`
-  - Only optional features are negotiated; core behavior is implicit.
-  - Optional (negotiated): e.g., `VAL_FEAT_ADVANCED_TX` (bit 0)
+  - Currently no optional features are defined; all core features (windowing, streaming, resume) are implicit and always available.
 - Resume configuration
   - Six modes (see `val_resume_mode_t`): `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_CRC_TAIL`,
     `VAL_RESUME_CRC_TAIL_OR_ZERO`, `VAL_RESUME_CRC_FULL`, `VAL_RESUME_CRC_FULL_OR_ZERO`.
@@ -48,10 +97,17 @@ Limitations
 
 These CMake options toggle compile-time features; defaults are conservative.
 
-- VAL_ENABLE_ERROR_STRINGS=ON: build host-only string utilities (`val_error_strings`)
-- VAL_ENABLE_METRICS=OFF: enable lightweight internal counters/timing
-- VAL_ENABLE_ADVANCED_TX=OFF: advertise optional `VAL_FEAT_ADVANCED_TX` during handshake
-  - When ON, the core defines `VAL_BUILTIN_FEATURES=VAL_FEAT_ADVANCED_TX` so peers can negotiate the capability.
+- **VAL_ENABLE_ERROR_STRINGS=ON**: Build host-only string utilities (`val_error_strings`) for human-readable error messages
+- **VAL_ENABLE_METRICS=OFF**: Enable lightweight internal counters/timing (packets, bytes, RTT, errors, retransmits)
+- **VAL_ENABLE_WIRE_AUDIT=OFF**: Enable detailed packet-level wire audit trails (send/recv counts, inflight snapshots)
+- **VAL_LOG_LEVEL** (0-5): Compile-time log level (0=OFF, 1=CRITICAL, 2=WARNING, 3=INFO, 4=DEBUG, 5=TRACE)
+
+**Example:**
+```bash
+cmake -B build -DVAL_ENABLE_METRICS=ON -DVAL_ENABLE_WIRE_AUDIT=ON -DVAL_LOG_LEVEL=4
+```
+
+See [Implementation Guide](docs/implementation-guide.md#building-from-source) and [Advanced Features](docs/examples/advanced-features.md) for detailed usage.
 
 ## Error system and debug logging
 

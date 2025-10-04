@@ -1340,6 +1340,11 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
     for (;;)
     {
+        VAL_HEALTH_RECORD_OPERATION(s);
+        val_status_t health = val_internal_check_health(s);
+        if (health != VAL_OK)
+            return health;
+            
         VAL_LOG_TRACEF(s, "handshake(sender): waiting for HELLO (to=%u ms, tries=%u)", (unsigned)to, (unsigned)tries);
         st = val_internal_recv_packet(s, &t, &peer, sizeof(peer), &len, &off, to);
         if (st == VAL_OK)
@@ -1357,6 +1362,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
         val_status_t rs = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
         if (rs != VAL_OK)
             return rs;
+        VAL_HEALTH_RECORD_RETRY(s);
         VAL_LOG_DEBUG(s, "handshake(sender): timeout -> retransmit HELLO");
         if (backoff && s->config->system.delay_ms)
             s->config->system.delay_ms(backoff);
@@ -1465,6 +1471,11 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     val_status_t st = VAL_OK;
     for (;;)
     {
+        VAL_HEALTH_RECORD_OPERATION(s);
+        val_status_t health = val_internal_check_health(s);
+        if (health != VAL_OK)
+            return health;
+            
         st = val_internal_recv_packet(s, &t, &peer, sizeof(peer), &len, &off, to);
         if (st == VAL_OK)
             break;
@@ -1477,6 +1488,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
             return st;
         }
         // Just backoff and continue waiting; receiver doesn't send until hello is received
+        VAL_HEALTH_RECORD_RETRY(s);
         if (backoff && s->config->system.delay_ms)
             s->config->system.delay_ms(backoff);
         if (backoff)

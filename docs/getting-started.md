@@ -1,0 +1,375 @@
+# Getting Started with VAL Protocol
+
+**⚠️ AI-ASSISTED DOCUMENTATION NOTICE**  
+This documentation was created with AI assistance and may contain errors. Please verify against source code.
+
+---
+
+## Quick Start
+
+This guide will help you get started with VAL Protocol in under 15 minutes.
+
+### Why VAL Protocol?
+
+**VAL excels at:**
+- **Embedded file transfers** over UART, USB, RS-485, CAN - where HTTP/FTP aren't available
+- **Streaming mode performance** - 15-20x faster than XMODEM/YMODEM with small memory footprint
+- **Complete abstraction** - implement custom encryption, compression, hardware CRC, any byte source
+- **Adaptive performance** - automatically adjusts to network quality from localhost to satellite links
+- **Robust resume** - CRC-verified resume modes with corruption detection
+
+**Not for:** Internet-scale distribution, real-time streaming media, or datagram networks.
+
+## Prerequisites
+
+### Required Tools
+
+- **C Compiler**: GCC, Clang, or MSVC
+- **CMake**: Version 3.15 or higher
+- **Git**: For cloning the repository
+
+### Supported Platforms
+
+- ✅ Windows (Visual Studio 2017+, MinGW)
+- ✅ Linux (Ubuntu, Debian, Fedora, etc.)
+- ✅ WSL (Windows Subsystem for Linux)
+- ✅ macOS (experimental)
+- ✅ Embedded systems with C99 compiler
+
+## Installation
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/Triplany/VAL_protocol.git
+cd VAL_protocol
+```
+
+### 2. Build on Windows
+
+```powershell
+# Configure with Visual Studio generator
+cmake -S . -B build\windows-debug -G "Visual Studio 17 2022" -A x64
+
+# Build
+cmake --build build\windows-debug --config Debug -j
+
+# Run tests
+ctest --test-dir build\windows-debug --build-config Debug --output-on-failure
+```
+
+### 3. Build on Linux/WSL
+
+```bash
+# Configure
+cmake -S . -B build/linux-debug
+
+# Build
+cmake --build build/linux-debug -j
+
+# Run tests
+ctest --test-dir build/linux-debug --output-on-failure
+```
+
+### 4. Using CMake Presets
+
+The project includes convenient presets:
+
+```bash
+# Windows
+cmake --preset windows-debug
+cmake --build --preset windows-debug
+
+# Linux
+cmake --preset linux-debug
+cmake --build --preset linux-debug
+```
+
+## Your First File Transfer
+
+### Basic Receiver
+
+```c
+#include "val_protocol.h"
+#include <stdio.h>
+#include <stdint.h>
+
+// Minimal transport: blocking TCP recv wrapper
+int my_recv(void *ctx, void *buffer, size_t len, size_t *received, uint32_t timeout_ms) {
+    int fd = *(int*)ctx;
+    // Your blocking recv implementation here
+    // Return 0 and set *received = len on success
+    // Return 0 and set *received = 0 on timeout
+    // Return <0 on fatal error
+    return tcp_recv_exact(fd, buffer, len, timeout_ms, received);
+}
+
+int my_send(void *ctx, const void *data, size_t len) {
+    int fd = *(int*)ctx;
+    return tcp_send_all(fd, data, len);
+}
+
+// Monotonic millisecond clock
+uint32_t get_ticks_ms(void) {
+    // Your platform's monotonic clock
+    return platform_get_milliseconds();
+}
+
+int main(void) {
+    val_config_t cfg = {0};
+    
+    // Transport
+    int sockfd = accept_connection(9000); // Your TCP code
+    cfg.transport.send = my_send;
+    cfg.transport.recv = my_recv;
+    cfg.transport.io_context = &sockfd;
+    
+    // Filesystem (standard C)
+    cfg.filesystem.fopen = (void*(*)(void*, const char*, const char*))fopen;
+    cfg.filesystem.fread = (int(*)(void*, void*, size_t, size_t, void*))fread;
+    cfg.filesystem.fwrite = (int(*)(void*, const void*, size_t, size_t, void*))fwrite;
+    cfg.filesystem.fseek = (int(*)(void*, void*, long, int))fseek;
+    cfg.filesystem.ftell = (long(*)(void*, void*))ftell;
+    cfg.filesystem.fclose = (int(*)(void*, void*))fclose;
+    
+    // Clock
+    cfg.system.get_ticks_ms = get_ticks_ms;
+    
+    // Buffers (4 KB MTU)
+    uint8_t send_buf[4096], recv_buf[4096];
+    cfg.buffers.send_buffer = send_buf;
+    cfg.buffers.recv_buffer = recv_buf;
+    cfg.buffers.packet_size = 4096;
+    
+    // Timeouts (conservative defaults)
+    cfg.timeouts.min_timeout_ms = 100;
+    cfg.timeouts.max_timeout_ms = 10000;
+    
+    // Resume: tail-or-zero (robust default)
+    cfg.resume.mode = VAL_RESUME_CRC_TAIL_OR_ZERO;
+    cfg.resume.crc_verify_bytes = 16384; // 16 KB tail
+    
+    // Create session
+    val_session_t *session = NULL;
+    val_status_t status = val_session_create(&cfg, &session, NULL);
+    if (status != VAL_OK) {
+        fprintf(stderr, "Failed to create session: %d\n", status);
+        return 1;
+    }
+    
+    // Receive files to output directory
+    status = val_receive_files(session, "./received");
+    
+    // Cleanup
+    val_session_destroy(session);
+    close(sockfd);
+    
+    return (status == VAL_OK) ? 0 : 1;
+}
+```
+
+### Basic Sender
+
+```c
+#include "val_protocol.h"
+#include <stdio.h>
+
+int main(void) {
+    val_config_t cfg = {0};
+    
+    // ... same transport/filesystem/clock setup as receiver ...
+    
+    int sockfd = connect_to_receiver("192.168.1.100", 9000);
+    cfg.transport.send = my_send;
+    cfg.transport.recv = my_recv;
+    cfg.transport.io_context = &sockfd;
+    
+    // ... buffers, timeouts, filesystem ...
+    
+    val_session_t *session = NULL;
+    val_status_t status = val_session_create(&cfg, &session, NULL);
+    if (status != VAL_OK) {
+        fprintf(stderr, "Failed to create session: %d\n", status);
+        return 1;
+    }
+    
+    // Send multiple files
+    const char *files[] = {
+        "/path/to/file1.bin",
+        "/path/to/file2.txt",
+        "/path/to/file3.dat"
+    };
+    
+    status = val_send_files(session, files, 3, "/original/path");
+    
+    val_session_destroy(session);
+    close(sockfd);
+    
+    return (status == VAL_OK) ? 0 : 1;
+}
+```
+
+## Try the TCP Examples
+
+The repository includes complete TCP examples with all features enabled.
+
+### Start Receiver
+
+```bash
+# Windows
+.\build\windows-debug\bin\Debug\val_example_receive.exe 9000 .\received
+
+# Linux
+./build/linux-debug/bin/val_example_receive 9000 ./received
+```
+
+### Send Files
+
+```bash
+# Windows
+.\build\windows-debug\bin\Debug\val_example_send.exe 127.0.0.1 9000 file1.bin file2.txt
+
+# Linux
+./build/linux-debug/bin/val_example_send 127.0.0.1 9000 file1.bin file2.txt
+```
+
+### With Advanced Options
+
+```bash
+# Large MTU, full-file resume, verbose logging
+./val_example_send --mtu 32768 --resume full --log-level debug \
+    --tx-mode 64 --streaming on \
+    192.168.1.100 9000 bigfile.iso
+
+./val_example_receive --mtu 32768 --resume full --log-level debug \
+    --accept-streaming on \
+    9000 ./downloads
+```
+
+## Common Configuration Patterns
+
+### Embedded/MCU Configuration
+
+```c
+// Minimal footprint: 1 KB MTU, stop-and-wait
+cfg.buffers.packet_size = 1024;
+cfg.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
+cfg.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
+cfg.adaptive_tx.allow_streaming = 0;
+cfg.resume.mode = VAL_RESUME_CRC_TAIL;
+cfg.resume.crc_verify_bytes = 1024; // Small tail
+```
+
+### High-Speed LAN
+
+```c
+// Maximize throughput: 64 KB MTU, full windowing
+cfg.buffers.packet_size = 65536;
+cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
+cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_32;
+cfg.adaptive_tx.allow_streaming = 1;
+cfg.resume.mode = VAL_RESUME_CRC_FULL_OR_ZERO;
+```
+
+### Unreliable Link (WiFi/Cellular)
+
+```c
+// Conservative: moderate MTU, aggressive error recovery
+cfg.buffers.packet_size = 4096;
+cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_16;
+cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_4;
+cfg.adaptive_tx.degrade_error_threshold = 2; // Quick downgrade
+cfg.adaptive_tx.recovery_success_threshold = 20; // Slow upgrade
+cfg.timeouts.min_timeout_ms = 500;
+cfg.timeouts.max_timeout_ms = 30000;
+```
+
+## Adding Callbacks
+
+### Progress Monitoring
+
+```c
+void on_progress(const val_progress_info_t *info) {
+    printf("Progress: %llu / %llu bytes (%.1f%%) - %s\n",
+        info->bytes_transferred,
+        info->total_bytes,
+        100.0 * info->bytes_transferred / info->total_bytes,
+        info->current_filename);
+}
+
+cfg.callbacks.on_progress = on_progress;
+```
+
+### File Events
+
+```c
+void on_file_start(const char *filename, const char *sender_path,
+                   uint64_t file_size, uint64_t resume_offset) {
+    printf("Starting: %s (%llu bytes, resume at %llu)\n",
+        filename, file_size, resume_offset);
+}
+
+void on_file_complete(const char *filename, const char *sender_path,
+                      val_status_t result) {
+    printf("Completed: %s - %s\n",
+        filename, 
+        result == VAL_OK ? "SUCCESS" : "FAILED");
+}
+
+cfg.callbacks.on_file_start = on_file_start;
+cfg.callbacks.on_file_complete = on_file_complete;
+```
+
+### Metadata Validation
+
+```c
+val_validation_action_t my_validator(const val_meta_payload_t *meta,
+                                     const char *target_path,
+                                     void *context) {
+    // Reject files over 100 MB
+    if (meta->file_size > 100 * 1024 * 1024) {
+        printf("Rejecting large file: %s (%llu bytes)\n",
+            meta->filename, meta->file_size);
+        return VAL_VALIDATION_SKIP;
+    }
+    
+    // Reject executable files
+    const char *ext = strrchr(meta->filename, '.');
+    if (ext && (strcmp(ext, ".exe") == 0 || strcmp(ext, ".dll") == 0)) {
+        printf("Rejecting executable: %s\n", meta->filename);
+        return VAL_VALIDATION_SKIP;
+    }
+    
+    return VAL_VALIDATION_ACCEPT;
+}
+
+val_config_set_validator(&cfg, my_validator, NULL);
+```
+
+## Next Steps
+
+- Read the [API Reference](api-reference.md) for detailed function documentation
+- See [Implementation Guide](implementation-guide.md) for architecture details
+- Check [Examples](examples/) for advanced usage patterns
+- Review [Message Formats](message-formats.md) for protocol internals
+
+## Troubleshooting
+
+### Common Issues
+
+**Session creation fails with VAL_ERR_INVALID_ARG**
+- Check that all required callbacks are set (transport.send, transport.recv, filesystem.*, system.get_ticks_ms)
+- Verify buffer pointers are non-NULL
+- Ensure packet_size is within [512, 65536] range
+
+**Timeouts during handshake**
+- Increase min_timeout_ms (try 500-1000 ms)
+- Check network connectivity
+- Verify both sides are using compatible packet sizes
+
+**Resume always fails**
+- Try VAL_RESUME_CRC_TAIL_OR_ZERO mode (more forgiving)
+- Increase crc_verify_bytes to cover modified regions
+- Use VAL_RESUME_NEVER to disable resume and overwrite
+
+See [Troubleshooting Guide](troubleshooting.md) for more help.
