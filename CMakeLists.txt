@@ -37,6 +37,7 @@ add_library(val_protocol STATIC
     src/val_core.c
     src/val_sender.c
     src/val_receiver.c
+    src/val_wire.c
 )
 target_include_directories(val_protocol PUBLIC include)
 # Enable maximum compile-time logging in the core so examples/tests can see detailed traces

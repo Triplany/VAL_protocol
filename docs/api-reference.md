@@ -261,7 +261,7 @@ typedef struct {
     struct {
         void *send_buffer;                  // At least packet_size bytes
         void *recv_buffer;                  // At least packet_size bytes
-        size_t packet_size;                 // MTU [512..65536]
+    size_t packet_size;                 // MTU [512 .. 2*1024*1024]
     } buffers;
     
     // Resume configuration
@@ -987,7 +987,7 @@ typedef enum {
 #define VAL_VERSION_MAJOR 0u
 #define VAL_VERSION_MINOR 7u
 #define VAL_MIN_PACKET_SIZE 512u
-#define VAL_MAX_PACKET_SIZE 65536u
+#define VAL_MAX_PACKET_SIZE (2u * 1024u * 1024u)
 #define VAL_MAX_FILENAME 127u
 #define VAL_MAX_PATH 127u
 #define VAL_PKT_CANCEL 0x18u               // ASCII CAN

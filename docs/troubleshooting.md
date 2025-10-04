@@ -37,7 +37,7 @@ This documentation was created with AI assistance and may contain errors.
 
 2. **Invalid Packet Size**
    ```c
-   // Must be in range [512, 65536]
+   // Must be in range [512, 2*1024*1024]
    cfg.buffers.packet_size = 4096;  // Valid
    // cfg.buffers.packet_size = 256;   // TOO SMALL!
    // cfg.buffers.packet_size = 100000; // TOO LARGE!

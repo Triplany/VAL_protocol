@@ -208,7 +208,8 @@ typedef enum {
 } val_mode_t;
 
 // Macro
-#define VAL_MAX_SIZE 65536u
+// Example constants in tests/docs should reflect current limits; as of v0.7, max packet size is 2 MiB.
+#define VAL_MAX_SIZE (2u * 1024u * 1024u)
 ```
 
 **Comments**:

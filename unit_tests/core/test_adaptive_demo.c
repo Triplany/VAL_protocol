@@ -29,38 +29,37 @@ static int mock_recv(void *ctx, void *buffer, size_t buffer_size, size_t *receiv
     // Initialize handshake response once
     if (handshake_size == 0)
     {
-        val_packet_header_t *hdr = (val_packet_header_t *)handshake_response;
-        val_handshake_t *payload = (val_handshake_t *)(handshake_response + sizeof(val_packet_header_t));
+        val_packet_header_t header;
+        val_handshake_t payload;
 
-        // Fill handshake payload
-        memset(payload, 0, sizeof(val_handshake_t));
-        payload->magic = val_htole32(VAL_MAGIC);
-        payload->version_major = VAL_VERSION_MAJOR;
-        payload->version_minor = VAL_VERSION_MINOR;
-        payload->packet_size = val_htole32(1024);
-        payload->max_performance_mode = VAL_TX_WINDOW_8; // Peer supports up to 8-packet window
-        payload->preferred_initial_mode = VAL_TX_WINDOW_4;
-        payload->mode_sync_interval = val_htole16(100);
+        memset(&payload, 0, sizeof(payload));
+        payload.magic = VAL_MAGIC;
+        payload.version_major = VAL_VERSION_MAJOR;
+        payload.version_minor = VAL_VERSION_MINOR;
+        payload.packet_size = 1024;
+        payload.max_performance_mode = VAL_TX_WINDOW_8; // Peer supports up to 8-packet window
+        payload.preferred_initial_mode = VAL_TX_WINDOW_4;
+        payload.mode_sync_interval = 100;
 
-        // Fill header
-        memset(hdr, 0, sizeof(val_packet_header_t));
-        hdr->type = 1; // VAL_PKT_HELLO
-        hdr->wire_version = 0;
-        hdr->payload_len = val_htole32(sizeof(val_handshake_t));
-        hdr->seq = val_htole32(1);
-        hdr->offset = val_htole64(0);
+        memset(&header, 0, sizeof(header));
+        header.type = VAL_PKT_HELLO;
+        header.wire_version = 0;
+        header.payload_len = VAL_WIRE_HANDSHAKE_SIZE;
+        header.seq = 1;
+        header.offset = 0;
+        header.header_crc = 0;
 
-        // Calculate header CRC
-        val_packet_header_t tmp = *hdr;
-        tmp.header_crc = 0;
-        hdr->header_crc = val_htole32(val_crc32(&tmp, sizeof(val_packet_header_t)));
+        val_serialize_header(&header, handshake_response);
+        val_serialize_handshake(&payload, handshake_response + VAL_WIRE_HEADER_SIZE);
 
-        handshake_size = sizeof(val_packet_header_t) + sizeof(val_handshake_t) + sizeof(uint32_t);
+        uint32_t header_crc = val_crc32(handshake_response, VAL_WIRE_HEADER_SIZE);
+        header.header_crc = header_crc;
+        val_serialize_header(&header, handshake_response);
 
-        // Add trailer CRC
-        uint32_t trailer_crc = val_crc32(handshake_response, sizeof(val_packet_header_t) + sizeof(val_handshake_t));
-        uint32_t trailer_crc_le = val_htole32(trailer_crc);
-        memcpy(handshake_response + sizeof(val_packet_header_t) + sizeof(val_handshake_t), &trailer_crc_le, sizeof(uint32_t));
+        handshake_size = VAL_WIRE_HEADER_SIZE + VAL_WIRE_HANDSHAKE_SIZE + VAL_WIRE_TRAILER_SIZE;
+
+        uint32_t trailer_crc = val_crc32(handshake_response, VAL_WIRE_HEADER_SIZE + VAL_WIRE_HANDSHAKE_SIZE);
+        VAL_PUT_LE32(handshake_response + VAL_WIRE_HEADER_SIZE + VAL_WIRE_HANDSHAKE_SIZE, trailer_crc);
     }
 
     // Handle multi-part receive for handshake
@@ -72,7 +71,7 @@ static int mock_recv(void *ctx, void *buffer, size_t buffer_size, size_t *receiv
         {
             // First call: return header
             offset = 0;
-            size_t to_copy = (buffer_size < sizeof(val_packet_header_t)) ? buffer_size : sizeof(val_packet_header_t);
+            size_t to_copy = (buffer_size < VAL_WIRE_HEADER_SIZE) ? buffer_size : VAL_WIRE_HEADER_SIZE;
             memcpy(buffer, handshake_response + offset, to_copy);
             offset += to_copy;
             if (received)
@@ -82,7 +81,7 @@ static int mock_recv(void *ctx, void *buffer, size_t buffer_size, size_t *receiv
         else if (mock_recv_calls == 2)
         {
             // Second call: return payload
-            size_t to_copy = (buffer_size < sizeof(val_handshake_t)) ? buffer_size : sizeof(val_handshake_t);
+            size_t to_copy = (buffer_size < VAL_WIRE_HANDSHAKE_SIZE) ? buffer_size : VAL_WIRE_HANDSHAKE_SIZE;
             memcpy(buffer, handshake_response + offset, to_copy);
             offset += to_copy;
             if (received)
@@ -92,7 +91,7 @@ static int mock_recv(void *ctx, void *buffer, size_t buffer_size, size_t *receiv
         else if (mock_recv_calls == 3)
         {
             // Third call: return trailer
-            size_t to_copy = (buffer_size < sizeof(uint32_t)) ? buffer_size : sizeof(uint32_t);
+            size_t to_copy = (buffer_size < VAL_WIRE_TRAILER_SIZE) ? buffer_size : VAL_WIRE_TRAILER_SIZE;
             memcpy(buffer, handshake_response + offset, to_copy);
             offset += to_copy;
             if (received)

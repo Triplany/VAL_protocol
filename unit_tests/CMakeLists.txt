@@ -72,6 +72,15 @@ set_property(TEST ut_streaming_ack_cadence PROPERTY LABELS "quick")
 add_ctest_exe(ut_wire_audit core/test_wire_audit.c)
 set_property(TEST ut_wire_audit PROPERTY LABELS "quick")
 
+# Wire serialization roundtrip tests
+add_ctest_exe(ut_wire_roundtrip core/test_wire_roundtrip.c)
+set_property(TEST ut_wire_roundtrip PROPERTY LABELS "quick")
+
+# Big-endian simulation roundtrip (forces big-endian code path via define)
+add_ctest_exe(ut_wire_big_endian_sim core/test_wire_big_endian_sim.c)
+target_compile_definitions(ut_wire_big_endian_sim PRIVATE VAL_FORCE_BIG_ENDIAN=1)
+set_property(TEST ut_wire_big_endian_sim PROPERTY LABELS "quick")
+
 # Clock requirement behavior
 add_ctest_exe(ut_clock_requirement core/test_clock_requirement.c)
 set_property(TEST ut_clock_requirement PROPERTY LABELS "quick")

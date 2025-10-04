@@ -264,7 +264,7 @@ cfg.resume.crc_verify_bytes = 1024; // Small tail
 
 ```c
 // Maximize throughput: 64 KB MTU, full windowing
-cfg.buffers.packet_size = 65536;
+cfg.buffers.packet_size = (2*1024*1024); // 2 MB
 cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
 cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_32;
 cfg.adaptive_tx.allow_streaming = 1;
@@ -360,7 +360,7 @@ val_config_set_validator(&cfg, my_validator, NULL);
 **Session creation fails with VAL_ERR_INVALID_ARG**
 - Check that all required callbacks are set (transport.send, transport.recv, filesystem.*, system.get_ticks_ms)
 - Verify buffer pointers are non-NULL
-- Ensure packet_size is within [512, 65536] range
+- Ensure packet_size is within [512, 2*1024*1024] range
 
 **Timeouts during handshake**
 - Increase min_timeout_ms (try 500-1000 ms)

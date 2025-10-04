@@ -789,21 +789,16 @@ void val_session_destroy(val_session_t *session)
 }
 
 // Packet helpers
-static void fill_header(val_session_t *s, val_packet_header_t *h, val_packet_type_t type, uint32_t payload_len, uint64_t offset,
-                        uint32_t seq)
+static void fill_header(val_packet_header_t *h, val_packet_type_t type, uint32_t payload_len, uint64_t offset, uint32_t seq)
 {
     memset(h, 0, sizeof(*h));
     h->type = (uint8_t)type;
     h->wire_version = 0; // base/core protocol reserves this byte; always 0 for now
-    // On-wire is little-endian for multi-byte fields
-    h->payload_len = val_htole32(payload_len);
-    h->seq = val_htole32(seq);
-    h->offset = val_htole64(offset);
-    // header CRC of header without header_crc field
-    val_packet_header_t tmp = *h;
-    tmp.header_crc = 0;
-    uint32_t crc = val_internal_crc32(s, &tmp, sizeof(val_packet_header_t));
-    h->header_crc = val_htole32(crc);
+    h->reserved2 = 0;
+    h->payload_len = payload_len;
+    h->seq = seq;
+    h->offset = offset;
+    h->header_crc = 0;
 }
 
 int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len, uint64_t offset)
@@ -826,7 +821,7 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
         return VAL_ERR_IO;
     }
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size; // MTU
-    if (payload_len > (uint32_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t)))
+    if (payload_len > (uint32_t)(P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE))
     {
         // Payload does not fit into negotiated MTU
         val_internal_set_error_detailed(s, VAL_ERR_INVALID_ARG, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
@@ -839,20 +834,23 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
         return VAL_ERR_INVALID_ARG;
     }
     uint8_t *buf = (uint8_t *)s->config->buffers.send_buffer;
-    val_packet_header_t *hdr = (val_packet_header_t *)buf;
     uint32_t seq = s->seq_counter++;
-    fill_header(s, hdr, type, payload_len, offset, seq);
-    uint8_t *payload_dst = buf + sizeof(val_packet_header_t);
+    val_packet_header_t header;
+    fill_header(&header, type, payload_len, offset, seq);
+    val_serialize_header(&header, buf);
+    uint32_t header_crc = val_internal_crc32(s, buf, VAL_WIRE_HEADER_SIZE);
+    header.header_crc = header_crc;
+    val_serialize_header(&header, buf);
+    uint8_t *payload_dst = buf + VAL_WIRE_HEADER_SIZE;
     if (payload_len && payload)
     {
         memcpy(payload_dst, payload, payload_len);
     }
     // Trailer CRC over Header+Data
-    size_t used = sizeof(val_packet_header_t) + payload_len;
+    size_t used = VAL_WIRE_HEADER_SIZE + payload_len;
     uint32_t pkt_crc = val_internal_crc32(s, buf, used);
-    uint32_t pkt_crc_le = val_htole32(pkt_crc);
-    memcpy(buf + used, &pkt_crc_le, sizeof(pkt_crc_le));
-    size_t total_len = used + sizeof(uint32_t);
+    VAL_PUT_LE32(buf + used, pkt_crc);
+    size_t total_len = used + VAL_WIRE_TRAILER_SIZE;
     int rc = s->config->transport.send(s->config->transport.io_context, buf, total_len);
 #if defined(_WIN32)
     LeaveCriticalSection(&s->lock);
@@ -895,7 +893,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     uint8_t *buf = (uint8_t *)s->config->buffers.recv_buffer;
     size_t got = 0;
     // Read header first
-    int rc = s->config->transport.recv(s->config->transport.io_context, buf, sizeof(val_packet_header_t), &got, timeout_ms);
+    int rc = s->config->transport.recv(s->config->transport.io_context, buf, VAL_WIRE_HEADER_SIZE, &got, timeout_ms);
     if (rc < 0)
     {
         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
@@ -907,7 +905,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #endif
         return VAL_ERR_IO;
     }
-    if (got != sizeof(val_packet_header_t))
+    if (got != VAL_WIRE_HEADER_SIZE)
     {
         // Benign timeout while waiting for a header; record without emitting a CRITICAL numeric log
         val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
@@ -920,14 +918,18 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         val_metrics_inc_timeout(s);
         return VAL_ERR_TIMEOUT;
     }
-    // Validate header CRC using a zeroed copy of header_crc
-    val_packet_header_t hdr_copy;
-    memcpy(&hdr_copy, buf, sizeof(hdr_copy));
-    uint32_t header_crc_expected = val_letoh32(hdr_copy.header_crc);
-    hdr_copy.header_crc = 0;
-    uint32_t header_crc_calc = val_internal_crc32(s, &hdr_copy, sizeof(val_packet_header_t));
-    if (header_crc_calc != header_crc_expected)
+    uint8_t header_scratch[VAL_WIRE_HEADER_SIZE];
+    for (;;)
     {
+        memcpy(header_scratch, buf, VAL_WIRE_HEADER_SIZE);
+        uint32_t header_crc_expected = VAL_GET_LE32(buf + 20);
+        VAL_PUT_LE32(header_scratch + 20, 0u);
+        uint32_t header_crc_calc = val_internal_crc32(s, header_scratch, VAL_WIRE_HEADER_SIZE);
+        if (header_crc_calc == header_crc_expected)
+        {
+            break;
+        }
+
         // Header corruption detected. Increment metrics and attempt to resynchronize to the next valid header
         // boundary by sliding a 1-byte window until a plausible header CRC matches and basic sanity checks pass.
         VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_HEADER);
@@ -935,18 +937,16 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #if VAL_ENABLE_METRICS
         s->metrics.crc_errors++;
 #endif
-        // Keep a sliding window of header-sized bytes
-        uint8_t window[sizeof(val_packet_header_t)];
-        memcpy(window, buf, sizeof(window));
+        uint8_t window[VAL_WIRE_HEADER_SIZE];
+        memcpy(window, buf, VAL_WIRE_HEADER_SIZE);
         size_t bytes_scanned = 0;
         const size_t scan_limit = P; // don't scan more than one MTU worth of extra bytes
         for (;;)
         {
-            // Shift left by 1 and read one more byte
-            memmove(window, window + 1, sizeof(window) - 1);
+            memmove(window, window + 1, VAL_WIRE_HEADER_SIZE - 1);
             size_t gotb = 0;
-            int rc2 = s->config->transport.recv(s->config->transport.io_context, window + sizeof(window) - 1, 1, &gotb,
-                                                 timeout_ms);
+            int rc2 = s->config->transport.recv(s->config->transport.io_context, window + VAL_WIRE_HEADER_SIZE - 1, 1,
+                                                 &gotb, timeout_ms);
             if (rc2 < 0)
             {
                 VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
@@ -972,27 +972,25 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
                 return VAL_ERR_TIMEOUT;
             }
             bytes_scanned++;
-            // Check if window now contains a valid header
-            val_packet_header_t hc;
-            memcpy(&hc, window, sizeof(hc));
-            uint32_t exp = val_letoh32(hc.header_crc);
-            hc.header_crc = 0;
-            uint32_t calc = val_internal_crc32(s, &hc, sizeof(hc));
+
+            uint8_t tmp[VAL_WIRE_HEADER_SIZE];
+            memcpy(tmp, window, VAL_WIRE_HEADER_SIZE);
+            uint32_t exp = VAL_GET_LE32(window + 20);
+            VAL_PUT_LE32(tmp + 20, 0u);
+            uint32_t calc = val_internal_crc32(s, tmp, VAL_WIRE_HEADER_SIZE);
             if (calc == exp)
             {
-                // Basic sanity checks: reserved wire_version==0 and payload_len within MTU bounds
-                uint32_t pl = val_letoh32(((val_packet_header_t *)window)->payload_len);
-                uint8_t wire_ver = ((val_packet_header_t *)window)->wire_version;
-                if (wire_ver == 0 && pl <= (uint32_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t)))
+                val_packet_header_t candidate;
+                val_deserialize_header(window, &candidate);
+                if (candidate.wire_version == 0 &&
+                    candidate.payload_len <= (uint32_t)(P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE))
                 {
-                    // Found a plausible header boundary. Copy into recv buffer and continue as normal.
-                    memcpy(buf, window, sizeof(window));
+                    memcpy(buf, window, VAL_WIRE_HEADER_SIZE);
                     break;
                 }
             }
             if (bytes_scanned > scan_limit)
             {
-                // Give up on resync; surface CRC error to caller
                 VAL_LOG_ERROR(s, "recv_packet: resync failed after scanning limit");
 #if defined(_WIN32)
                 LeaveCriticalSection(&s->lock);
@@ -1002,11 +1000,11 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
                 return VAL_ERR_CRC;
             }
         }
-        // Fallthrough with buf containing a valid header
+        // Loop re-validates the new header in buf
     }
-    val_packet_header_t *hdr = (val_packet_header_t *)buf; // original header bytes remain for trailer CRC
-    // Verify wire_version is zero (reserved for future use)
-    if (hdr->wire_version != 0)
+    val_packet_header_t header;
+    val_deserialize_header(buf, &header);
+    if (header.wire_version != 0)
     {
         val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION_MAJOR);
 #if defined(_WIN32)
@@ -1016,9 +1014,9 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #endif
         return VAL_ERR_INCOMPATIBLE_VERSION;
     }
-    uint32_t payload_len = val_letoh32(hdr->payload_len);
-    // Enforce bounds vs MTU (header + payload + trailer <= P)
-    if (payload_len > (uint32_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t)))
+
+    uint32_t payload_len = header.payload_len;
+    if (payload_len > (uint32_t)(P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE))
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
         VAL_LOG_ERROR(s, "recv_packet: payload_len exceeds MTU");
@@ -1029,11 +1027,11 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #endif
         return VAL_ERR_PROTOCOL;
     }
-    // Read payload
+
     if (payload_len > 0)
     {
         size_t got2 = 0;
-        rc = s->config->transport.recv(s->config->transport.io_context, buf + sizeof(val_packet_header_t), payload_len, &got2,
+        rc = s->config->transport.recv(s->config->transport.io_context, buf + VAL_WIRE_HEADER_SIZE, payload_len, &got2,
                                        timeout_ms);
         if (rc < 0)
         {
@@ -1048,7 +1046,6 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         }
         if (got2 != payload_len)
         {
-            // Payload read timeout — record without CRITICAL numeric log
             val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
             VAL_LOG_DEBUG(s, "recv_packet: payload timeout");
 #if defined(_WIN32)
@@ -1060,10 +1057,11 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
             return VAL_ERR_TIMEOUT;
         }
     }
-    // Read trailer CRC
-    uint32_t trailer_crc = 0;
+
+    uint8_t trailer_bytes[VAL_WIRE_TRAILER_SIZE];
     size_t got3 = 0;
-    rc = s->config->transport.recv(s->config->transport.io_context, &trailer_crc, sizeof(trailer_crc), &got3, timeout_ms);
+    rc = s->config->transport.recv(s->config->transport.io_context, trailer_bytes, VAL_WIRE_TRAILER_SIZE, &got3,
+                                   timeout_ms);
     if (rc < 0)
     {
         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
@@ -1075,9 +1073,8 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #endif
         return VAL_ERR_IO;
     }
-    if (got3 != sizeof(trailer_crc))
+    if (got3 != VAL_WIRE_TRAILER_SIZE)
     {
-        // Trailer read timeout — record without CRITICAL numeric log
         val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
         VAL_LOG_DEBUG(s, "recv_packet: trailer timeout");
 #if defined(_WIN32)
@@ -1088,9 +1085,10 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         val_metrics_inc_timeout(s);
         return VAL_ERR_TIMEOUT;
     }
-    // Verify trailer CRC over header+payload
-    uint32_t calc_crc = val_internal_crc32(s, buf, sizeof(val_packet_header_t) + payload_len);
-    if (val_letoh32(trailer_crc) != calc_crc)
+
+    uint32_t trailer_crc = VAL_GET_LE32(trailer_bytes);
+    uint32_t calc_crc = val_internal_crc32(s, buf, VAL_WIRE_HEADER_SIZE + payload_len);
+    if (trailer_crc != calc_crc)
     {
         VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_TRAILER);
         VAL_LOG_ERROR(s, "recv_packet: trailer CRC mismatch");
@@ -1104,20 +1102,21 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #endif
         return VAL_ERR_CRC;
     }
-    // Capture the raw type byte before releasing the lock to ensure stable accounting
-    uint8_t type_byte = hdr->type;
+
+    uint8_t type_byte = header.type;
     if (type)
         *type = (val_packet_type_t)type_byte;
     if (offset_out)
-        *offset_out = val_letoh64(hdr->offset);
+        *offset_out = header.offset;
     if (payload_len_out)
         *payload_len_out = payload_len;
-    // If a CANCEL control packet was received, record it in session state so callers can observe it
-    if (hdr->type == (uint8_t)VAL_PKT_CANCEL)
+
+    if (header.type == (uint8_t)VAL_PKT_CANCEL)
     {
         val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
         VAL_LOG_WARN(s, "recv_packet: observed CANCEL on wire");
     }
+
     if (payload_out && payload_cap)
     {
         if (payload_len > payload_cap)
@@ -1130,15 +1129,16 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #endif
             return VAL_ERR_INVALID_ARG;
         }
-        memcpy(payload_out, buf + sizeof(val_packet_header_t), payload_len);
+        memcpy(payload_out, buf + VAL_WIRE_HEADER_SIZE, payload_len);
     }
+
 #if defined(_WIN32)
     LeaveCriticalSection(&s->lock);
 #else
     pthread_mutex_unlock(&s->lock);
 #endif
-    // Metrics: count one packet and total bytes received for this packet (hdr+payload+trailer)
-    val_metrics_add_recv(s, (size_t)(sizeof(val_packet_header_t) + payload_len + sizeof(uint32_t)), type_byte);
+
+    val_metrics_add_recv(s, (size_t)(VAL_WIRE_HEADER_SIZE + payload_len + VAL_WIRE_TRAILER_SIZE), type_byte);
 #if VAL_ENABLE_WIRE_AUDIT
     if ((unsigned)type_byte < 16u)
     {
@@ -1319,22 +1319,17 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     hello.required_features16 = 0;
     hello.requested_features16 = 0;
     hello.reserved2 = 0;
-    // Send LE-encoded hello
-    val_handshake_t hello_le = hello;
-    hello_le.magic = val_htole32(hello_le.magic);
-    hello_le.packet_size = val_htole32(hello_le.packet_size);
-    hello_le.features = val_htole32(hello_le.features);
-    hello_le.required = val_htole32(hello_le.required);
-    hello_le.requested = val_htole32(hello_le.requested);
-    hello_le.mode_sync_interval = val_htole16(hello_le.mode_sync_interval);
+    uint8_t hello_wire[VAL_WIRE_HANDSHAKE_SIZE];
+    val_serialize_handshake(&hello, hello_wire);
     VAL_LOG_TRACE(s, "handshake(sender): sending HELLO");
-    val_status_t st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
+    val_status_t st = val_internal_send_packet(s, VAL_PKT_HELLO, hello_wire, VAL_WIRE_HANDSHAKE_SIZE, 0);
     if (st != VAL_OK)
         return st;
     uint32_t len = 0;
     uint64_t off = 0;
     val_packet_type_t t = 0;
-    val_handshake_t peer;
+    uint8_t peer_wire[VAL_WIRE_HANDSHAKE_SIZE];
+    val_handshake_t peer_h;
     uint32_t to = val_internal_get_timeout(s, VAL_OP_HANDSHAKE);
     uint8_t tries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
@@ -1346,7 +1341,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
             return health;
             
         VAL_LOG_TRACEF(s, "handshake(sender): waiting for HELLO (to=%u ms, tries=%u)", (unsigned)to, (unsigned)tries);
-        st = val_internal_recv_packet(s, &t, &peer, sizeof(peer), &len, &off, to);
+        st = val_internal_recv_packet(s, &t, peer_wire, VAL_WIRE_HANDSHAKE_SIZE, &len, &off, to);
         if (st == VAL_OK)
             break;
         if (st != VAL_ERR_TIMEOUT || tries == 0)
@@ -1359,7 +1354,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
             return st;
         }
         // Retransmit HELLO and backoff
-        val_status_t rs = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le, sizeof(hello_le), 0);
+    val_status_t rs = val_internal_send_packet(s, VAL_PKT_HELLO, hello_wire, VAL_WIRE_HANDSHAKE_SIZE, 0);
         if (rs != VAL_OK)
             return rs;
         VAL_HEALTH_RECORD_RETRY(s);
@@ -1371,19 +1366,12 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
         --tries;
     }
     VAL_LOG_TRACEF(s, "handshake(sender): got pkt t=%u len=%u", (unsigned)t, (unsigned)len);
-    if (t != VAL_PKT_HELLO || len < sizeof(val_handshake_t))
+    if (t != VAL_PKT_HELLO || len < VAL_WIRE_HANDSHAKE_SIZE)
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
     }
-    // Convert from LE to host
-    val_handshake_t peer_h = peer;
-    peer_h.magic = val_letoh32(peer_h.magic);
-    peer_h.packet_size = val_letoh32(peer_h.packet_size);
-    peer_h.features = val_letoh32(peer_h.features);
-    peer_h.required = val_letoh32(peer_h.required);
-    peer_h.requested = val_letoh32(peer_h.requested);
-    peer_h.mode_sync_interval = val_letoh16(peer_h.mode_sync_interval);
+    val_deserialize_handshake(peer_wire, &peer_h);
     if (peer_h.magic != VAL_MAGIC)
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
@@ -1449,7 +1437,6 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     s->peer_tx_mode = s->current_tx_mode;
     // features compatibility: ensure required features supported. For now, just note the peer features; could gate behavior
     // later.
-    (void)peer;
     return VAL_OK;
 }
 
@@ -1464,7 +1451,8 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     uint32_t len = 0;
     uint64_t off = 0;
     val_packet_type_t t = 0;
-    val_handshake_t peer;
+    uint8_t peer_wire[VAL_WIRE_HANDSHAKE_SIZE];
+    val_handshake_t peer_h;
     uint32_t to = val_internal_get_timeout(s, VAL_OP_HANDSHAKE);
     uint8_t tries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
@@ -1476,7 +1464,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
         if (health != VAL_OK)
             return health;
             
-        st = val_internal_recv_packet(s, &t, &peer, sizeof(peer), &len, &off, to);
+        st = val_internal_recv_packet(s, &t, peer_wire, VAL_WIRE_HANDSHAKE_SIZE, &len, &off, to);
         if (st == VAL_OK)
             break;
         if (st != VAL_ERR_TIMEOUT || tries == 0)
@@ -1495,18 +1483,12 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
             backoff <<= 1;
         --tries;
     }
-    if (t != VAL_PKT_HELLO || len < sizeof(val_handshake_t))
+    if (t != VAL_PKT_HELLO || len < VAL_WIRE_HANDSHAKE_SIZE)
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
     }
-    // Convert from LE to host
-    val_handshake_t peer_h = peer;
-    peer_h.magic = val_letoh32(peer_h.magic);
-    peer_h.packet_size = val_letoh32(peer_h.packet_size);
-    peer_h.features = val_letoh32(peer_h.features);
-    peer_h.required = val_letoh32(peer_h.required);
-    peer_h.requested = val_letoh32(peer_h.requested);
+    val_deserialize_handshake(peer_wire, &peer_h);
     if (peer_h.magic != VAL_MAGIC)
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
@@ -1568,16 +1550,10 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
         (void)val_internal_send_error(s, VAL_ERR_FEATURE_NEGOTIATION, VAL_SET_MISSING_FEATURE(missing_local));
         return VAL_ERR_FEATURE_NEGOTIATION;
     }
-    // Send LE-encoded hello back
-    val_handshake_t hello_le2 = hello;
-    hello_le2.magic = val_htole32(hello_le2.magic);
-    hello_le2.packet_size = val_htole32(hello_le2.packet_size);
-    hello_le2.features = val_htole32(hello_le2.features);
-    hello_le2.required = val_htole32(hello_le2.required);
-    hello_le2.requested = val_htole32(hello_le2.requested);
-    hello_le2.mode_sync_interval = val_htole16(hello_le2.mode_sync_interval);
+    uint8_t hello_wire[VAL_WIRE_HANDSHAKE_SIZE];
+    val_serialize_handshake(&hello, hello_wire);
     VAL_LOG_TRACE(s, "handshake(receiver): sending HELLO response");
-    st = val_internal_send_packet(s, VAL_PKT_HELLO, &hello_le2, sizeof(hello_le2), 0);
+    st = val_internal_send_packet(s, VAL_PKT_HELLO, hello_wire, VAL_WIRE_HANDSHAKE_SIZE, 0);
     if (st == VAL_OK)
     {
         s->handshake_done = 1;
@@ -1619,13 +1595,12 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
 
 val_status_t val_internal_send_error(val_session_t *s, val_status_t code, uint32_t detail)
 {
-    val_error_payload_t p;
-    memset(&p, 0, sizeof(p));
-    // Encode payload in LE
-    uint32_t code_bits = (uint32_t)((int32_t)code);
-    p.code = (int32_t)val_htole32(code_bits);
-    p.detail = val_htole32(detail);
-    return val_internal_send_packet(s, VAL_PKT_ERROR, &p, sizeof(p), 0);
+    val_error_payload_t payload;
+    payload.code = (int32_t)code;
+    payload.detail = detail;
+    uint8_t wire[VAL_WIRE_ERROR_PAYLOAD_SIZE];
+    val_serialize_error_payload(&payload, wire);
+    return val_internal_send_packet(s, VAL_PKT_ERROR, wire, VAL_WIRE_ERROR_PAYLOAD_SIZE, 0);
 }
 
 // Adaptive transmission mode management
@@ -1684,7 +1659,9 @@ void val_internal_record_transmission_error(val_session_t *s)
     ms.consecutive_errors = s->consecutive_errors;
     ms.consecutive_success = s->consecutive_successes;
     ms.flags = s->streaming_engaged ? 1u : 0u;
-    (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, &ms, sizeof(ms), 0);
+    uint8_t ms_wire[VAL_WIRE_MODE_SYNC_SIZE];
+    val_serialize_mode_sync(&ms, ms_wire);
+    (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, ms_wire, VAL_WIRE_MODE_SYNC_SIZE, 0);
         s->consecutive_errors = 0; // reset after mode change
         s->packets_since_mode_change = 0;
 
@@ -1728,7 +1705,9 @@ void val_internal_record_transmission_success(val_session_t *s)
             ms.consecutive_errors = s->consecutive_errors;
             ms.consecutive_success = s->consecutive_successes;
             ms.flags = s->streaming_engaged ? 1u : 0u;
-            (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, &ms, sizeof(ms), 0);
+            uint8_t ms_wire[VAL_WIRE_MODE_SYNC_SIZE];
+            val_serialize_mode_sync(&ms, ms_wire);
+            (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, ms_wire, VAL_WIRE_MODE_SYNC_SIZE, 0);
             s->consecutive_successes = 0; // reset after mode change
             s->packets_since_mode_change = 0;
 
@@ -1759,7 +1738,9 @@ void val_internal_record_transmission_success(val_session_t *s)
                 ms2.consecutive_errors = s->consecutive_errors;
                 ms2.consecutive_success = s->consecutive_successes;
                 ms2.flags = 1u; // streaming engaged
-                (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, &ms2, sizeof(ms2), 0);
+                uint8_t ms_wire2[VAL_WIRE_MODE_SYNC_SIZE];
+                val_serialize_mode_sync(&ms2, ms_wire2);
+                (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, ms_wire2, VAL_WIRE_MODE_SYNC_SIZE, 0);
                 VAL_LOG_INFO(s, "adaptive: engaging streaming pacing at max window rung");
                 s->consecutive_successes = 0; // reset after escalation
             }

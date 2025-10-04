@@ -33,6 +33,7 @@ extern "C"
 {
 #endif
 
+#include "val_byte_order.h"
 #include "val_errors.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -42,7 +43,7 @@ extern "C"
 #define VAL_VERSION_MAJOR 0u
 #define VAL_VERSION_MINOR 7u
 #define VAL_MIN_PACKET_SIZE 512u
-#define VAL_MAX_PACKET_SIZE 65536u
+#define VAL_MAX_PACKET_SIZE (2u * 1024u * 1024u) // 2MB
 #define VAL_MAX_FILENAME 127u
 #define VAL_MAX_PATH 127u
 // Emergency cancel (ASCII CAN)
@@ -78,7 +79,7 @@ extern "C"
         VAL_ACK_FLAG_EOF       = 1u << 1,
     } val_ack_flags_t;
     // Metadata payload shared with application callbacks (public)
-    typedef struct
+    struct val_meta_payload_t
     {
         // Sanitized basename only (no directories). Sender strips paths and cleans unsafe chars.
         char filename[VAL_MAX_FILENAME + 1];
@@ -87,7 +88,9 @@ extern "C"
         char sender_path[VAL_MAX_PATH + 1];
         uint64_t file_size;
         uint32_t file_crc32; // whole-file CRC for integrity verification
-    } val_meta_payload_t;
+    };
+
+    typedef struct val_meta_payload_t val_meta_payload_t;
 
     // Enhanced progress information for professional UX
     typedef struct

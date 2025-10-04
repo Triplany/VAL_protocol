@@ -7,11 +7,13 @@ static val_status_t send_resume_response(val_session_t *s, val_resume_action_t a
                                          uint64_t verify_len)
 {
     val_resume_resp_t resp;
-    resp.action = val_htole32((uint32_t)action);
-    resp.resume_offset = val_htole64(offset);
-    resp.verify_crc = val_htole32(crc);
-    resp.verify_len = val_htole64(verify_len);
-    return val_internal_send_packet(s, VAL_PKT_RESUME_RESP, &resp, sizeof(resp), offset);
+    resp.action = (uint32_t)action;
+    resp.resume_offset = offset;
+    resp.verify_crc = crc;
+    resp.verify_len = verify_len;
+    uint8_t resp_wire[VAL_WIRE_RESUME_RESP_SIZE];
+    val_serialize_resume_resp(&resp, resp_wire);
+    return val_internal_send_packet(s, VAL_PKT_RESUME_RESP, resp_wire, VAL_WIRE_RESUME_RESP_SIZE, offset);
 }
 
 // --- Metadata validation helpers ---
@@ -129,20 +131,14 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     VAL_LOG_INFO(s, "verify: type ok");
     VAL_LOG_DEBUG(s, "verify: len check");
     VAL_LOG_DEBUG(s, "verify: len ok");
-    if (len < sizeof(val_resume_resp_t))
+    if (len < VAL_WIRE_RESUME_RESP_SIZE)
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
         return VAL_ERR_PROTOCOL;
     }
     VAL_LOG_DEBUGF(s, "verify: extracting crc from payload len=%u", (unsigned)len);
-    // Payload is a val_resume_resp_t encoded in LE; decode to read verify_crc robustly
-    val_resume_resp_t vr_le;
-    memcpy(&vr_le, buf, sizeof(vr_le));
     val_resume_resp_t vr;
-    vr.action = val_letoh32(vr_le.action);
-    vr.resume_offset = val_letoh64(vr_le.resume_offset);
-    vr.verify_crc = val_letoh32(vr_le.verify_crc);
-    vr.verify_len = val_letoh64(vr_le.verify_len);
+    val_deserialize_resume_resp(buf, &vr);
     uint32_t their_verify_crc = vr.verify_crc;
     // Optional sanity logs to help diagnose mismatches
     VAL_LOG_DEBUGF(s, "verify: expected off=%llu len=%llu, got off=%llu len=%llu", (unsigned long long)resume_offset_expected,
@@ -169,11 +165,11 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
             result = VAL_ERR_RESUME_VERIFY;
         }
     }
-    // Encode status as LE int32
-    int32_t result_le = (int32_t)val_htole32((uint32_t)result);
+    uint8_t status_wire[sizeof(uint32_t)];
+    VAL_PUT_LE32(status_wire, (uint32_t)result);
     VAL_LOG_DEBUG(s, "verify: before sending");
     VAL_LOG_DEBUG(s, "verify: sending status to sender");
-    val_status_t send_st = val_internal_send_packet(s, VAL_PKT_VERIFY, &result_le, sizeof(result_le), 0);
+    val_status_t send_st = val_internal_send_packet(s, VAL_PKT_VERIFY, status_wire, sizeof(status_wire), 0);
     VAL_LOG_DEBUG(s, "verify: send_st");
     VAL_LOG_DEBUG(s, "verify: sent response to sender");
     if (send_st != VAL_OK)
@@ -517,10 +513,10 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     // While waiting for SEND_META, tolerate and process benign control packets like MODE_SYNC.
                     if (t == VAL_PKT_MODE_SYNC)
                     {
-                        if (len >= sizeof(val_mode_sync_t))
+                        if (len >= VAL_WIRE_MODE_SYNC_SIZE)
                         {
                             val_mode_sync_t ms;
-                            memcpy(&ms, tmp, sizeof(ms));
+                            val_deserialize_mode_sync(tmp, &ms);
                             s->peer_tx_mode = (val_tx_mode_t)ms.current_mode;
                             s->peer_streaming_engaged = (ms.flags & 1u) ? 1 : 0;
                             // Best-effort ACK so peer can track health
@@ -529,7 +525,9 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                             ack.ack_sequence = ms.sequence;
                             ack.agreed_mode = ms.current_mode;
                             ack.receiver_errors = s->consecutive_errors;
-                            (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC_ACK, &ack, sizeof(ack), 0);
+                            uint8_t ack_wire[VAL_WIRE_MODE_SYNC_ACK_SIZE];
+                            val_serialize_mode_sync_ack(&ack, ack_wire);
+                            (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC_ACK, ack_wire, VAL_WIRE_MODE_SYNC_ACK_SIZE, 0);
                         }
                         // Keep waiting for metadata/EOT/CANCEL
                         continue;
@@ -571,16 +569,13 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             fflush(stdout);
             return VAL_ERR_ABORTED;
         }
-        if (t != VAL_PKT_SEND_META || len < sizeof(val_meta_payload_t))
+        if (t != VAL_PKT_SEND_META || len < VAL_WIRE_META_SIZE)
         {
             VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
             return VAL_ERR_PROTOCOL;
         }
         val_meta_payload_t meta;
-        memcpy(&meta, tmp, sizeof(meta));
-        // Convert numeric fields from LE
-        meta.file_size = val_letoh64(meta.file_size);
-        meta.file_crc32 = val_letoh32(meta.file_crc32);
+        val_deserialize_meta(tmp, &meta);
         VAL_LOG_INFO(s, "recv: received SEND_META");
 
         // Determine output path (receiver controls)
@@ -898,10 +893,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                                    (unsigned long long)written);
                     uint32_t reason = 0x1u; // GAP
                     uint8_t payload[8 + 4];
-                    uint64_t offle = val_htole64((uint64_t)written);
-                    memcpy(payload, &offle, 8);
-                    uint32_t rle = val_htole32(reason);
-                    memcpy(payload + 8, &rle, 4);
+                    VAL_PUT_LE64(payload, (uint64_t)written);
+                    VAL_PUT_LE32(payload + 8, reason);
                     (void)val_internal_send_packet(s, VAL_PKT_DATA_NAK, payload, sizeof(payload), 0);
                     // Also send an ACK at our current high-water to help the sender resync
                     (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
@@ -1014,10 +1007,10 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             else if (t == VAL_PKT_MODE_SYNC)
             {
                 // Peer informs us of its current TX mode; update and ACK
-                if (len >= sizeof(val_mode_sync_t))
+                if (len >= VAL_WIRE_MODE_SYNC_SIZE)
                 {
                     val_mode_sync_t ms;
-                    memcpy(&ms, tmp, sizeof(ms));
+                    val_deserialize_mode_sync(tmp, &ms);
                     // current_mode field is native enum value in payload
                     s->peer_tx_mode = (val_tx_mode_t)ms.current_mode;
                     // bit0 indicates peer engaged streaming
@@ -1058,7 +1051,9 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     ack.ack_sequence = ms.sequence;
                     ack.agreed_mode = ms.current_mode;
                     ack.receiver_errors = s->consecutive_errors;
-                    (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC_ACK, &ack, sizeof(ack), 0);
+                    uint8_t ack_wire[VAL_WIRE_MODE_SYNC_ACK_SIZE];
+                    val_serialize_mode_sync_ack(&ack, ack_wire);
+                    (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC_ACK, ack_wire, VAL_WIRE_MODE_SYNC_ACK_SIZE, 0);
                 }
                 // Continue receiving data
                 continue;

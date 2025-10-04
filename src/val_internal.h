@@ -3,6 +3,7 @@
 
 #include "val_errors.h"
 #include "val_protocol.h"
+#include "val_wire.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -85,37 +86,6 @@ typedef enum
     VAL_RESUME_ACTION_SKIP_FILE = 3,
     VAL_RESUME_ACTION_ABORT_FILE = 4,
 } val_resume_action_t;
-
-#pragma pack(push, 1)
-typedef struct
-{
-    uint8_t type; // val_packet_type_t
-    // Reserved wire version byte for future on-wire framing changes. Always 0 in base protocol.
-    uint8_t wire_version;
-    uint16_t reserved2;
-    uint32_t payload_len; // bytes valid in payload
-    uint32_t seq;         // monotonically increasing per file
-    uint64_t offset;      // for data/resume; for DATA_ACK this is the next expected offset (cumulative ACK)
-    uint32_t header_crc;  // crc of header without header_crc and trailer crc
-} val_packet_header_t;    // header is followed by payload, zero pad, then trailer crc32 (full packet)
-#pragma pack(pop)
-
-// Error packet payload (compact: no message strings on wire)
-typedef struct
-{
-    int32_t code;    // val_status_t-compatible negative code
-    uint32_t detail; // optional extra information (mask or extra code)
-} val_error_payload_t;
-
-// Shared payload structs are declared publicly in val_protocol.h
-
-typedef struct
-{
-    uint32_t action; // val_resume_action_t
-    uint64_t resume_offset;
-    uint32_t verify_crc;
-    uint64_t verify_len; // 64-bit per design prompt
-} val_resume_resp_t;
 
 // Minimal session struct
 // Adaptive timing state (RFC 6298-inspired)
@@ -286,89 +256,7 @@ static inline val_tx_mode_t val_tx_mode_from_window(uint32_t window)
 }
 
 // Mode synchronization payloads
-typedef struct
-{
-    uint32_t current_mode;        // val_tx_mode_t
-    uint32_t sequence;            // sync sequence
-    uint32_t consecutive_errors;  // recent error count
-    uint32_t consecutive_success; // recent success count
-    uint32_t flags;               // bit0: streaming_engaged (sender side)
-} val_mode_sync_t;
-
-typedef struct
-{
-    uint32_t ack_sequence;    // sequence from sync
-    uint32_t agreed_mode;     // agreed val_tx_mode_t
-    uint32_t receiver_errors; // receiver view of errors
-} val_mode_sync_ack_t;
-
-// Extended handshake payload with adaptive fields
-typedef struct
-{
-    uint32_t magic;        // VAL_MAGIC
-    uint8_t version_major; // protocol version
-    uint8_t version_minor; // protocol version
-    uint16_t reserved;     // keep alignment
-    uint32_t packet_size;  // MTU
-    uint32_t features;     // optional features (negotiable)
-    uint32_t required;     // optional features required by peer
-    uint32_t requested;    // optional features requested by peer
-    // Adaptive TX negotiation
-    uint8_t max_performance_mode;   // window rung cap (val_tx_mode_t)
-    uint8_t preferred_initial_mode; // initial window rung (val_tx_mode_t)
-    uint16_t mode_sync_interval;    // reserved
-    uint8_t streaming_flags;        // bit0: tx_stream_capable, bit1: rx_stream_accept, other bits 0
-    uint8_t reserved_streaming[3];  // pad to 4-byte boundary
-    uint16_t supported_features16;  // reserved 16-bit future
-    uint16_t required_features16;   // reserved 16-bit future
-    uint16_t requested_features16;  // reserved 16-bit future
-    uint32_t reserved2;
-} val_handshake_t;
-
-// Endianness helpers: on-wire is Little Endian. Convert to/from host as needed.
-static inline int val_is_little_endian(void)
-{
-    const uint16_t x = 0x0102u;
-    return (*((const uint8_t *)&x) == 0x02u);
-}
-
-static inline uint16_t val_bswap16(uint16_t v)
-{
-    return (uint16_t)((v >> 8) | (v << 8));
-}
-static inline uint32_t val_bswap32(uint32_t v)
-{
-    return ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) | ((v & 0x00FF0000u) >> 8) | ((v & 0xFF000000u) >> 24);
-}
-static inline uint64_t val_bswap64(uint64_t v)
-{
-    return ((uint64_t)val_bswap32((uint32_t)(v & 0xFFFFFFFFu)) << 32) | (uint64_t)val_bswap32((uint32_t)(v >> 32));
-}
-
-static inline uint16_t val_htole16(uint16_t v)
-{
-    return val_is_little_endian() ? v : val_bswap16(v);
-}
-static inline uint32_t val_htole32(uint32_t v)
-{
-    return val_is_little_endian() ? v : val_bswap32(v);
-}
-static inline uint64_t val_htole64(uint64_t v)
-{
-    return val_is_little_endian() ? v : val_bswap64(v);
-}
-static inline uint16_t val_letoh16(uint16_t v)
-{
-    return val_is_little_endian() ? v : val_bswap16(v);
-}
-static inline uint32_t val_letoh32(uint32_t v)
-{
-    return val_is_little_endian() ? v : val_bswap32(v);
-}
-static inline uint64_t val_letoh64(uint64_t v)
-{
-    return val_is_little_endian() ? v : val_bswap64(v);
-}
+// Extended handshake payload with adaptive fields declared in val_wire.h
 
 // Internal locking helpers (recursive on POSIX via mutex attr; CRITICAL_SECTION is recursive on Windows)
 static inline void val_internal_lock(val_session_t *s)

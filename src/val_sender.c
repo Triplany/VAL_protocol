@@ -71,9 +71,11 @@ static val_status_t send_metadata(val_session_t *s, const char *sender_path, uin
     {
         meta.sender_path[0] = '\0';
     }
-    meta.file_size = val_htole64(file_size);
-    meta.file_crc32 = val_htole32(file_crc);
-    return val_internal_send_packet(s, VAL_PKT_SEND_META, &meta, sizeof(meta), 0);
+    meta.file_size = file_size;
+    meta.file_crc32 = file_crc;
+    uint8_t meta_wire[VAL_WIRE_META_SIZE];
+    val_serialize_meta(&meta, meta_wire);
+    return val_internal_send_packet(s, VAL_PKT_SEND_META, meta_wire, VAL_WIRE_META_SIZE, 0);
 }
 static val_status_t compute_crc_region(val_session_t *s, const char *filepath, uint64_t end_offset, uint64_t length,
                                        uint32_t *out_crc)
@@ -249,12 +251,8 @@ static int handle_nak_retransmit(val_session_t *s, void *file_handle, uint64_t f
 
     if (payload && payload_len >= 12)
     {
-        uint64_t nak_next = 0;
-        uint32_t reason = 0;
-        memcpy(&nak_next, payload, 8);
-        memcpy(&reason, payload + 8, 4);
-        nak_next = val_letoh64(nak_next);
-        reason = val_letoh32(reason);
+    uint64_t nak_next = VAL_GET_LE64(payload);
+    uint32_t reason = VAL_GET_LE32(payload + 8);
         VAL_LOG_DEBUGF(s, "data(win): got DATA_NAK next=%llu reason=0x%08X (last_acked=%llu next_to_send=%llu)",
                        (unsigned long long)nak_next, (unsigned)reason, (unsigned long long)(*last_acked),
                        (unsigned long long)(*next_to_send));
@@ -584,20 +582,14 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                 continue;
             }
 
-            if (len < sizeof(val_resume_resp_t))
+            if (len < VAL_WIRE_RESUME_RESP_SIZE)
             {
                 VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
                 return VAL_ERR_PROTOCOL;
             }
 
-            // Decode LE payload
-            val_resume_resp_t rr_le;
-            memcpy(&rr_le, buf, sizeof(rr_le));
             val_resume_resp_t rr;
-            rr.action = val_letoh32(rr_le.action);
-            rr.resume_offset = val_letoh64(rr_le.resume_offset);
-            rr.verify_crc = val_letoh32(rr_le.verify_crc);
-            rr.verify_len = val_letoh64(rr_le.verify_len);
+            val_deserialize_resume_resp(buf, &rr);
 
             uint32_t action = rr.action;
             if (action == VAL_RESUME_ACTION_SKIP_FILE)
@@ -630,11 +622,13 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                     return cst;
                 // Reply with VERIFY containing our CRC; reuse val_resume_resp_t payload format (receiver parses verify_crc)
                 val_resume_resp_t v;
-                v.action = val_htole32(0);
-                v.resume_offset = val_htole64(end_off);
-                v.verify_crc = val_htole32(my_crc);
-                v.verify_len = val_htole64(vlen);
-                st = val_internal_send_packet(s, VAL_PKT_VERIFY, &v, sizeof(v), 0);
+                v.action = 0;
+                v.resume_offset = end_off;
+                v.verify_crc = my_crc;
+                v.verify_len = vlen;
+                uint8_t verify_wire[VAL_WIRE_RESUME_RESP_SIZE];
+                val_serialize_resume_resp(&v, verify_wire);
+                st = val_internal_send_packet(s, VAL_PKT_VERIFY, verify_wire, VAL_WIRE_RESUME_RESP_SIZE, 0);
                 if (st != VAL_OK)
                     return st;
 
@@ -661,9 +655,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                         }
                         if (l2 < sizeof(int32_t))
                             return VAL_ERR_PROTOCOL;
-                        int32_t status_le = 0;
-                        memcpy(&status_le, pay, sizeof(int32_t));
-                        int32_t status = (int32_t)val_letoh32((uint32_t)status_le);
+                        int32_t status = (int32_t)VAL_GET_LE32(pay);
                         if (status == VAL_OK)
                         {
                             *resume_offset_out = end_off;
@@ -810,14 +802,14 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
     }
     // Prepare windowed send
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size;
-    if (P <= (sizeof(val_packet_header_t) + sizeof(uint32_t)))
+    if (P <= (VAL_WIRE_HEADER_SIZE + VAL_WIRE_TRAILER_SIZE))
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
         return VAL_ERR_INVALID_ARG;
     }
     uint8_t *send_buf_bytes = (uint8_t *)s->config->buffers.send_buffer;
-    uint8_t *payload_area = send_buf_bytes ? (send_buf_bytes + sizeof(val_packet_header_t)) : NULL;
-    size_t max_payload = (size_t)(P - sizeof(val_packet_header_t) - sizeof(uint32_t));
+    uint8_t *payload_area = send_buf_bytes ? (send_buf_bytes + VAL_WIRE_HEADER_SIZE) : NULL;
+    size_t max_payload = (size_t)(P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE);
     uint64_t last_acked = resume_off;
     uint64_t next_to_send = resume_off;
     uint32_t inflight = 0;
