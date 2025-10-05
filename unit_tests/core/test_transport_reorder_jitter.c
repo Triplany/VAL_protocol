@@ -68,10 +68,7 @@ int main(void)
     if (val_session_create(&cfg_tx, &tx, NULL) != VAL_OK || val_session_create(&cfg_rx, &rx, NULL) != VAL_OK)
         return 3;
     // Reset audit counters if compiled in
-#if VAL_ENABLE_WIRE_AUDIT
-    (void)val_reset_wire_audit(tx);
-    (void)val_reset_wire_audit(rx);
-#endif
+    // Wire audit removed
     ts_cancel_token_t guard = ts_start_timeout_guard(15000, "ut_transport_reorder_jitter");
     ts_thread_t th = ts_start_receiver(rx, outdir);
     ts_receiver_warmup(&cfg_tx, 80);

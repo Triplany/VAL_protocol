@@ -113,7 +113,7 @@ unit_tests/CMakeLists.txt   # Test configuration
 ```cmake
 VAL_ENABLE_ERROR_STRINGS=ON   # Build error string utilities (default: ON)
 VAL_ENABLE_METRICS=OFF        # Enable metrics collection (default: OFF)
-VAL_ENABLE_WIRE_AUDIT=OFF     # Enable wire audit (default: OFF)
+# Wire audit removed. Use the runtime packet capture hook via config.capture.on_packet.
 VAL_LOG_LEVEL=4               # Compile-time log level 0-5 (default: 4 debug, 0 release)
 ```
 
@@ -187,7 +187,7 @@ src/val_error_strings.c  (only if VAL_ENABLE_ERROR_STRINGS=1)
 ```
 -DVAL_LOG_LEVEL=0          # Disable logging
 -DVAL_ENABLE_METRICS=0     # Disable metrics
--DVAL_ENABLE_WIRE_AUDIT=0  # Disable audit
+# Wire audit flags removed; no-op. 
 ```
 
 **Example Makefile:**
@@ -327,8 +327,8 @@ int usb_recv(void *ctx, void *buffer, size_t size,
 **Standard C Library:**
 ```c
 cfg.filesystem.fopen = (void*(*)(void*, const char*, const char*))fopen;
-cfg.filesystem.fread = (int(*)(void*, void*, size_t, size_t, void*))fread;
-cfg.filesystem.fwrite = (int(*)(void*, const void*, size_t, size_t, void*))fwrite;
+cfg.filesystem.fread = (size_t(*)(void*, void*, size_t, size_t, void*))fread;
+cfg.filesystem.fwrite = (size_t(*)(void*, const void*, size_t, size_t, void*))fwrite;
 cfg.filesystem.fseek = (int(*)(void*, void*, long, int))fseek;
 cfg.filesystem.ftell = (long(*)(void*, void*))ftell;
 cfg.filesystem.fclose = (int(*)(void*, void*))fclose;

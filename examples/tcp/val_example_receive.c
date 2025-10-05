@@ -9,6 +9,19 @@
 // For summary report
 #include <assert.h>
 
+// --- Optional: packet capture demonstration (metadata only, no payload) ---
+static void on_packet_capture_rx(void *ctx, const val_packet_record_t *rec)
+{
+    (void)ctx;
+    if (!rec)
+        return;
+    const char *dir = (rec->direction == VAL_DIR_TX) ? "TX" : "RX";
+    fprintf(stdout, "[VAL][CAP][%s] type=%u wire=%u payload=%u off=%llu crc=%u t=%u\n",
+            dir, (unsigned)rec->type, (unsigned)rec->wire_len, (unsigned)rec->payload_len,
+            (unsigned long long)rec->offset, (unsigned)rec->crc_ok, (unsigned)rec->timestamp_ms);
+    fflush(stdout);
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -18,8 +31,8 @@ static void usage(const char *prog)
             "<port> "
             "<outdir>\n"
             "  --mtu N          Packet size/MTU (default 4096; min %u, max %u)\n"
-            "  --resume MODE    Resume mode: never, skip, tail, tail_or_zero, full, full_or_zero\n"
-            "  --tail-bytes N   Tail verification bytes for tail modes (default 1024)\n"
+            "  --resume MODE    Resume mode: never, skip, tail\n"
+            "  --tail-bytes N   Tail verification cap in bytes for tail mode (default 1024)\n"
             "  --streaming      Enable sender streaming pacing if peer accepts (default on)\n"
             "  --accept-streaming  Accept incoming peer streaming pacing (default on). Note: --streaming off implies\n"
             "                     --accept-streaming off unless explicitly overridden with --accept-streaming on.\n"
@@ -79,13 +92,7 @@ static int parse_resume_mode(const char *s, val_resume_mode_t *out)
     else if (strieq(s, "skip") || strieq(s, "skip_existing"))
         *out = VAL_RESUME_SKIP_EXISTING;
     else if (strieq(s, "tail"))
-        *out = VAL_RESUME_CRC_TAIL;
-    else if (strieq(s, "tail_or_zero"))
-        *out = VAL_RESUME_CRC_TAIL_OR_ZERO;
-    else if (strieq(s, "full"))
-        *out = VAL_RESUME_CRC_FULL;
-    else if (strieq(s, "full_or_zero"))
-        *out = VAL_RESUME_CRC_FULL_OR_ZERO;
+        *out = VAL_RESUME_TAIL;
     else
         return -1;
     return 0;
@@ -259,15 +266,15 @@ static void *fs_fopen(void *ctx, const char *path, const char *mode)
     (void)ctx;
     return (void *)fopen(path, mode);
 }
-static int fs_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
+static size_t fs_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
 {
     (void)ctx;
-    return (int)fread(buffer, size, count, (FILE *)file);
+    return fread(buffer, size, count, (FILE *)file);
 }
-static int fs_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file)
+static size_t fs_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file)
 {
     (void)ctx;
-    return (int)fwrite(buffer, size, count, (FILE *)file);
+    return fwrite(buffer, size, count, (FILE *)file);
 }
 static int fs_fseek(void *ctx, void *file, long offset, int whence)
 {
@@ -593,8 +600,8 @@ int main(int argc, char **argv)
 {
     // Defaults
     size_t packet = 4096; // example MTU
-    val_resume_mode_t resume_mode = VAL_RESUME_CRC_TAIL_OR_ZERO;
-    unsigned tail_bytes = 16384;
+    val_resume_mode_t resume_mode = VAL_RESUME_TAIL;
+    unsigned tail_bytes = 16384; // cap for tail verification window
     int log_level = -1;
     const char *log_file_path = NULL;
     int opt_streaming = 1;        // default on
@@ -925,6 +932,14 @@ int main(int argc, char **argv)
     cfg.debug.log = console_logger;
     cfg.debug.min_level = (log_level >= 0 ? log_level : 3);
 
+    // Attach optional packet capture hook when VAL_CAPTURE env var is set
+    const char *cap = getenv("VAL_CAPTURE");
+    if (cap && (cap[0] == '1' || cap[0] == 'y' || cap[0] == 'Y' || cap[0] == 't' || cap[0] == 'T'))
+    {
+        cfg.capture.on_packet = on_packet_capture_rx;
+        cfg.capture.context = NULL;
+    }
+
     // Adaptive timeout bounds (RFC6298-based): min/max clamp for computed RTO
     cfg.timeouts.min_timeout_ms = opt_min_timeout;   // floor for timeouts
     cfg.timeouts.max_timeout_ms = opt_max_timeout;   // ceiling for timeouts
@@ -935,7 +950,9 @@ int main(int argc, char **argv)
     cfg.retries.backoff_ms_base = opt_backoff_ms;
     // Resume configuration: use resume.mode defaults unless policy provided
     cfg.resume.mode = resume_mode;
-    cfg.resume.crc_verify_bytes = tail_bytes;
+    cfg.resume.tail_cap_bytes = tail_bytes;
+    cfg.resume.min_verify_bytes = 0;
+    cfg.resume.mismatch_skip = 0; // default: restart on mismatch; set to 1 to skip on mismatch
     // Adaptive TX defaults; allow flags to override
     cfg.adaptive_tx.max_performance_mode = opt_max_mode;
     cfg.adaptive_tx.preferred_initial_mode = opt_tx_mode;

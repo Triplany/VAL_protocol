@@ -23,8 +23,8 @@ int main(void)
     cfg.buffers.recv_buffer = buf;
     cfg.buffers.packet_size = sizeof(buf);
     cfg.filesystem.fopen = (void *(*)(void *, const char *, const char *))0x1; // non-null to pass validation
-    cfg.filesystem.fread = (int (*)(void *, void *, size_t, size_t, void *))0x1;
-    cfg.filesystem.fwrite = (int (*)(void *, const void *, size_t, size_t, void *))0x1;
+    cfg.filesystem.fread = (size_t (*)(void *, void *, size_t, size_t, void *))0x1;
+    cfg.filesystem.fwrite = (size_t (*)(void *, const void *, size_t, size_t, void *))0x1;
     cfg.filesystem.fseek = (int (*)(void *, void *, long, int))0x1;
     cfg.filesystem.ftell = (long (*)(void *, void *))0x1;
     cfg.filesystem.fclose = (int (*)(void *, void *))0x1;

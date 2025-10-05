@@ -52,7 +52,7 @@ static val_status_t get_file_size_and_name(val_session_t *s, const char *filepat
     return VAL_OK;
 }
 
-static val_status_t send_metadata(val_session_t *s, const char *sender_path, uint64_t file_size, uint32_t file_crc,
+static val_status_t send_metadata(val_session_t *s, const char *sender_path, uint64_t file_size,
                                   const char *filename)
 {
     val_meta_payload_t meta;
@@ -72,7 +72,6 @@ static val_status_t send_metadata(val_session_t *s, const char *sender_path, uin
         meta.sender_path[0] = '\0';
     }
     meta.file_size = file_size;
-    meta.file_crc32 = file_crc;
     uint8_t meta_wire[VAL_WIRE_META_SIZE];
     val_serialize_meta(&meta, meta_wire);
     return val_internal_send_packet(s, VAL_PKT_SEND_META, meta_wire, VAL_WIRE_META_SIZE, 0);
@@ -91,50 +90,12 @@ static val_status_t compute_crc_region(val_session_t *s, const char *filepath, u
     }
 
     uint64_t start = end_offset - length;
-    if (s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)start, SEEK_SET) != 0)
-    {
-        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-        val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
-        return VAL_ERR_IO;
-    }
-
-    if (!s->config->buffers.recv_buffer)
-    {
-        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-        return VAL_ERR_INVALID_ARG;
-    }
-    size_t buf_size = (size_t)s->config->buffers.packet_size;
-    if (buf_size == 0)
-    {
-        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-        return VAL_ERR_INVALID_ARG;
-    }
-
-    uint8_t *buf = (uint8_t *)s->config->buffers.recv_buffer;
-    uint64_t remaining = length;
-    uint32_t state = val_internal_crc32_init(s);
-
-    while (remaining > 0)
-    {
-    size_t chunk = (size_t)((remaining < (uint64_t)buf_size) ? remaining : (uint64_t)buf_size);
-        size_t have = 0;
-        while (have < chunk)
-        {
-            int r = s->config->filesystem.fread(s->config->filesystem.fs_context, buf + have, 1, chunk - have, f);
-            if (r <= 0)
-            {
-                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
-                return VAL_ERR_IO;
-            }
-            have += (size_t)r;
-        }
-        state = val_internal_crc32_update(s, state, buf, have);
-        remaining -= have;
-    }
-
+    uint32_t crc_tmp = 0;
+    val_status_t rst = val_internal_crc32_region(s, f, start, length, &crc_tmp);
     s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-    *out_crc = val_internal_crc32_final(s, state);
+    if (rst != VAL_OK)
+        return rst;
+    *out_crc = crc_tmp;
     return VAL_OK;
 }
 
@@ -157,6 +118,7 @@ typedef struct val_sender_io_ctx_s
     uint8_t *payload_area;
     uint32_t max_payload;
     uint64_t file_size;
+    uint64_t file_cursor; // tracked current file position to minimize ftell/fseek
 } val_sender_io_ctx_t;
 
 typedef struct val_sender_ack_ctx_s
@@ -183,6 +145,7 @@ typedef struct val_sender_ack_ctx_s
     uint32_t backoff_initial;
     uint32_t wait_deadline;
     uint32_t t0;
+    uint64_t *file_cursor_ptr; // keep sender's local cursor in sync on rewinds
 } val_sender_ack_ctx_t;
 
 static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next_to_send, uint32_t *inflight);
@@ -212,18 +175,22 @@ static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next
     if (to_read == 0)
         return VAL_OK;
 
-    long curpos = s->config->filesystem.ftell(s->config->filesystem.fs_context, io_ctx->file_handle);
-    if (curpos < 0 || (uint64_t)curpos != *next_to_send)
+    // Assume sequential IO; only seek if our tracked position differs
+    // Use tracked cursor to avoid redundant ftell/fseek; only seek if needed
+    if (io_ctx->file_cursor != *next_to_send)
+    {
         (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, io_ctx->file_handle, (long)(*next_to_send), SEEK_SET);
+        io_ctx->file_cursor = *next_to_send;
+    }
 
     size_t have = 0;
     while (have < to_read)
     {
-        int r = s->config->filesystem.fread(s->config->filesystem.fs_context, io_ctx->payload_area + have, 1,
-                                             to_read - have, io_ctx->file_handle);
-        if (r <= 0)
+        size_t r = s->config->filesystem.fread(s->config->filesystem.fs_context, io_ctx->payload_area + have, 1,
+                                               to_read - have, io_ctx->file_handle);
+        if (r == 0)
             break;
-        have += (size_t)r;
+        have += r;
     }
     if (have != to_read)
         return VAL_ERR_IO;
@@ -233,12 +200,9 @@ static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next
         return st;
 
     *next_to_send += to_read;
+    io_ctx->file_cursor += to_read;
     ++(*inflight);
-#if VAL_ENABLE_WIRE_AUDIT
-    s->audit.current_inflight = *inflight;
-    if (*inflight > s->audit.max_inflight_observed)
-        s->audit.max_inflight_observed = *inflight;
-#endif
+    // Wire audit removed
     return VAL_OK;
 }
 
@@ -276,9 +240,6 @@ static int handle_nak_retransmit(val_session_t *s, void *file_handle, uint64_t f
 
     *inflight = 0;
     *next_to_send = *last_acked;
-#if VAL_ENABLE_WIRE_AUDIT
-    s->audit.current_inflight = *inflight;
-#endif
     return 1;
 }
 
@@ -383,6 +344,8 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
                 if (handle_nak_retransmit(s, ack_ctx->file_handle, ack_ctx->file_size, ack_ctx->last_acked,
                                           ack_ctx->next_to_send, ack_ctx->inflight, ctrl_buf, len))
                 {
+                    if (ack_ctx->file_cursor_ptr)
+                        *ack_ctx->file_cursor_ptr = *ack_ctx->last_acked;
                     *ack_ctx->mode_used = val_tx_mode_sanitize(s->current_tx_mode);
                     *ack_ctx->window_size = val_tx_mode_window(*ack_ctx->mode_used);
                     if (*ack_ctx->window_size == 0u)
@@ -431,11 +394,7 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
                                            ? (*ack_ctx->next_to_send - *ack_ctx->last_acked)
                                            : 0;
                 *ack_ctx->inflight = (uint32_t)((outstanding + ack_ctx->max_payload - 1) / ack_ctx->max_payload);
-#if VAL_ENABLE_WIRE_AUDIT
-                s->audit.current_inflight = *ack_ctx->inflight;
-                if (*ack_ctx->inflight > s->audit.max_inflight_observed)
-                    s->audit.max_inflight_observed = *ack_ctx->inflight;
-#endif
+                // Wire audit removed
 
                 ack_ctx->wait_deadline = s->config->system.get_ticks_ms() + ack_ctx->to_ack_base;
                 ack_ctx->tries = ack_ctx->tries_initial;
@@ -515,15 +474,14 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
         long rewind_target = (long)(*ack_ctx->window_start);
         long curpos_timeout = s->config->filesystem.ftell(s->config->filesystem.fs_context, ack_ctx->file_handle);
         if (curpos_timeout < 0 || (uint64_t)curpos_timeout != *ack_ctx->window_start)
-        (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, ack_ctx->file_handle, rewind_target,
-                          SEEK_SET);
+            (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, ack_ctx->file_handle, rewind_target, SEEK_SET);
+        if (ack_ctx->file_cursor_ptr)
+            *ack_ctx->file_cursor_ptr = *ack_ctx->window_start;
         *ack_ctx->last_acked = *ack_ctx->window_start;
         *ack_ctx->next_to_send = *ack_ctx->window_start;
         *ack_ctx->inflight = 0;
     }
-#if VAL_ENABLE_WIRE_AUDIT
-        s->audit.current_inflight = *ack_ctx->inflight;
-#endif
+    // Wire audit removed
         *restart_window = 1;
 
         // Track retry for health monitoring
@@ -730,10 +688,8 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
     if (st != VAL_OK)
         return st;
     const char *reported_path = (sender_path && sender_path[0]) ? sender_path : filepath;
-    // Do not compute whole-file CRC in protocol; unit tests may compute independently if needed
-    uint32_t file_crc = 0;
     // Send metadata
-    st = send_metadata(s, reported_path, size, file_crc, filename);
+    st = send_metadata(s, reported_path, size, filename);
     if (st != VAL_OK)
         return st;
     // Resume negotiation
@@ -830,7 +786,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
         return VAL_ERR_INVALID_ARG;
     }
-    val_sender_io_ctx_t io_ctx = {s, f, payload_area, max_payload, size};
+    val_sender_io_ctx_t io_ctx = {s, f, payload_area, max_payload, size, resume_off};
     while (last_acked < size)
     {
         if (val_check_for_cancel(s))
@@ -939,7 +895,8 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 .backoff = backoff_cur,
                 .backoff_initial = (s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0),
                 .wait_deadline = wait_deadline,
-                .t0 = t0
+                .t0 = t0,
+                .file_cursor_ptr = &io_ctx.file_cursor
             };
 
             int restart_window = 0;
@@ -1213,8 +1170,6 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
         if (val_check_for_cancel(s))
         {
             VAL_LOG_WARN(s, "wait EOT_ACK: local cancel while waiting");
-            fprintf(stdout, "[VAL][TX] EOT_ACK wait: local CANCEL -> ABORT\n");
-            fflush(stdout);
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
 #else
@@ -1238,8 +1193,6 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
                 if (val_check_for_cancel(s))
                 {
                     VAL_LOG_WARN(s, "wait EOT_ACK: local cancel during polling");
-                    fprintf(stdout, "[VAL][TX] EOT_ACK wait: local CANCEL -> ABORT\n");
-                    fflush(stdout);
     #if defined(_WIN32)
                     LeaveCriticalSection(&s->lock);
     #else
@@ -1253,11 +1206,10 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
                 break;
             }
         }
-        if (st == VAL_OK)
-        {
-            fprintf(stdout, "[VAL][TX] EOT_ACK wait: got pkt t=%d len=%u off=%llu\n", (int)t, (unsigned)len,
-                    (unsigned long long)off);
-            fflush(stdout);
+    if (st == VAL_OK)
+    {
+        VAL_LOG_DEBUGF(s, "EOT_ACK wait: got pkt t=%d len=%u off=%llu", (int)t, (unsigned)len,
+               (unsigned long long)off);
             if (t == VAL_PKT_ERROR)
             {
 #if defined(_WIN32)
@@ -1279,8 +1231,6 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
             if (t == VAL_PKT_CANCEL)
             {
                 VAL_LOG_WARN(s, "wait EOT_ACK: received CANCEL");
-                fprintf(stdout, "[VAL][TX] EOT_ACK wait: received CANCEL -> ABORT\n");
-                fflush(stdout);
 #if defined(_WIN32)
                 LeaveCriticalSection(&s->lock);
 #else
@@ -1317,8 +1267,6 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
         if (tries == 0)
         {
             VAL_LOG_ERROR(s, "wait EOT_ACK: retries exhausted");
-            fprintf(stdout, "[VAL][TX] EOT_ACK wait: retries exhausted -> TIMEOUT\n");
-            fflush(stdout);
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
 #else
@@ -1334,8 +1282,6 @@ val_status_t val_send_files(val_session_t *s, const char *const *filepaths, size
         if (rs != VAL_OK)
         {
             VAL_LOG_ERRORF(s, "retransmit EOT failed %d", (int)rs);
-            fprintf(stdout, "[VAL][TX] EOT retransmit failed rs=%d\n", (int)rs);
-            fflush(stdout);
 #if defined(_WIN32)
             LeaveCriticalSection(&s->lock);
 #else

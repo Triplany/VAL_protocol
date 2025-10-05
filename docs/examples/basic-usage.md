@@ -67,8 +67,8 @@ int main(int argc, char **argv) {
     
     // Filesystem (use standard C library)
     cfg.filesystem.fopen = (void*(*)(void*, const char*, const char*))fopen;
-    cfg.filesystem.fread = (int(*)(void*, void*, size_t, size_t, void*))fread;
-    cfg.filesystem.fwrite = (int(*)(void*, const void*, size_t, size_t, void*))fwrite;
+    cfg.filesystem.fread = (size_t(*)(void*, void*, size_t, size_t, void*))fread;
+    cfg.filesystem.fwrite = (size_t(*)(void*, const void*, size_t, size_t, void*))fwrite;
     cfg.filesystem.fseek = (int(*)(void*, void*, long, int))fseek;
     cfg.filesystem.ftell = (long(*)(void*, void*))ftell;
     cfg.filesystem.fclose = (int(*)(void*, void*))fclose;
@@ -165,8 +165,8 @@ int main(int argc, char **argv) {
     
     // Filesystem
     cfg.filesystem.fopen = (void*(*)(void*, const char*, const char*))fopen;
-    cfg.filesystem.fread = (int(*)(void*, void*, size_t, size_t, void*))fread;
-    cfg.filesystem.fwrite = (int(*)(void*, const void*, size_t, size_t, void*))fwrite;
+    cfg.filesystem.fread = (size_t(*)(void*, void*, size_t, size_t, void*))fread;
+    cfg.filesystem.fwrite = (size_t(*)(void*, const void*, size_t, size_t, void*))fwrite;
     cfg.filesystem.fseek = (int(*)(void*, void*, long, int))fseek;
     cfg.filesystem.ftell = (long(*)(void*, void*))ftell;
     cfg.filesystem.fclose = (int(*)(void*, void*))fclose;
@@ -186,8 +186,10 @@ int main(int argc, char **argv) {
     cfg.timeouts.max_timeout_ms = 10000;
     
     // Resume (tail-or-zero: robust default)
-    cfg.resume.mode = VAL_RESUME_CRC_TAIL_OR_ZERO;
-    cfg.resume.crc_verify_bytes = 16384;  // 16 KB tail
+    cfg.resume.mode = VAL_RESUME_TAIL;
+    cfg.resume.tail_cap_bytes = 16384;  // 16 KB cap
+    cfg.resume.min_verify_bytes = 0;
+    cfg.resume.mismatch_skip = 0;       // restart on mismatch
     
     // 3. Create session
     val_session_t *session = NULL;
@@ -290,6 +292,33 @@ val_status_t status = val_send_files(session, files, 4, "/data");
 
 // All files sent in one session with single handshake
 ```
+
+---
+
+## Resume config: simple, robust defaults
+
+- Modes:
+    - VAL_RESUME_NEVER: always restart from 0 and overwrite local files.
+    - VAL_RESUME_SKIP_EXISTING: if a local file exists with non-zero size, skip it.
+    - VAL_RESUME_TAIL: verify a tail window of the existing local file and resume from its end on match.
+
+- Recommended defaults (LAN/USB):
+    - cfg.resume.mode = VAL_RESUME_TAIL
+    - cfg.resume.tail_cap_bytes = 8 * 1024 * 1024  // 8 MiB cap
+    - cfg.resume.min_verify_bytes = 0               // no floor beyond tail cap
+    - cfg.resume.mismatch_skip = 0                  // on mismatch, restart from 0
+
+- For embedded/flash-constrained targets:
+    - Use smaller caps (e.g., 64 KiB to 1 MiB) to reduce read I/O during verify.
+    - Keep mismatch_skip = 0 to ensure a clean restart if verification fails.
+
+- For high-latency/WAN links where re-sending is expensive:
+    - Increase tail_cap_bytes (e.g., 16–64 MiB) to make false matches less likely.
+    - Optionally set mismatch_skip = 1 to emulate "skip on mismatch" behavior.
+
+Notes:
+- The receiver uses only the configured recv buffer and negotiated packet size to compute the tail CRC. No full-file revalidation occurs at DONE.
+- If the local file is larger than the incoming size, the mismatch policy applies: restart (0) or skip depending on mismatch_skip.
 
 ---
 
@@ -418,8 +447,8 @@ void receiver_task(void) {
     cfg.adaptive_tx.allow_streaming = 0;
     
     // Simple resume
-    cfg.resume.mode = VAL_RESUME_CRC_TAIL_OR_ZERO;
-    cfg.resume.crc_verify_bytes = 1024;
+    cfg.resume.mode = VAL_RESUME_TAIL;
+    cfg.resume.tail_cap_bytes = 1024;
     
     // Create session
     val_session_t *session = NULL;

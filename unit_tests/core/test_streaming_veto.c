@@ -45,8 +45,8 @@ static int run_veto_case(void)
     val_config_t cfg_tx, cfg_rx;
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
-    ts_make_config(&cfg_tx, sb_tx, rb_tx, pkt, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
-    ts_make_config(&cfg_rx, sb_rx, rb_rx, pkt, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
+    ts_make_config(&cfg_tx, sb_tx, rb_tx, pkt, &end_tx, VAL_RESUME_TAIL, 1024);
+    ts_make_config(&cfg_rx, sb_rx, rb_rx, pkt, &end_rx, VAL_RESUME_TAIL, 1024);
 
     // Configure adaptive TX/window and streaming flags.
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;

@@ -96,8 +96,6 @@ const char *val_error_detail_to_string(uint32_t d)
         append_flag(tls, sizeof(tls), &len, "CRC_HEADER");
     if (d & VAL_ERROR_DETAIL_CRC_TRAILER)
         append_flag(tls, sizeof(tls), &len, "CRC_TRAILER");
-    if (d & VAL_ERROR_DETAIL_CRC_FILE)
-        append_flag(tls, sizeof(tls), &len, "CRC_FILE");
     if (d & VAL_ERROR_DETAIL_CRC_RESUME)
         append_flag(tls, sizeof(tls), &len, "CRC_RESUME");
     if (d & VAL_ERROR_DETAIL_SIZE_MISMATCH)

@@ -132,24 +132,24 @@ static void *mock_fopen(void *ctx, const char *path, const char *mode)
     return (void *)1; // Non-null fake handle
 }
 
-static int mock_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
+static size_t mock_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
 {
     (void)ctx;
     (void)buffer;
     (void)size;
     (void)count;
     (void)file;
-    return (int)count;
+    return count;
 }
 
-static int mock_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file)
+static size_t mock_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file)
 {
     (void)ctx;
     (void)buffer;
     (void)size;
     (void)count;
     (void)file;
-    return (int)count;
+    return count;
 }
 
 static int mock_fseek(void *ctx, void *file, long offset, int whence)

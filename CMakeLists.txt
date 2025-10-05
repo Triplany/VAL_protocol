@@ -21,7 +21,6 @@ endforeach()
 # Build options
 option(VAL_ENABLE_ERROR_STRINGS "Build optional error string utilities (host-only)" ON)
 option(VAL_ENABLE_METRICS "Enable compile-time protocol metrics counters and timing" OFF)
-option(VAL_ENABLE_WIRE_AUDIT "Enable compile-time wire audit counters and per-packet-type stats" OFF)
 
 # Platform-specific settings
 if(WIN32)
@@ -40,21 +39,23 @@ add_library(val_protocol STATIC
     src/val_wire.c
 )
 target_include_directories(val_protocol PUBLIC include)
-# Enable maximum compile-time logging in the core so examples/tests can see detailed traces
-target_compile_definitions(val_protocol PUBLIC VAL_LOG_LEVEL=5)
-# Enable maximum runtime logging (TRACE) in Debug builds so deep diagnostics are available
-target_compile_definitions(val_protocol PUBLIC $<$<CONFIG:Debug>:VAL_LOG_LEVEL=5>)
+# Build diagnostics and logging controls
+# - Logging is private to the library and compiled out (0) for non-Debug configs.
+# - Examples/tests can still enable their own logging, but it won’t affect the already-compiled core.
+option(VAL_BUILD_DIAGNOSTICS "Enable extra diagnostics (health checks, extra tracing)" OFF)
+target_compile_definitions(val_protocol PRIVATE $<$<BOOL:${VAL_BUILD_DIAGNOSTICS}>:VAL_BUILD_DIAGNOSTICS=1>)
+
+# Compile-time log level for the core library: 5 in Debug, 0 otherwise (Release/RelWithDebInfo/MinSizeRel)
+target_compile_definitions(val_protocol PRIVATE $<$<CONFIG:Debug>:VAL_LOG_LEVEL=5>)
+target_compile_definitions(val_protocol PRIVATE $<$<NOT:$<CONFIG:Debug>>:VAL_LOG_LEVEL=0>)
 
 if(VAL_ENABLE_METRICS)
     target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_METRICS=1)
 endif()
 
-if(VAL_ENABLE_WIRE_AUDIT)
-    target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_WIRE_AUDIT=1)
-endif()
+ 
 
-# Always enable wire audit in Debug builds for tests/diagnostics
-target_compile_definitions(val_protocol PUBLIC $<$<CONFIG:Debug>:VAL_ENABLE_WIRE_AUDIT=1>)
+
 
 if(VAL_ENABLE_ERROR_STRINGS)
     add_library(val_error_strings STATIC src/val_error_strings.c)

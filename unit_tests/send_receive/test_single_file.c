@@ -51,8 +51,8 @@ int main(void)
     // TX endpoint sees a2b as its outbound queue; RX endpoint must see reversed direction
     test_duplex_t end_tx = d; // a2b -> outbound, b2a -> inbound
     test_duplex_t end_rx = {.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
-    ts_make_config(&cfg_tx, send_a, recv_a, packet, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
-    ts_make_config(&cfg_rx, send_b, recv_b, packet, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 1024);
+    ts_make_config(&cfg_tx, send_a, recv_a, packet, &end_tx, VAL_RESUME_TAIL, 1024);
+    ts_make_config(&cfg_rx, send_b, recv_b, packet, &end_rx, VAL_RESUME_TAIL, 1024);
 
     val_session_t *tx = NULL;
     val_session_t *rx = NULL;
@@ -112,32 +112,7 @@ int main(void)
     }
 #endif
 
-#if VAL_ENABLE_WIRE_AUDIT
-    {
-        val_wire_audit_t a_tx = {0}, a_rx = {0};
-        if (val_get_wire_audit(tx, &a_tx) == VAL_OK && val_get_wire_audit(rx, &a_rx) == VAL_OK)
-        {
-            // Receiver should not send DATA
-            if (a_rx.sent_data != 0)
-            {
-                fprintf(stderr, "wire_audit: receiver sent DATA unexpectedly (count=%llu)\n", (unsigned long long)a_rx.sent_data);
-                return 12;
-            }
-            // Sender should not send DONE_ACK/EOT_ACK
-            if (a_tx.sent_done_ack != 0 || a_tx.sent_eot_ack != 0)
-            {
-                fprintf(stderr, "wire_audit: sender sent *_ACK unexpectedly (done_ack=%llu eot_ack=%llu)\n",
-                        (unsigned long long)a_tx.sent_done_ack, (unsigned long long)a_tx.sent_eot_ack);
-                return 13;
-            }
-        }
-        else
-        {
-            fprintf(stderr, "val_get_wire_audit failed\n");
-            return 14;
-        }
-    }
-#endif
+    // Wire audit removed; functional checks above are sufficient
 
     val_session_destroy(tx);
     val_session_destroy(rx);

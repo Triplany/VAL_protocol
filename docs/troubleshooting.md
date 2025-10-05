@@ -181,20 +181,23 @@ cfg.debug.min_level = VAL_LOG_DEBUG;  // Or VAL_LOG_TRACE
 1. **Wrong Resume Mode**
    ```c
    // Use forgiving mode:
-   cfg.resume.mode = VAL_RESUME_CRC_TAIL_OR_ZERO;  // Recommended
-   // NOT: VAL_RESUME_CRC_TAIL (skips on mismatch)
+    cfg.resume.mode = VAL_RESUME_TAIL;  // Recommended
+    cfg.resume.tail_cap_bytes = 16384;  // 16 KB (was: 1024)
+    cfg.resume.min_verify_bytes = 0;    // optional lower bound
+    cfg.resume.mismatch_skip = 0;       // restart from zero on mismatch; set 1 to skip file
+    // Or set `cfg.resume.mismatch_skip = 0` to restart on mismatch (default)
    ```
 
 2. **Tail Window Too Small**
    ```c
-   // If file modified in middle, small tail won't detect
-   cfg.resume.crc_verify_bytes = 16384;  // 16 KB (was: 1024)
+   // If file modified in middle, small tail may not detect
+   cfg.resume.tail_cap_bytes = 16384;  // 16 KB (was: 1024)
    ```
 
 3. **File Modified**
    - If local file was modified, CRC will mismatch
    - Use `VAL_RESUME_NEVER` to always overwrite
-   - Or `VAL_RESUME_CRC_TAIL_OR_ZERO` to restart on mismatch
+   - Or set `cfg.resume.mismatch_skip = 0` to restart on mismatch
 
 4. **Filesystem fseek/ftell Issues**
    ```c
@@ -323,7 +326,7 @@ cfg.debug.min_level = VAL_LOG_DEBUG;  // Or VAL_LOG_TRACE
 - **Detail Mask**:
   - `VAL_ERROR_DETAIL_CRC_HEADER`: Header CRC failed
   - `VAL_ERROR_DETAIL_CRC_TRAILER`: Trailer CRC failed
-  - `VAL_ERROR_DETAIL_CRC_FILE`: File CRC failed
+   - 0x00000400 (CRC_FILE): removed; whole-file CRC is no longer part of the protocol
 - **Fix**: Check transport reliability, test CRC implementation
 
 ### VAL_ERR_RESUME_VERIFY (-7)
@@ -399,29 +402,21 @@ printf("RTT samples: %u\n", m.rtt_samples);
 #endif
 ```
 
-### Enable Wire Audit
+### Packet capture hook
 
-**Build with audit:**
-```bash
-cmake -DVAL_ENABLE_WIRE_AUDIT=ON ...
-```
-
-**Check packet counts:**
+Set a capture callback to observe packets without payloads:
 ```c
-#if VAL_ENABLE_WIRE_AUDIT
-val_wire_audit_t audit;
-val_get_wire_audit(session, &audit);
+static void my_capture(void *ctx, const val_packet_record_t *r) {
+    (void)ctx;
+    fprintf(stderr, "CAP %s type=%u len=%u off=%llu t=%u\n",
+    (r->direction==VAL_DIR_TX?"TX":"RX"), r->type, r->wire_len,
+    (unsigned long long)r->offset, r->timestamp_ms);
+}
 
-printf("HELLO: sent=%llu recv=%llu\n",
-       audit.sent_hello, audit.recv_hello);
-printf("DATA: sent=%llu recv=%llu\n",
-       audit.sent_data, audit.recv_data);
-printf("DATA_ACK: sent=%llu recv=%llu\n",
-       audit.sent_data_ack, audit.recv_data_ack);
-printf("Window: max_inflight=%u current=%u\n",
-       audit.max_inflight_observed, audit.current_inflight);
-#endif
+cfg.capture.on_packet = my_capture;
+cfg.capture.context = NULL;
 ```
+This is runtime-only (no build flags) and has near-zero overhead when unset.
 
 ### Network Packet Capture
 

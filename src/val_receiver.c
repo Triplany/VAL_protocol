@@ -3,6 +3,37 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Streaming: send sparse heartbeat DATA_ACK (liveness) only when idle.
+// Conditions:
+//  - streaming is allowed locally and peer is engaged
+//  - no DATA received recently (>= interval_ms)
+//  - no ACK sent recently (>= interval_ms)
+//  - last heartbeat was >= interval_ms ago
+static VAL_FORCE_INLINE void val_maybe_send_heartbeat_ack(val_session_t *s,
+                                                          uint64_t high_water,
+                                                          uint32_t interval_ms,
+                                                          uint32_t *hb_last_ms,
+                                                          uint32_t *last_ack_ms,
+                                                          uint32_t last_data_ms)
+{
+    if (!s || !hb_last_ms || !last_ack_ms)
+        return;
+    if (!(s->recv_streaming_allowed && s->peer_streaming_engaged))
+        return;
+    uint32_t now = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
+    if (now == 0u)
+        return;
+    int idle_no_data = (last_data_ms == 0 || (now - last_data_ms) >= interval_ms);
+    int no_recent_ack = (*last_ack_ms == 0 || (now - *last_ack_ms) >= interval_ms);
+    if (idle_no_data && no_recent_ack && (*hb_last_ms == 0 || (now - *hb_last_ms) >= interval_ms))
+    {
+        VAL_LOG_DEBUGF(s, "data: heartbeat DATA_ACK off=%llu", (unsigned long long)high_water);
+        (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, high_water);
+        *hb_last_ms = now;
+        *last_ack_ms = now;
+    }
+}
+
 static val_status_t send_resume_response(val_session_t *s, val_resume_action_t action, uint64_t offset, uint32_t crc,
                                          uint64_t verify_len)
 {
@@ -152,18 +183,8 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     }
     else
     {
-        // Mismatch: result depends on resume mode policy
-        val_resume_mode_t mode = s->config->resume.mode;
-        if (mode == VAL_RESUME_CRC_TAIL || mode == VAL_RESUME_CRC_FULL)
-        {
-            // In CRC_TAIL and CRC_FULL modes, mismatch means skip the file
-            result = VAL_SKIPPED;
-        }
-        else
-        {
-            // In CRC_TAIL_OR_ZERO and CRC_FULL_OR_ZERO modes, mismatch means restart from zero
-            result = VAL_ERR_RESUME_VERIFY;
-        }
+        // Mismatch: result depends on new policy flag mismatch_skip (1=skip, 0=restart)
+        result = s->config->resume.mismatch_skip ? VAL_SKIPPED : VAL_ERR_RESUME_VERIFY;
     }
     uint8_t status_wire[sizeof(uint32_t)];
     VAL_PUT_LE32(status_wire, (uint32_t)result);
@@ -176,6 +197,11 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
         return send_st;
     // Propagate verification outcome to caller so it can adjust resume offset
     return (val_status_t)result;
+}
+
+static inline uint64_t clamp_u64(uint64_t v, uint64_t lo, uint64_t hi)
+{
+    return (v < lo) ? lo : (v > hi ? hi : v);
 }
 
 static val_resume_action_t determine_resume_action(val_session_t *session, const char *filename, const char *sender_path,
@@ -208,25 +234,25 @@ static val_resume_action_t determine_resume_action(val_session_t *session, const
     }
 
     session->config->filesystem.fseek(session->config->filesystem.fs_context, file, 0, SEEK_END);
-    long existing_size = session->config->filesystem.ftell(session->config->filesystem.fs_context, file);
-    if (existing_size < 0)
+    long existing_size_l = session->config->filesystem.ftell(session->config->filesystem.fs_context, file);
+    if (existing_size_l < 0)
     {
         session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
         *out_resume_offset = 0;
         return VAL_RESUME_ACTION_START_ZERO;
     }
+    uint64_t existing_size = (uint64_t)existing_size_l;
 
-    // Implement simplified six-mode behavior
-    switch (mode)
+    // Policy evaluation by mode
+    if (mode == VAL_RESUME_NEVER)
     {
-    case VAL_RESUME_NEVER:
         session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
         *out_resume_offset = 0;
         VAL_LOG_INFO(session, "resume: disabled, start at 0");
         return VAL_RESUME_ACTION_START_ZERO;
-    case VAL_RESUME_SKIP_EXISTING:
+    }
+    if (mode == VAL_RESUME_SKIP_EXISTING)
     {
-        // If a local file exists at any size, skip it; otherwise start from zero
         session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
         if (existing_size > 0)
         {
@@ -237,155 +263,70 @@ static val_resume_action_t determine_resume_action(val_session_t *session, const
         *out_resume_offset = 0;
         return VAL_RESUME_ACTION_START_ZERO;
     }
-    case VAL_RESUME_CRC_TAIL:
-    case VAL_RESUME_CRC_TAIL_OR_ZERO:
+
+    // TAIL mode
+    if (existing_size == 0)
     {
-        if (existing_size <= 0)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            VAL_LOG_INFO(session, "resume: no bytes locally, start at 0");
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        // If the local file is larger than incoming, treat as mismatch per policy
-        if ((uint64_t)existing_size > incoming_file_size)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            if (mode == VAL_RESUME_CRC_TAIL)
-            {
-                VAL_LOG_INFO(session, "resume: local larger than incoming (TAIL) -> skip file");
-                *out_resume_offset = 0;
-                *out_verify_crc = 0;
-                *out_verify_length = 0;
-                return VAL_RESUME_ACTION_SKIP_FILE;
-            }
-            VAL_LOG_INFO(session, "resume: local larger than incoming (TAIL_OR_ZERO) -> start at 0");
-            *out_resume_offset = 0;
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        // Determine tail verification window: respect user-configured bytes but cap to a small default for speed.
-        // Core default cap: 2 MiB to keep MCU/slow storage responsive.
-        uint32_t verify_bytes_cfg = session->config->resume.crc_verify_bytes ? session->config->resume.crc_verify_bytes : 1024u;
-        uint64_t verify_bytes = (uint64_t)verify_bytes_cfg;
-        if (verify_bytes > (uint64_t)existing_size)
-            verify_bytes = (uint64_t)existing_size;
-        const uint64_t TAIL_CAP_BYTES = (uint64_t)2 * 1024 * 1024; // 2 MiB
-        if (verify_bytes > TAIL_CAP_BYTES)
-            verify_bytes = TAIL_CAP_BYTES;
-        long seek_pos = (long)((uint64_t)existing_size - verify_bytes);
-        session->config->filesystem.fseek(session->config->filesystem.fs_context, file, seek_pos, SEEK_SET);
-        if (!session->config->buffers.recv_buffer)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        size_t buf_size = session->effective_packet_size ? session->effective_packet_size : session->config->buffers.packet_size;
-        if (buf_size == 0)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        uint32_t state = val_internal_crc32_init(session);
-        uint64_t left = verify_bytes;
-        while (left > 0)
-        {
-            size_t take = (left < buf_size) ? (size_t)left : buf_size;
-            int rr = session->config->filesystem.fread(session->config->filesystem.fs_context,
-                                                       session->config->buffers.recv_buffer, 1, take, file);
-            if (rr != (int)take)
-            {
-                session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-                *out_resume_offset = 0;
-                return VAL_RESUME_ACTION_START_ZERO;
-            }
-            state = val_internal_crc32_update(session, state, session->config->buffers.recv_buffer, take);
-            left -= take;
-        }
         session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-        *out_resume_offset = (uint64_t)existing_size;
-        *out_verify_crc = val_internal_crc32_final(session, state);
-        *out_verify_length = verify_bytes;
-        VAL_LOG_INFO(session, "resume: tail crc verify requested");
-        return VAL_RESUME_ACTION_VERIFY_FIRST;
+        *out_resume_offset = 0;
+        VAL_LOG_INFO(session, "resume: no local bytes, start at 0");
+        return VAL_RESUME_ACTION_START_ZERO;
     }
-    case VAL_RESUME_CRC_FULL:
-    case VAL_RESUME_CRC_FULL_OR_ZERO:
+    // Local larger than incoming => treat as mismatch per policy
+    if (existing_size > incoming_file_size)
     {
-        // FULL means: verify all locally available bytes (prefix) when <= incoming size.
-        if (existing_size <= 0)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            VAL_LOG_INFO(session, "resume: no local bytes, start at 0");
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        if ((uint64_t)existing_size > incoming_file_size)
-        {
-            // Local larger than incoming cannot match; treat as mismatch per policy
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            if (mode == VAL_RESUME_CRC_FULL)
-            {
-                VAL_LOG_INFO(session, "resume: local larger than incoming (FULL) -> skip file");
-                *out_resume_offset = 0;
-                *out_verify_crc = 0;
-                *out_verify_length = 0;
-                return VAL_RESUME_ACTION_SKIP_FILE;
-            }
-            VAL_LOG_INFO(session, "resume: local larger than incoming (FULL_OR_ZERO) -> start at 0");
-            *out_resume_offset = 0;
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        if (!session->config->buffers.recv_buffer)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        // Compute CRC over either the entire local prefix (if <= cap) or the last 'cap' bytes (large tail fallback)
-    const uint64_t FULL_CAP_BYTES = (uint64_t)256 * 1024 * 1024; // 256 MiB
-        uint64_t existing_u64 = (uint64_t)existing_size;
-        uint64_t verify_len = existing_u64 <= FULL_CAP_BYTES ? existing_u64 : FULL_CAP_BYTES;
-        long start_pos = (long)(existing_u64 - verify_len);
-        session->config->filesystem.fseek(session->config->filesystem.fs_context, file, start_pos, SEEK_SET);
-        size_t buf_size = session->effective_packet_size ? session->effective_packet_size : session->config->buffers.packet_size;
-        if (buf_size == 0)
-        {
-            session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-            *out_resume_offset = 0;
-            return VAL_RESUME_ACTION_START_ZERO;
-        }
-        uint32_t state = val_internal_crc32_init(session);
-        uint64_t left = verify_len;
-        while (left > 0)
-        {
-            size_t take = (left < buf_size) ? (size_t)left : buf_size;
-            int rr = session->config->filesystem.fread(session->config->filesystem.fs_context,
-                                                       session->config->buffers.recv_buffer, 1, take, file);
-            if (rr != (int)take)
-            {
-                session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-                *out_resume_offset = 0;
-                return VAL_RESUME_ACTION_START_ZERO;
-            }
-            state = val_internal_crc32_update(session, state, session->config->buffers.recv_buffer, take);
-            left -= take;
-        }
         session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-        *out_resume_offset = (uint64_t)existing_size; // resume from what we have
-        *out_verify_crc = val_internal_crc32_final(session, state);
-        *out_verify_length = verify_len; // request verify over prefix or large-tail window
-        if (verify_len == existing_u64)
-            VAL_LOG_INFO(session, "resume: full-prefix crc verify requested");
-        else
-            VAL_LOG_INFO(session, "resume: FULL exceeded cap -> large-tail crc verify requested");
-        return VAL_RESUME_ACTION_VERIFY_FIRST;
+        if (session->config->resume.mismatch_skip)
+        {
+            VAL_LOG_INFO(session, "resume: local > incoming -> skip file (policy)");
+            *out_resume_offset = 0;
+            *out_verify_crc = 0;
+            *out_verify_length = 0;
+            return VAL_RESUME_ACTION_SKIP_FILE;
+        }
+        VAL_LOG_INFO(session, "resume: local > incoming -> start at 0 (policy)");
+        *out_resume_offset = 0;
+        return VAL_RESUME_ACTION_START_ZERO;
     }
+
+    if (!session->config->buffers.recv_buffer)
+    {
+        session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+        *out_resume_offset = 0;
+        return VAL_RESUME_ACTION_START_ZERO;
+    }
+    size_t buf_size = session->effective_packet_size ? session->effective_packet_size : session->config->buffers.packet_size;
+    if (buf_size == 0)
+    {
+        session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+        *out_resume_offset = 0;
+        return VAL_RESUME_ACTION_START_ZERO;
+    }
+
+    // Compute tail verification window
+    uint64_t default_cap = 8ull * 1024ull * 1024ull; // 8 MiB default (single profile for now)
+    uint64_t req_cap = session->config->resume.tail_cap_bytes ? (uint64_t)session->config->resume.tail_cap_bytes : default_cap;
+    const uint64_t ABS_MAX = 256ull * 1024ull * 1024ull; // 256 MiB hard clamp
+    uint64_t cap = clamp_u64(req_cap, 1ull, ABS_MAX);
+    uint64_t min_verify = session->config->resume.min_verify_bytes ? (uint64_t)session->config->resume.min_verify_bytes : 0ull;
+    uint64_t verify_len = existing_size < cap ? existing_size : cap;
+    if (min_verify > 0 && verify_len < min_verify)
+        verify_len = (existing_size < min_verify) ? existing_size : min_verify;
+
+    uint32_t tail_crc = 0;
+    long start_pos = (long)(existing_size - verify_len);
+    if (val_internal_crc32_region(session, file, (uint64_t)start_pos, verify_len, &tail_crc) != VAL_OK)
+    {
+        session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
+        *out_resume_offset = 0;
+        return VAL_RESUME_ACTION_START_ZERO;
     }
     session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
-    *out_resume_offset = 0;
-    return VAL_RESUME_ACTION_START_ZERO;
+    *out_resume_offset = existing_size;
+    *out_verify_crc = tail_crc;
+    *out_verify_length = verify_len;
+    VAL_LOG_INFO(session, "resume: tail crc verify requested");
+    return VAL_RESUME_ACTION_VERIFY_FIRST;
 }
 
 static val_status_t handle_file_resume(val_session_t *s, const char *filename, const char *sender_path, uint64_t file_size,
@@ -417,15 +358,8 @@ static val_status_t handle_file_resume(val_session_t *s, const char *filename, c
     }
     if (action == VAL_RESUME_ACTION_VERIFY_FIRST)
     {
-        // Map verification success to either resume (OK) or skip (SKIPPED) depending on mode
-        val_resume_mode_t mode = s->config->resume.mode;
-        val_status_t on_match = VAL_OK;
-        if (mode == VAL_RESUME_CRC_FULL || mode == VAL_RESUME_CRC_FULL_OR_ZERO)
-        {
-            // In FULL modes, if verify covered the entire file (existing_size == incoming size), we can skip.
-            // Otherwise, we should resume from the verified offset.
-            on_match = (verify_length == file_size) ? VAL_SKIPPED : VAL_OK;
-        }
+        // On match: if verify covered entire file length, skip; else resume from offset.
+        val_status_t on_match = (verify_length == file_size) ? VAL_SKIPPED : VAL_OK;
         st = handle_verification_exchange(s, resume_offset, verify_crc, verify_length, on_match);
         VAL_LOG_INFOF(s, "resume: verify result st=%d", (int)st);
         if (st == VAL_ERR_RESUME_VERIFY)
@@ -445,15 +379,18 @@ static val_status_t handle_file_resume(val_session_t *s, const char *filename, c
         else if (st == VAL_ERR_TIMEOUT)
         {
             // Otherwise treat as failure to verify; restart from zero rather than aborting session
-            resume_offset = 0;
-            VAL_LOG_INFO(s, "resume: verify timeout, restarting at 0");
-        }
-        else if (st == VAL_SKIPPED)
-        {
-            // Receiver-side policy elected to skip after successful equality check; proceed in skip mode.
-            // We must not return early here; continue so the receiver can wait for DONE and reply with DONE_ACK.
-            resume_offset = file_size;
-            VAL_LOG_INFO(s, "resume: verify indicated SKIPPED; proceeding to wait for DONE and ACK");
+            if (s->config->resume.mismatch_skip)
+            {
+                resume_offset = file_size; // treat as skip
+                VAL_LOG_INFO(s, "resume: verify timeout -> skipping file (policy)");
+                if (s->config->callbacks.on_file_start)
+                    s->config->callbacks.on_file_start(filename, sender_path, file_size, file_size);
+            }
+            else
+            {
+                resume_offset = 0;
+                VAL_LOG_INFO(s, "resume: verify timeout -> restarting at 0 (policy)");
+            }
         }
         else if (st != VAL_OK)
         {
@@ -565,8 +502,6 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
         {
             VAL_LOG_WARN(s, "recv: received CANCEL while waiting for metadata");
             val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
-            fprintf(stdout, "[VAL][RX] CANCEL observed before metadata, setting last_error ABORTED\n");
-            fflush(stdout);
             return VAL_ERR_ABORTED;
         }
         if (t != VAL_PKT_SEND_META || len < VAL_WIRE_META_SIZE)
@@ -663,61 +598,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
         uint64_t written = resume_off;
         VAL_LOG_DEBUGF(s, "data: starting receive loop (written=%llu,total=%llu)", (unsigned long long)written,
                        (unsigned long long)total);
-    // Decide whether full-file CRC validation is required.
-    // In TAIL modes, when resuming mid-file, we rely on the window verify and do NOT re-CRC existing bytes.
-    // In FULL modes, treat similarly: verify a large window (up to cap); do not re-CRC existing bytes.
-    // Only when not resuming (resume_off == 0) do we compute full CRC across the file.
-        val_resume_mode_t resume_mode = s->config->resume.mode;
-        int crc_full_required = 1;
-    if (resume_off > 0 && (
-        resume_mode == VAL_RESUME_CRC_TAIL ||
-        resume_mode == VAL_RESUME_CRC_TAIL_OR_ZERO ||
-        resume_mode == VAL_RESUME_CRC_FULL ||
-        resume_mode == VAL_RESUME_CRC_FULL_OR_ZERO))
-            crc_full_required = 0;
-        // Compute CRC across the final file contents only when required
+        // Compute CRC across only the newly received bytes; no re-CRC of existing bytes.
         uint32_t crc_state = val_internal_crc32_init(s);
-        if (crc_full_required && !skipping && resume_off > 0)
-        {
-            // Re-read existing bytes to seed CRC using the configured buffer only (MCU-safe)
-            void *fr = s->config->filesystem.fopen(s->config->filesystem.fs_context, full_output_path, "rb");
-            if (!fr)
-            {
-                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                return VAL_ERR_IO;
-            }
-            if (!s->config->buffers.recv_buffer)
-            {
-                s->config->filesystem.fclose(s->config->filesystem.fs_context, fr);
-                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                return VAL_ERR_INVALID_ARG;
-            }
-            size_t step = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size;
-            if (step == 0)
-            {
-                s->config->filesystem.fclose(s->config->filesystem.fs_context, fr);
-                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                return VAL_ERR_INVALID_ARG;
-            }
-            if (step > s->config->buffers.packet_size)
-                step = s->config->buffers.packet_size;
-            uint64_t left = resume_off;
-            while (left > 0)
-            {
-                size_t take = (left < step) ? (size_t)left : step;
-                int rr = s->config->filesystem.fread(s->config->filesystem.fs_context,
-                                                     s->config->buffers.recv_buffer, 1, take, fr);
-                if (rr != (int)take)
-                {
-                    s->config->filesystem.fclose(s->config->filesystem.fs_context, fr);
-                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                    return VAL_ERR_IO;
-                }
-                crc_state = val_internal_crc32_update(s, crc_state, s->config->buffers.recv_buffer, take);
-                left -= take;
-            }
-            s->config->filesystem.fclose(s->config->filesystem.fs_context, fr);
-        }
     // ACK coalescing state (per-file)
         uint32_t pkts_since_ack = 0;
     // Streaming heartbeat state (per-file): send sparse ACKs only when idle
@@ -764,25 +646,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                         return health;
                     }
                         
-                    // Streaming: send sparse heartbeat DATA_ACK (liveness) only when idle
-                    if (s->recv_streaming_allowed && s->peer_streaming_engaged)
-                    {
-                        // Heartbeat only every few seconds regardless of RTT; defaults to 3s
-                        uint32_t interval = 3000u;
-                        uint32_t nowhb = s->config->system.get_ticks_ms();
-                        // Gate heartbeats to avoid extra ACKs during active flow:
-                        // - only if no DATA received recently
-                        // - and we haven't sent an ACK recently
-                        int idle_no_data = (last_data_ms == 0 || (nowhb - last_data_ms) >= interval);
-                        int no_recent_ack = (last_ack_ms == 0 || (nowhb - last_ack_ms) >= interval);
-                        if (idle_no_data && no_recent_ack && (hb_last_ms == 0 || (nowhb - hb_last_ms) >= interval))
-                        {
-                            VAL_LOG_DEBUGF(s, "data: heartbeat DATA_ACK off=%llu", (unsigned long long)written);
-                            (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
-                            hb_last_ms = nowhb;
-                            last_ack_ms = nowhb;
-                        }
-                    }
+                    // Streaming: sparse heartbeat DATA_ACK (liveness) only when idle
+                    val_maybe_send_heartbeat_ack(s, written, 3000u, &hb_last_ms, &last_ack_ms, last_data_ms);
                     if (!val_internal_transport_is_connected(s))
                     {
                         if (!skipping && f)
@@ -798,8 +663,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                         if (s->config->callbacks.on_file_complete)
                             s->config->callbacks.on_file_complete(clean_name, meta.sender_path, VAL_ERR_ABORTED);
                         val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
-                        fprintf(stdout, "[VAL][RX] Local cancel detected in data loop, setting last_error ABORTED\n");
-                        fflush(stdout);
+                        VAL_LOG_WARN(s, "[RX] Local cancel detected in data loop, last_error=ABORTED");
                         return VAL_ERR_ABORTED;
                     }
                     st = val_internal_recv_packet(s, &t, tmp, (uint32_t)P, &len, &off, to_data);
@@ -846,8 +710,8 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     // Normal in-order chunk
                     if (!skipping && len)
                     {
-                        int w = s->config->filesystem.fwrite(s->config->filesystem.fs_context, tmp, 1, len, f);
-                        if (w != (int)len)
+                        size_t w = s->config->filesystem.fwrite(s->config->filesystem.fs_context, tmp, 1, len, f);
+                        if (w != len)
                         {
                             s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
                             val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_DISK_FULL);
@@ -934,8 +798,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                         if (s->config->callbacks.on_file_complete)
                             s->config->callbacks.on_file_complete(clean_name, meta.sender_path, VAL_ERR_ABORTED);
                         val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
-                        fprintf(stdout, "[VAL][RX] Local cancel after progress, not sending DATA_ACK, aborting\n");
-                        fflush(stdout);
+                        VAL_LOG_WARN(s, "[RX] Local cancel after progress, aborting before DATA_ACK");
                         return VAL_ERR_ABORTED;
                     }
                 }
@@ -1066,8 +929,6 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 if (s->config->callbacks.on_file_complete)
                     s->config->callbacks.on_file_complete(clean_name, meta.sender_path, VAL_ERR_ABORTED);
                 val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
-                fprintf(stdout, "[VAL][RX] CANCEL received during data, setting last_error ABORTED\n");
-                fflush(stdout);
                 return VAL_ERR_ABORTED;
             }
             else if (t == VAL_PKT_DATA_ACK)

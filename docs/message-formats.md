@@ -146,7 +146,7 @@ Trailer: XX XX XX XX
 
 ### SEND_META (type=2)
 
-**Purpose**: Send file metadata (name, size, CRC)
+**Purpose**: Send file metadata (name, size, path)
 
 **Direction**: Sender → Receiver
 
@@ -157,7 +157,7 @@ struct val_meta_payload_t {
     char     filename[128];    // Sanitized basename (UTF-8, null-terminated)
     char     sender_path[128]; // Original path hint (UTF-8, null-terminated)
     uint64_t file_size;        // File size in bytes (LE)
-    uint32_t file_crc32;       // Whole-file CRC-32 (LE)
+    // Removed file_crc32: not used by protocol
 };  // 264 bytes
 ```
 
@@ -165,7 +165,7 @@ struct val_meta_payload_t {
 - **filename**: Sanitized basename only (no directories)
 - **sender_path**: Original path hint (informational; receiver must not use for output path)
 - **file_size**: Total file size in bytes
-- **file_crc32**: CRC-32 of entire file contents
+// Note: Whole-file CRC is not part of SEND_META. Integrity is ensured via packet CRCs and optional resume tail verify.
 
 **Security Note**: Receiver must sanitize `filename` and never use `sender_path` directly to prevent path traversal.
 

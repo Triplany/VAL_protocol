@@ -844,7 +844,7 @@ void *ts_fopen(void *ctx, const char *path, const char *mode)
     return f;
 #endif
 }
-int ts_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
+size_t ts_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
 {
     (void)ctx;
     ts_file_t *f = (ts_file_t *)file;
@@ -875,9 +875,9 @@ int ts_fread(void *ctx, void *buffer, size_t size, size_t count, void *file)
         read_total += (size_t)got;
     }
 #endif
-    return (int)(read_total / (size ? size : 1));
+    return (size ? (read_total / size) : 0);
 }
-int ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file)
+size_t ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file)
 {
     (void)ctx;
     ts_file_t *f = (ts_file_t *)file;
@@ -907,12 +907,12 @@ int ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *fi
     size_t put = fwrite(buffer, 1, allowed, f->fp);
     if (put == 0)
         return 0;
-    return (int)(put / (size ? size : 1));
+    return (size ? (put / size) : 0);
 #else
     ssize_t put = write(f->fd, buffer, bytes);
     if (put <= 0)
         return 0;
-    return (int)(put / (size ? size : 1));
+    return (size ? ((size_t)put / size) : 0);
 #endif
 }
 int ts_fseek(void *ctx, void *file, long offset, int whence)
@@ -1102,7 +1102,11 @@ void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t pa
     cfg->buffers.recv_buffer = recv_buf;
     cfg->buffers.packet_size = packet_size;
     cfg->resume.mode = mode;
-    cfg->resume.crc_verify_bytes = verify;
+    // Map legacy verify parameter to new tail-only config
+    cfg->resume.tail_cap_bytes = verify;      // 0 = use default
+    cfg->resume.min_verify_bytes = 0;         // tests can override
+    // Default mismatch policy matches prior TAIL_OR_ZERO semantics: restart on mismatch
+    cfg->resume.mismatch_skip = 0;            // tests can override to 1 to force skip on mismatch
     // Adaptive timeout bounds (tests run in-memory; keep low to speed up failures while allowing retries)
     cfg->timeouts.min_timeout_ms = 50;   // floor for RTO
     cfg->timeouts.max_timeout_ms = 2000; // ceiling for RTO

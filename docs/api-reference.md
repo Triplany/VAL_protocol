@@ -212,8 +212,8 @@ typedef struct {
     // Filesystem callbacks (REQUIRED)
     struct {
         void *(*fopen)(void *ctx, const char *path, const char *mode);
-        int (*fread)(void *ctx, void *buf, size_t sz, size_t cnt, void *file);
-        int (*fwrite)(void *ctx, const void *buf, size_t sz, size_t cnt, void *file);
+    size_t (*fread)(void *ctx, void *buf, size_t sz, size_t cnt, void *file);
+    size_t (*fwrite)(void *ctx, const void *buf, size_t sz, size_t cnt, void *file);
         int (*fseek)(void *ctx, void *file, long off, int whence);
         long (*ftell)(void *ctx, void *file);
         int (*fclose)(void *ctx, void *file);
@@ -345,7 +345,9 @@ typedef struct {
 ```c
 typedef struct {
     val_resume_mode_t mode;         // Resume mode
-    uint32_t crc_verify_bytes;      // Tail verification window (0 = auto)
+    uint32_t tail_cap_bytes;        // Tail verification cap (0 = default, clamped)
+    uint32_t min_verify_bytes;      // Optional minimum verification window (0 = none)
+    uint8_t  mismatch_skip;         // 0 = restart on mismatch; 1 = skip file
 } val_resume_config_t;
 ```
 
@@ -354,10 +356,7 @@ typedef struct {
 typedef enum {
     VAL_RESUME_NEVER = 0,           // Always overwrite from zero
     VAL_RESUME_SKIP_EXISTING = 1,   // Skip any existing file
-    VAL_RESUME_CRC_TAIL = 2,        // Resume on tail match; skip on mismatch
-    VAL_RESUME_CRC_TAIL_OR_ZERO = 3,// Resume on tail match; restart on mismatch
-    VAL_RESUME_CRC_FULL = 4,        // Skip when full-prefix matches; skip on mismatch
-    VAL_RESUME_CRC_FULL_OR_ZERO = 5 // Skip when full-prefix matches; restart on mismatch
+    VAL_RESUME_TAIL = 2,            // Verify tail window; resume on match
 } val_resume_mode_t;
 ```
 
@@ -366,9 +365,8 @@ typedef enum {
 - **NEVER**: Debug/testing, always want clean copy
 - **SKIP_EXISTING**: Avoid re-transferring completed files (no verification)
 - **CRC_TAIL**: Fast resume with verification, skip on corruption
-- **CRC_TAIL_OR_ZERO**: Fast resume, retry from beginning on corruption *(recommended)*
-- **CRC_FULL**: Maximum verification, skip on any corruption
-- **CRC_FULL_OR_ZERO**: Maximum verification, retry from beginning on corruption
+- **TAIL**: Fast resume using trailing verification window (cap via resume.tail_cap_bytes); restart or skip on mismatch based on resume.mismatch_skip
+Notes: Large files are verified using a tail window; adjust resume.tail_cap_bytes and mismatch policy as needed.
 
 ---
 
@@ -536,7 +534,7 @@ typedef struct {
     char filename[128];             // Sanitized basename
     char sender_path[128];          // Original path hint
     uint64_t file_size;             // File size
-    uint32_t file_crc32;            // Whole-file CRC32
+    // Removed: whole-file CRC32 from metadata
 } val_meta_payload_t;
 ```
 
@@ -914,43 +912,9 @@ Resets all metrics counters to zero.
 
 ---
 
-### val_get_wire_audit (Optional)
+### Packet Capture Hook (Optional)
 
-**Signature:**
-```c
-val_status_t val_get_wire_audit(val_session_t *session, val_wire_audit_t *out);
-```
-
-**Description:**  
-Retrieves wire audit stats (requires `VAL_ENABLE_WIRE_AUDIT=ON` at build time).
-
-**Wire Audit Structure:**
-```c
-typedef struct {
-    uint64_t sent_hello;
-    uint64_t sent_send_meta;
-    uint64_t sent_data;
-    // ... per-packet-type counters ...
-    uint64_t recv_hello;
-    uint64_t recv_send_meta;
-    uint64_t recv_data;
-    // ...
-    uint32_t max_inflight_observed;
-    uint32_t current_inflight;
-} val_wire_audit_t;
-```
-
----
-
-### val_reset_wire_audit (Optional)
-
-**Signature:**
-```c
-val_status_t val_reset_wire_audit(val_session_t *session);
-```
-
-**Description:**  
-Resets wire audit counters to zero.
+Set `cfg.capture.on_packet` to observe packet metadata (direction, type, lengths, offset, timestamp). No payload is exposed and overhead is near-zero when unset.
 
 ---
 

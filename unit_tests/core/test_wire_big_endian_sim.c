@@ -50,7 +50,6 @@ static int roundtrip_all(void) {
         strcpy(in.filename, "bebe.bin");
         strcpy(in.sender_path, "be/path");
         in.file_size = 0x0102030405060708ULL;
-        in.file_crc32 = 0x10203040;
         val_serialize_meta(&in, buf);
         val_meta_payload_t out; memset(&out, 0, sizeof(out));
         val_deserialize_meta(buf, &out);

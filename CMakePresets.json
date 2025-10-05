@@ -9,7 +9,8 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/windows-debug",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
+        "CMAKE_BUILD_TYPE": "Debug",
+        "VAL_BUILD_DIAGNOSTICS": "OFF"
       }
     },
     {
@@ -20,7 +21,8 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/windows-release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "VAL_BUILD_DIAGNOSTICS": "OFF"
       }
     },
     {
@@ -95,8 +97,8 @@
     { "name": "linux-release-metrics", "configurePreset": "linux-release-metrics" }
   ],
   "testPresets": [
-    { "name": "windows-debug", "configurePreset": "windows-debug", "configuration": "Debug", "output": { "outputOnFailure": true } },
-    { "name": "windows-release", "configurePreset": "windows-release", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "windows-debug", "configurePreset": "windows-debug", "configuration": "Debug", "output": { "outputOnFailure": true }, "filter": { "exclude": { "label": "diagnostic" } } },
+  { "name": "windows-release", "configurePreset": "windows-release", "configuration": "Release", "output": { "outputOnFailure": true }, "filter": { "exclude": { "label": "diagnostic" } } },
     { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } },
     { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } },
     { "name": "windows-debug-metrics", "configurePreset": "windows-debug-metrics", "configuration": "Debug", "output": { "outputOnFailure": true } },

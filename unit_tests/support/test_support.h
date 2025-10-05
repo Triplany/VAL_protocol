@@ -84,8 +84,8 @@ extern "C"
 
     // Minimal stdio wrappers used by tests
     void *ts_fopen(void *ctx, const char *path, const char *mode);
-    int ts_fread(void *ctx, void *buffer, size_t size, size_t count, void *file);
-    int ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file);
+    size_t ts_fread(void *ctx, void *buffer, size_t size, size_t count, void *file);
+    size_t ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file);
     int ts_fseek(void *ctx, void *file, long offset, int whence);
     long ts_ftell(void *ctx, void *file);
     int ts_fclose(void *ctx, void *file);
@@ -127,6 +127,8 @@ extern "C"
     void ts_delay(uint32_t ms);
 
     // Helper to build a common config for a session with provided buffers and duplex end
+    // resume_mode: VAL_RESUME_NEVER, VAL_RESUME_SKIP_EXISTING, or VAL_RESUME_TAIL
+    // verify_bytes: for VAL_RESUME_TAIL, this sets tail_cap_bytes (cap on verification window)
     void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t packet_size, test_duplex_t *end_as_ctx,
                         val_resume_mode_t resume_mode, uint32_t verify_bytes);
 

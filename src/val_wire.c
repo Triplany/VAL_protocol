@@ -3,10 +3,26 @@
 #include <string.h>
 
 #include "val_protocol.h"
+#include <assert.h>
 
-typedef char val_wire_assert_meta_size[(VAL_WIRE_META_SIZE == (VAL_MAX_FILENAME + 1u) + (VAL_MAX_PATH + 1u) + 8u + 4u) ? 1 : -1];
-typedef char val_wire_assert_fname[(VAL_MAX_FILENAME == 127u) ? 1 : -1];
-typedef char val_wire_assert_path[(VAL_MAX_PATH == 127u) ? 1 : -1];
+// Portable compile-time assertions: prefer C11 _Static_assert, fall back if unavailable
+#ifndef VAL_STATIC_ASSERT
+#  if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#    define VAL_STATIC_ASSERT(cond, msg) _Static_assert((cond), msg)
+#  elif defined(static_assert)
+#    define VAL_STATIC_ASSERT(cond, msg) static_assert((cond), msg)
+#  else
+#    define VAL_STATIC_ASSERT_JOIN(a, b) a##b
+#    define VAL_STATIC_ASSERT_XJOIN(a, b) VAL_STATIC_ASSERT_JOIN(a, b)
+#    define VAL_STATIC_ASSERT(cond, msg) typedef char VAL_STATIC_ASSERT_XJOIN(val_static_assert_, __LINE__)[(cond) ? 1 : -1]
+#  endif
+#endif
+
+// Compile-time validation of wire sizes and constants
+VAL_STATIC_ASSERT(VAL_WIRE_META_SIZE == (VAL_MAX_FILENAME + 1u) + (VAL_MAX_PATH + 1u) + 8u,
+                  "VAL_WIRE_META_SIZE must equal filename+path+size");
+VAL_STATIC_ASSERT(VAL_MAX_FILENAME == 127u, "VAL_MAX_FILENAME must be 127");
+VAL_STATIC_ASSERT(VAL_MAX_PATH == 127u, "VAL_MAX_PATH must be 127");
 
 void val_serialize_header(const val_packet_header_t *hdr, uint8_t *wire_data)
 {
@@ -98,7 +114,6 @@ void val_serialize_meta(const val_meta_payload_t *meta, uint8_t *wire_data)
     memcpy(wire_data, meta->filename, VAL_MAX_FILENAME + 1u);
     memcpy(wire_data + (VAL_MAX_FILENAME + 1u), meta->sender_path, VAL_MAX_PATH + 1u);
     VAL_PUT_LE64(wire_data + (VAL_MAX_FILENAME + 1u) + (VAL_MAX_PATH + 1u), meta->file_size);
-    VAL_PUT_LE32(wire_data + (VAL_MAX_FILENAME + 1u) + (VAL_MAX_PATH + 1u) + 8u, meta->file_crc32);
 }
 
 void val_deserialize_meta(const uint8_t *wire_data, val_meta_payload_t *meta)
@@ -109,7 +124,6 @@ void val_deserialize_meta(const uint8_t *wire_data, val_meta_payload_t *meta)
     memcpy(meta->filename, wire_data, VAL_MAX_FILENAME + 1u);
     memcpy(meta->sender_path, wire_data + (VAL_MAX_FILENAME + 1u), VAL_MAX_PATH + 1u);
     meta->file_size = VAL_GET_LE64(wire_data + (VAL_MAX_FILENAME + 1u) + (VAL_MAX_PATH + 1u));
-    meta->file_crc32 = VAL_GET_LE32(wire_data + (VAL_MAX_FILENAME + 1u) + (VAL_MAX_PATH + 1u) + 8u);
 }
 
 void val_serialize_resume_resp(const val_resume_resp_t *resp, uint8_t *wire_data)

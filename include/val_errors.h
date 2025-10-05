@@ -39,6 +39,17 @@ typedef enum
     VAL_ERR_PERFORMANCE = -15,
 } val_status_t;
 
+// Unified error object for richer reporting and less boilerplate
+// code:   primary status (VAL_OK or VAL_ERR_*)
+// detail: 32-bit detail mask (see categories below)
+// op:     optional static string identifying the operation/site (may be NULL)
+typedef struct
+{
+    val_status_t code;
+    uint32_t detail;
+    const char *op; // optional; do not free; typically a static string literal
+} val_error_t;
+
 // Error detail mask (32-bit) layout:
 // Bits 0-7:   Network/Transport
 // Bits 8-15:  CRC/Integrity
@@ -67,7 +78,7 @@ typedef enum
 // CRC (8-15)
 #define VAL_ERROR_DETAIL_CRC_HEADER ((uint32_t)0x00000100)
 #define VAL_ERROR_DETAIL_CRC_TRAILER ((uint32_t)0x00000200)
-#define VAL_ERROR_DETAIL_CRC_FILE ((uint32_t)0x00000400)
+/* 0x00000400 retired: VAL_ERROR_DETAIL_CRC_FILE removed */
 #define VAL_ERROR_DETAIL_CRC_RESUME ((uint32_t)0x00000800)
 #define VAL_ERROR_DETAIL_SIZE_MISMATCH ((uint32_t)0x00001000)
 #define VAL_ERROR_DETAIL_PACKET_CORRUPT ((uint32_t)0x00002000)
@@ -96,6 +107,8 @@ typedef enum
 #define VAL_ERROR_CONTEXT_SHIFT 28
 #define VAL_ERROR_CONTEXT_NONE 0u
 #define VAL_ERROR_CONTEXT_MISSING_FEATURES 1u
+// Additional context kinds
+#define VAL_ERROR_CONTEXT_MISSING_HOOKS 2u
 
 #define VAL_ERROR_CONTEXT(detail) (((uint32_t)(detail) & VAL_ERROR_DETAIL_CONTEXT_MASK) >> VAL_ERROR_CONTEXT_SHIFT)
 
@@ -108,6 +121,12 @@ typedef enum
     ((VAL_ERROR_CONTEXT(detail) == VAL_ERROR_CONTEXT_MISSING_FEATURES)                                                           \
          ? (((detail) & 0x00FFFFFFu) & ~VAL_ERROR_DETAIL_PROTO_MASK)                                                             \
          : 0u)
+
+// Helper: mark missing required hooks (transport/filesystem/system) precisely
+#define VAL_SET_MISSING_HOOKS() (((uint32_t)(VAL_ERROR_CONTEXT_MISSING_HOOKS) << VAL_ERROR_CONTEXT_SHIFT) | (uint32_t)VAL_ERROR_DETAIL_INVALID_STATE)
+
+// Checker for missing hooks
+#define VAL_ERROR_IS_MISSING_HOOKS(detail) (VAL_ERROR_CONTEXT(detail) == VAL_ERROR_CONTEXT_MISSING_HOOKS)
 
 // Category checkers
 #define VAL_ERROR_IS_NETWORK_RELATED(detail) (((detail) & VAL_ERROR_DETAIL_NET_MASK) != 0)

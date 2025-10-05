@@ -199,7 +199,7 @@ struct val_packet_header_t {
 ```c
 typedef enum {
     VAL_PKT_HELLO       = 1,   // Session/version negotiation
-    VAL_PKT_SEND_META   = 2,   // File metadata (name, size, CRC)
+  VAL_PKT_SEND_META   = 2,   // File metadata (name, size, path)
     VAL_PKT_RESUME_REQ  = 3,   // Sender requests resume options
     VAL_PKT_RESUME_RESP = 4,   // Receiver responds with action
     VAL_PKT_DATA        = 5,   // File data chunk
@@ -304,7 +304,7 @@ struct val_meta_payload_t {
     char     filename[128];      // Sanitized basename (UTF-8)
     char     sender_path[128];   // Original path hint (UTF-8)
     uint64_t file_size;          // File size in bytes
-    uint32_t file_crc32;         // Whole-file CRC32
+  // Removed: whole-file CRC32 (protocol now uses per-packet CRC and optional tail-verify for resume)
 };
 ```
 
@@ -343,23 +343,15 @@ typedef enum {
 
 #### 5.2.2 Resume Modes
 
-**Six Resume Modes:**
+Resume is simplified to three modes:
 
 1. **VAL_RESUME_NEVER**: Always overwrite from zero
 2. **VAL_RESUME_SKIP_EXISTING**: Skip any existing file (no verification)
-3. **VAL_RESUME_CRC_TAIL**: Verify tail, resume on match, skip on mismatch
-4. **VAL_RESUME_CRC_TAIL_OR_ZERO**: Verify tail, resume on match, restart on mismatch
-5. **VAL_RESUME_CRC_FULL**: Verify full prefix, resume/skip on match, skip on mismatch
-6. **VAL_RESUME_CRC_FULL_OR_ZERO**: Verify full prefix, resume/skip on match, restart on mismatch
+3. **VAL_RESUME_TAIL**: Verify a trailing window of the local file and resume on match
 
-**Tail Verification:**
-- Verifies last N bytes of local file (configurable, default 1 KB, capped at 2 MB)
-- If local_size > incoming_size, treat as mismatch
-
-**Full Verification:**
-- Verifies entire local file when local_size ≤ incoming_size
-- If local_size == incoming_size and CRC matches, skip file (already complete)
-- Large files use "large tail" verification (last CAP bytes) to maintain responsiveness
+Tail verification uses a configurable cap (`resume.tail_cap_bytes`) with an optional minimum (`resume.min_verify_bytes`). The cap is internally clamped (up to 256 MiB). On mismatch or verification timeout, behavior is governed by `resume.mismatch_skip`:
+- `0` (default): restart the file from zero
+- `1`: skip the file and continue the session
 
 #### 5.2.3 CRC Verification Exchange
 
@@ -759,7 +751,7 @@ Offset  Size  Field              Value (hex)
 - Hardware CRC acceleration
 - Custom memory allocators
 - Metrics collection
-- Wire audit trails
+- Packet capture hook (runtime callback)
 - Debug logging
 
 ### 10.3 Conformance Levels

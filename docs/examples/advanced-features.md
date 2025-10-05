@@ -89,58 +89,29 @@ cfg.adaptive_tx.allow_streaming = 1;                       // Enable streaming o
 
 **Important:** During handshake, both sides exchange their capabilities. The protocol automatically uses the **minimum capabilities** from both sides. If the receiver only supports `VAL_TX_WINDOW_2` and no streaming, that's what will be used regardless of sender's max settings.
 
-**Window Modes:**
-- `VAL_TX_SINGLE` - Stop-and-wait (1 packet in flight)
-- `VAL_TX_WINDOW_2`, `VAL_TX_WINDOW_4`, `VAL_TX_WINDOW_8` - Fixed window sizes
-- `VAL_TX_WINDOW_16`, `VAL_TX_WINDOW_32`, `VAL_TX_WINDOW_64` - Large windows
-
----
-
 ### How Capability Negotiation Works
-
+## Packet Capture Hook (Debug Feature)
 During the handshake, both sender and receiver exchange their capabilities. The protocol **automatically selects the minimum** from both sides:
 
-**Example: High-Performance PC ↔ Low-End MCU**
+### Observe packets (Runtime)
 
 ```c
-// PC (sender) - High capabilities
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
+static void capture(void *ctx, const val_packet_record_t *r) {
+    (void)ctx;
+    // Minimal sample: log TX/RX, type and sizes
+    fprintf(stderr, "[%s] type=%u wire=%u payload=%u off=%llu\n",
+        r->direction==VAL_DIR_TX?"TX":"RX", r->type, r->wire_len, r->payload_len,
+        (unsigned long long)r->offset);
+}
+
+cfg.capture.on_packet = capture;
+cfg.capture.context = NULL;
+```
 cfg.adaptive_tx.allow_streaming = 1;
 
 // MCU (receiver) - Limited capabilities  
 cfg.adaptive_tx.max_performance_mode = VAL_TX_SINGLE;  // Stop-and-wait only
-cfg.adaptive_tx.allow_streaming = 0;                   // No streaming
 ```
-
-**Negotiated Result:**
-- Max mode: `VAL_TX_SINGLE` (lowest of 64 and 1)
-- Streaming: `DISABLED` (both must support it)
-
-The sender will **never** use more than single-packet mode, regardless of network quality. The MCU's limits become the session limits.
-
-**Key Principle:** The handshake ensures both sides operate within the constraints of the **weakest link**. No configuration needed - it's automatic.
-
----
-
-### Aggressive Configuration (High-Speed LAN)
-
-```c
-// Maximize throughput on reliable, low-latency networks
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_16;
-cfg.adaptive_tx.allow_streaming = 1;
-
-cfg.adaptive_tx.escalation_success_threshold = 5;  // Escalate quickly
-cfg.adaptive_tx.deescalation_loss_threshold = 2;   // De-escalate on first sign of trouble
-cfg.adaptive_tx.min_stable_rounds = 2;             // Short stabilization period
-
-cfg.timeouts.min_timeout_ms = 50;   // Fast local network
-cfg.timeouts.max_timeout_ms = 5000;
-
-cfg.buffers.packet_size = 8192;  // Large packets
-```
-
-**Use Case:** Gigabit LAN, fiber links, local loopback
 
 ---
 
@@ -496,8 +467,10 @@ cfg.buffers.packet_size = 8192;
 ### Full CRC Resume (Full-Prefix with Fallback)
 
 ```c
-cfg.resume.mode = VAL_RESUME_CRC_FULL;
-cfg.resume.crc_verify_bytes = 0;  // Not used for FULL mode
+cfg.resume.mode = VAL_RESUME_TAIL;
+cfg.resume.tail_cap_bytes = 8 * 1024 * 1024;  // 8 MiB cap (example)
+cfg.resume.min_verify_bytes = 0;
+cfg.resume.mismatch_skip = 1;  // emulate legacy "skip on mismatch"
 ```
 
 **Behavior:**
@@ -512,8 +485,8 @@ cfg.resume.crc_verify_bytes = 0;  // Not used for FULL mode
 ### Tail CRC Resume (Balanced)
 
 ```c
-cfg.resume.mode = VAL_RESUME_CRC_TAIL_OR_ZERO;
-cfg.resume.crc_verify_bytes = 65536;  // Last 64 KB (max 2 MB enforced)
+cfg.resume.mode = VAL_RESUME_TAIL;
+cfg.resume.tail_cap_bytes = 65536;  // Last 64 KB cap (internally clamped)
 ```
 
 **Behavior:**
@@ -658,54 +631,7 @@ cfg.callbacks.on_health_check = on_health_check;
 
 ---
 
-## Wire Auditing (Debug Feature)
-
-### Enable Wire Audit (Compile-Time)
-
-```bash
-cmake -B build -DVAL_ENABLE_WIRE_AUDIT=ON
-cmake --build build
-```
-
-### Capture All Wire Traffic
-
-```c
-#ifdef VAL_ENABLE_WIRE_AUDIT
-
-FILE *audit_file = NULL;
-
-void audit_callback(void *ctx, int is_send,
-                   const void *data, size_t len) {
-    FILE *f = (FILE*)ctx;
-    const char *dir = is_send ? "SEND" : "RECV";
-    
-    fprintf(f, "[%s %zu bytes]\n", dir, len);
-    
-    // Hex dump
-    const uint8_t *bytes = (const uint8_t*)data;
-    for (size_t i = 0; i < len; i++) {
-        fprintf(f, "%02X ", bytes[i]);
-        if ((i + 1) % 16 == 0) fprintf(f, "\n");
-    }
-    fprintf(f, "\n\n");
-    fflush(f);
-}
-
-// Setup
-audit_file = fopen("wire_audit.log", "w");
-val_set_wire_audit_callback(session, audit_callback, audit_file);
-
-// ... run transfer ...
-
-// Cleanup
-fclose(audit_file);
-
-#endif
-```
-
-**Use Case:** Debugging protocol issues, verifying packet formats
-
----
+----
 
 ## Custom Memory Allocators
 

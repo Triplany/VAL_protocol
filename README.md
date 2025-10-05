@@ -1,5 +1,5 @@
 ````markdown
-# VAL Protocol### Documentation
+# VAL Protocol Documentation
 
 📚 **[Complete Documentation](docs/README.md)** | [Getting Started](docs/getting-started.md) | [API Reference](docs/api-reference.md) | [Protocol Spec](docs/protocol-specification.md)
 
@@ -26,8 +26,8 @@
 - **Packet Header**: Includes reserved `wire_version` byte (always 0); receivers validate and reject non-zero for future compatibility
 - **Flow Control**: Cumulative DATA_ACKs, DONE_ACK, and two CRCs (header + trailer) for integritytile Adaptive Link Protocol
 
-**⚠️ EARLY DEVELOPMENT NOTICE**  
-VAL Protocol v0.7 is ready for testing and evaluation but **not production-ready**. Backward compatibility is not guaranteed until v1.0.
+**⚠️ EARLY DEVELOPMENT NOTICE**
+VAL Protocol v0.7 is ready for testing and evaluation but not production-ready. Backward compatibility is not guaranteed until v1.0.
 
 ---
 
@@ -46,11 +46,11 @@ VAL Protocol is a robust, blocking-I/O file transfer protocol library written in
 - **Streaming Mode**: Continuous non-blocking transmission using ACKs as heartbeats (not flow control) - provides major speedup over pure windowing, especially powerful for memory-constrained devices (e.g., WINDOW_2 + streaming vs WINDOW_64 saves RAM while maintaining high throughput)
 - **Adaptive Transmission**: Dynamic window sizing (1-64 packets) that automatically adjusts to network conditions - minimum WINDOW_4 recommended for effective escalation/de-escalation
 - **Powerful Abstraction Layer**: Complete separation of protocol from transport, filesystem, and system - enables custom encryption, compression, in-memory transfers, any byte source
-- **Resume Support**: Six CRC-verified resume modes - tail mode (default 2MB cap), full-prefix mode (256MB cap with large-tail fallback)
+- **Resume Support**: Simplified, CRC-verified resume with tail-only verification (configurable cap; default small cap); also supports skip-existing
 - **Embedded-Friendly**: Zero dynamic allocations in steady state, configurable memory footprint, works on bare-metal
 - **Transport Agnostic**: Works over TCP, UART, RS-485, CAN, USB CDC, or any reliable byte stream
 - **Robust Error Handling**: Comprehensive error codes with detailed 32-bit diagnostic masks
-- **Optional Diagnostics**: Compile-time metrics collection and wire audit trails
+- **Optional Diagnostics**: Compile-time metrics collection and a lightweight packet capture hook
 
 - Development guide: [DEVELOPMENT.md](./DEVELOPMENT.md)
 - Packet flow reference: [PROTOCOL_FLOW.md](./PROTOCOL_FLOW.md)
@@ -66,9 +66,8 @@ VAL Protocol is a robust, blocking-I/O file transfer protocol library written in
 - Feature bits: see `include/val_protocol.h` and `val_get_builtin_features()`
   - Currently no optional features are defined; all core features (windowing, streaming, resume) are implicit and always available.
 - Resume configuration
-  - Six modes (see `val_resume_mode_t`): `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_CRC_TAIL`,
-    `VAL_RESUME_CRC_TAIL_OR_ZERO`, `VAL_RESUME_CRC_FULL`, `VAL_RESUME_CRC_FULL_OR_ZERO`.
-  - Tail modes use a trailing verification window (`crc_verify_bytes`); FULL modes verify a full prefix (with internal caps for large files).
+  - Modes (see `val_resume_mode_t`): `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_TAIL`.
+  - Tail mode uses a trailing verification window with a configurable cap (`resume.tail_cap_bytes`), clamped internally (up to 256 MiB). Optional `min_verify_bytes` avoids too-small windows. On mismatch, the policy is unified via `resume.mismatch_skip` (0 = restart from zero, 1 = skip the file).
   - Sizes/offsets on wire are 64‑bit LE.
 - Adaptive transmitter
   - Window-only rungs: `VAL_TX_WINDOW_64/32/16/8/4/2` and `VAL_TX_STOP_AND_WAIT` (larger enum = larger window; STOP_AND_WAIT (1) is the slowest).
@@ -85,7 +84,7 @@ VAL Protocol is a robust, blocking-I/O file transfer protocol library written in
     - `val_get_peer_tx_mode(session, &out_mode)`, `val_is_peer_streaming_engaged(session, &engaged)` — best-effort peer state
 - Diagnostics (optional, compile‑time)
   - Metrics: `VAL_ENABLE_METRICS` — packet/byte counters, timeouts, retransmits, crc errors, etc.
-  - Wire audit: `VAL_ENABLE_WIRE_AUDIT` — per‑packet send/recv counters and inflight window snapshot.
+  - Packet capture hook: configure `config.capture.on_packet` to observe TX/RX packets (type, sizes, offset)
   - Emergency cancel: `val_emergency_cancel(session)` sends a best‑effort CANCEL and marks the session aborted.
 
 Limitations
@@ -99,12 +98,12 @@ These CMake options toggle compile-time features; defaults are conservative.
 
 - **VAL_ENABLE_ERROR_STRINGS=ON**: Build host-only string utilities (`val_error_strings`) for human-readable error messages
 - **VAL_ENABLE_METRICS=OFF**: Enable lightweight internal counters/timing (packets, bytes, RTT, errors, retransmits)
-- **VAL_ENABLE_WIRE_AUDIT=OFF**: Enable detailed packet-level wire audit trails (send/recv counts, inflight snapshots)
+- Packet capture is a runtime callback (no build flag). Wire audit has been removed.
 - **VAL_LOG_LEVEL** (0-5): Compile-time log level (0=OFF, 1=CRITICAL, 2=WARNING, 3=INFO, 4=DEBUG, 5=TRACE)
 
 **Example:**
 ```bash
-cmake -B build -DVAL_ENABLE_METRICS=ON -DVAL_ENABLE_WIRE_AUDIT=ON -DVAL_LOG_LEVEL=4
+cmake -B build -DVAL_ENABLE_METRICS=ON -DVAL_LOG_LEVEL=4
 ```
 
 See [Implementation Guide](docs/implementation-guide.md#building-from-source) and [Advanced Features](docs/examples/advanced-features.md) for detailed usage.
@@ -142,7 +141,7 @@ Two executables live under `examples/tcp/` with optional flags for MTU and resum
 
 Resume mode names (case-insensitive) map to `val_resume_mode_t`:
 
-- `never`, `skip`/`skip_existing`, `tail`, `tail_or_zero`, `full`, `full_or_zero`
+- `never`, `skip`/`skip_existing`, `tail`
 
 Build (Windows/Visual Studio):
 
@@ -154,11 +153,11 @@ cmake --build build\windows-release --config Release -j
 Run (PowerShell):
 
 ```powershell
-# Receiver (port 9000, output to D:\\out, MTU 8192, resume tail-or-zero with 16 KiB)
-.\build\windows-release\bin\val_example_receive.exe --mtu 8192 --resume tail_or_zero --tail-bytes 16384 9000 D:\\out
+# Receiver (port 9000, output to D:\\out, MTU 8192, resume tail with 16 KiB cap)
+.\build\windows-release\bin\val_example_receive.exe --mtu 8192 --resume tail --tail-bytes 16384 9000 D:\\out
 
 # Sender (connect to localhost, same resume settings)
-.\build\windows-release\bin\val_example_send.exe --mtu 8192 --resume tail_or_zero --tail-bytes 16384 127.0.0.1 9000 D:\\files\a.bin D:\\files\b.bin
+.\build\windows-release\bin\val_example_send.exe --mtu 8192 --resume tail --tail-bytes 16384 127.0.0.1 9000 D:\\files\a.bin D:\\files\b.bin
 ```
 
 On Linux/WSL, use the provided `linux-*` presets in `CMakePresets.json` and run the corresponding binaries.

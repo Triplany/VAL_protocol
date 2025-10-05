@@ -602,8 +602,10 @@ void val_receiver_task(void *pvParameters) {
     cfg.adaptive_tx.allow_streaming = 0;
     
     // Resume
-    cfg.resume.mode = VAL_RESUME_CRC_TAIL_OR_ZERO;
-    cfg.resume.crc_verify_bytes = 2048;
+    cfg.resume.mode = VAL_RESUME_TAIL;
+    cfg.resume.tail_cap_bytes = 2048;
+    cfg.resume.min_verify_bytes = 0;
+    cfg.resume.mismatch_skip = 0;
     
     // Create session
     val_session_t *session = NULL;

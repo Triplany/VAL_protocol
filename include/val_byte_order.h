@@ -3,6 +3,17 @@
 
 #include <stdint.h>
 
+// Cross-compiler force-inline hint
+#ifndef VAL_FORCE_INLINE
+    #if defined(_MSC_VER)
+        #define VAL_FORCE_INLINE __forceinline
+    #elif defined(__GNUC__) || defined(__clang__)
+        #define VAL_FORCE_INLINE inline __attribute__((always_inline))
+    #else
+        #define VAL_FORCE_INLINE inline
+    #endif
+#endif
+
 // Test override hooks: allow forcing endian for a single translation unit
 #if defined(VAL_FORCE_LITTLE_ENDIAN) || defined(VAL_FORCE_BIG_ENDIAN)
     #undef VAL_LITTLE_ENDIAN
@@ -17,18 +28,36 @@
 #endif
 
 // Detect endianness at compile time
-#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__)
-    #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#if !defined(VAL_LITTLE_ENDIAN) && !defined(VAL_BIG_ENDIAN)
+    #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__)
+        #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            #define VAL_LITTLE_ENDIAN 1
+            #define VAL_BIG_ENDIAN 0
+        #elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+            #define VAL_LITTLE_ENDIAN 0
+            #define VAL_BIG_ENDIAN 1
+        #endif
+    #elif defined(_WIN32) || defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
+        // Windows, x86, x64, ARM64 are little-endian
         #define VAL_LITTLE_ENDIAN 1
         #define VAL_BIG_ENDIAN 0
-    #elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-        #define VAL_LITTLE_ENDIAN 0
+    #endif
+#endif
+
+// If only one is defined, define the complement to avoid inconsistent state without redefining existing macros
+#if defined(VAL_LITTLE_ENDIAN) && !defined(VAL_BIG_ENDIAN)
+    #if VAL_LITTLE_ENDIAN
+        #define VAL_BIG_ENDIAN 0
+    #else
         #define VAL_BIG_ENDIAN 1
     #endif
-#elif defined(_WIN32) || defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
-    // Windows, x86, x64, ARM64 are little-endian
-    #define VAL_LITTLE_ENDIAN 1
-    #define VAL_BIG_ENDIAN 0
+#endif
+#if !defined(VAL_LITTLE_ENDIAN) && defined(VAL_BIG_ENDIAN)
+    #if VAL_BIG_ENDIAN
+        #define VAL_LITTLE_ENDIAN 0
+    #else
+        #define VAL_LITTLE_ENDIAN 1
+    #endif
 #endif
 
 #ifndef VAL_LITTLE_ENDIAN
@@ -48,13 +77,13 @@
 #endif
 
 #if VAL_RUNTIME_ENDIAN_CHECK
-static inline int val_runtime_is_little_endian(void)
+static VAL_FORCE_INLINE int val_runtime_is_little_endian(void)
 {
     const uint16_t x = 0x00FFu;
     return (*((const uint8_t *)&x) == 0xFFu);
 }
 #else
-static inline int val_runtime_is_little_endian(void)
+static VAL_FORCE_INLINE int val_runtime_is_little_endian(void)
 {
 #if VAL_LITTLE_ENDIAN
     return 1;
@@ -64,12 +93,12 @@ static inline int val_runtime_is_little_endian(void)
 }
 #endif
 
-static inline uint16_t val_bswap16(uint16_t v)
+static VAL_FORCE_INLINE uint16_t val_bswap16(uint16_t v)
 {
     return (uint16_t)((v >> 8) | (v << 8));
 }
 
-static inline uint32_t val_bswap32(uint32_t v)
+static VAL_FORCE_INLINE uint32_t val_bswap32(uint32_t v)
 {
     return ((v & 0x000000FFu) << 24) |
            ((v & 0x0000FF00u) << 8) |
@@ -77,13 +106,13 @@ static inline uint32_t val_bswap32(uint32_t v)
            ((v & 0xFF000000u) >> 24);
 }
 
-static inline uint64_t val_bswap64(uint64_t v)
+static VAL_FORCE_INLINE uint64_t val_bswap64(uint64_t v)
 {
     return ((uint64_t)val_bswap32((uint32_t)(v & 0xFFFFFFFFu)) << 32) |
            (uint64_t)val_bswap32((uint32_t)(v >> 32));
 }
 
-static inline uint16_t val_htole16(uint16_t v)
+static VAL_FORCE_INLINE uint16_t val_htole16(uint16_t v)
 {
 #if VAL_LITTLE_ENDIAN
     return v;
@@ -94,7 +123,7 @@ static inline uint16_t val_htole16(uint16_t v)
 #endif
 }
 
-static inline uint32_t val_htole32(uint32_t v)
+static VAL_FORCE_INLINE uint32_t val_htole32(uint32_t v)
 {
 #if VAL_LITTLE_ENDIAN
     return v;
@@ -105,7 +134,7 @@ static inline uint32_t val_htole32(uint32_t v)
 #endif
 }
 
-static inline uint64_t val_htole64(uint64_t v)
+static VAL_FORCE_INLINE uint64_t val_htole64(uint64_t v)
 {
 #if VAL_LITTLE_ENDIAN
     return v;
@@ -116,17 +145,17 @@ static inline uint64_t val_htole64(uint64_t v)
 #endif
 }
 
-static inline uint16_t val_letoh16(uint16_t v)
+static VAL_FORCE_INLINE uint16_t val_letoh16(uint16_t v)
 {
     return val_htole16(v);
 }
 
-static inline uint32_t val_letoh32(uint32_t v)
+static VAL_FORCE_INLINE uint32_t val_letoh32(uint32_t v)
 {
     return val_htole32(v);
 }
 
-static inline uint64_t val_letoh64(uint64_t v)
+static VAL_FORCE_INLINE uint64_t val_letoh64(uint64_t v)
 {
     return val_htole64(v);
 }

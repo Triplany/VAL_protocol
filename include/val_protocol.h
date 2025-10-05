@@ -8,11 +8,11 @@
  * 
  * Features:
  * - Adaptive transmission with window-based flow control (1-64 packets)
- * - Six resume modes with CRC-verified partial transfers
+ * - Simplified resume with tail-only CRC verification (NEVER/SKIP_EXISTING/TAIL)
  * - Embedded-friendly: zero dynamic allocations in steady state
  * - Transport agnostic: works over TCP, UART, USB, or any reliable byte stream
  * - Comprehensive error handling with detailed diagnostic masks
- * - Optional metrics collection and wire audit trails
+ * - Optional metrics collection
  * 
  * @version 0.7.0
  * @date 2025
@@ -87,7 +87,6 @@ extern "C"
         // Receivers should decide their own output directory and must not concatenate this blindly to avoid path traversal.
         char sender_path[VAL_MAX_PATH + 1];
         uint64_t file_size;
-        uint32_t file_crc32; // whole-file CRC for integrity verification
     };
 
     typedef struct val_meta_payload_t val_meta_payload_t;
@@ -124,31 +123,28 @@ extern "C"
 
     // val_status_t is defined in val_errors.h
 
-    // New resume modes - replaces all existing resume enums
+    // Simplified resume modes (tail-only verification)
     typedef enum
     {
         VAL_RESUME_NEVER = 0,         // Always overwrite from zero
         VAL_RESUME_SKIP_EXISTING = 1, // Skip any existing file (no verification)
-        // Tail modes: receiver requests a CRC over the last N bytes of the local file (N = min(crc_verify_bytes, local_size)).
-        //   - If CRC matches the sender's tail at the same offset, resume from local_size.
-        //   - If CRC mismatches OR the local file is larger than the incoming file size, treat as mismatch.
-        //     TAIL -> skip the file; TAIL_OR_ZERO -> restart from offset 0.
-        VAL_RESUME_CRC_TAIL = 2,         // Resume on tail match; skip on mismatch
-        VAL_RESUME_CRC_TAIL_OR_ZERO = 3, // Resume on tail match; overwrite from zero on mismatch
-        // Full modes (full-prefix semantics): receiver requests a CRC over the entire local file (prefix) when local_size ≤
-        // incoming_size.
-        //   - If CRC matches this full local prefix:
-        //       • If local_size == incoming_size, skip the file entirely (already complete).
-        //       • Otherwise, resume from offset local_size.
-        //   - If local_size > incoming_size there is no possible match; treat as mismatch.
-        //     FULL -> skip the file; FULL_OR_ZERO -> overwrite from zero.
-        //   - Core applies a verification cap for responsiveness: if the local file exceeds the cap, FULL falls back to a
-        //     "large tail" verify over the last CAP bytes (resume and mismatch policies remain those of FULL/FULL_OR_ZERO).
-        VAL_RESUME_CRC_FULL = 4,         // Skip only when full-prefix matches exactly; otherwise skip on mismatch
-        VAL_RESUME_CRC_FULL_OR_ZERO = 5, // Skip only when full-prefix matches exactly; otherwise overwrite from zero
+        VAL_RESUME_TAIL = 2,          // Verify a tail window of the local file; on match resume from local_size
     } val_resume_mode_t;
 
     typedef struct val_session_s val_session_t;
+    // Packet capture hook (optional): observe each on-wire packet with minimal overhead.
+    typedef enum { VAL_DIR_TX = 1, VAL_DIR_RX = 2 } val_packet_direction_t;
+    typedef struct val_packet_record_t
+    {
+        val_packet_direction_t direction; // TX or RX
+        uint8_t type;                     // val_packet_type_t as byte
+        uint32_t wire_len;                // header + payload + trailer
+        uint32_t payload_len;             // payload size in bytes
+        uint64_t offset;                  // header offset
+        uint8_t crc_ok;                   // RX only: 1 if CRC verified, 0 otherwise; undefined for TX
+        uint32_t timestamp_ms;            // session clock at hook time
+        const void *session_id;           // opaque pointer for correlation (do not dereference)
+    } val_packet_record_t;
 
     // Optional memory allocator used by VAL for dynamic session/tracking allocation.
     // If not provided (alloc == NULL), VAL falls back to standard calloc/free.
@@ -177,14 +173,18 @@ extern "C"
 #define VAL_FEAT_NONE 0u
 #define VAL_BUILTIN_FEATURES VAL_FEAT_NONE
 
-    // Simple resume config - replaces complex resume struct
+    // Simplified resume config (tail-only)
     typedef struct
     {
-        val_resume_mode_t mode;
-        // Tail verification window size. Used only by TAIL modes. 0 = implementation-chosen default.
-        // Default cap: the core clamps tail verification to a small window (currently 2 MiB) to keep operations fast
-        // on slow/embedded storage. Larger requests are reduced to this cap. FULL modes ignore this value.
-        uint32_t crc_verify_bytes; // For tail modes only (0 = auto-calculate)
+        val_resume_mode_t mode;     // NEVER, SKIP_EXISTING, or TAIL
+        // Tail verification window cap in bytes. 0 = default (implementation-chosen). Clamped to an absolute max (256 MiB).
+        uint32_t tail_cap_bytes;
+        // Optional minimum verification window in bytes (0 = none). Useful to avoid too-small windows.
+        uint32_t min_verify_bytes;
+        // Mismatch policy for TAIL mode: 1 = skip file on mismatch; 0 = restart from zero on mismatch.
+        uint8_t mismatch_skip;
+        uint8_t reserved0;
+        uint16_t reserved1;
     } val_resume_config_t;
 
     // Adaptive transmission window rungs (fastest has the lowest numeric value)
@@ -243,8 +243,10 @@ extern "C"
         struct
         {
             void *(*fopen)(void *ctx, const char *path, const char *mode);
-            int (*fread)(void *ctx, void *buffer, size_t size, size_t count, void *file);
-            int (*fwrite)(void *ctx, const void *buffer, size_t size, size_t count, void *file);
+            // fread-like: returns number of elements successfully read (0..count)
+            size_t (*fread)(void *ctx, void *buffer, size_t size, size_t count, void *file);
+            // fwrite-like: returns number of elements successfully written (0..count)
+            size_t (*fwrite)(void *ctx, const void *buffer, size_t size, size_t count, void *file);
             int (*fseek)(void *ctx, void *file, long offset, int whence);
             long (*ftell)(void *ctx, void *file);
             int (*fclose)(void *ctx, void *file);
@@ -342,6 +344,13 @@ extern "C"
             // to the compile-time VAL_LOG_LEVEL when created.
             int min_level;
         } debug;
+
+        // Optional packet capture hook (disabled if NULL). Called once per complete packet.
+        struct
+        {
+            void (*on_packet)(void *ctx, const val_packet_record_t *rec);
+            void *context;
+        } capture;
     } val_config_t;
 
     // API
@@ -393,12 +402,15 @@ extern "C"
 
     // Retrieve last error info recorded by the session (code and optional detail mask)
     val_status_t val_get_last_error(val_session_t *session, val_status_t *code, uint32_t *detail_mask);
+    // New unified accessor: returns a val_error_t with code, detail, and optional op/site string.
+    // Returns VAL_OK and writes to out on success; VAL_ERR_INVALID_ARG on bad inputs.
+    val_status_t val_get_error(val_session_t *session, val_error_t *out);
 
     // Emergency cancel API (best-effort, +0 RAM)
     // Sends a CANCEL packet to the peer and marks the session as aborted.
     // Returns VAL_OK if at least one send succeeded; VAL_ERR_IO if all sends failed.
     val_status_t val_emergency_cancel(val_session_t *session);
-    // Convenience helper to query if session is in cancelled state (last_error_code == VAL_ERR_ABORTED)
+    // Convenience helper to query if session is in cancelled state (last_error.code == VAL_ERR_ABORTED)
     int val_check_for_cancel(val_session_t *session);
 
     // Metadata validation helpers
@@ -407,47 +419,7 @@ extern "C"
     // Set custom validator with context
     void val_config_set_validator(val_config_t *config, val_metadata_validator_t validator, void *context);
 
-#if VAL_ENABLE_WIRE_AUDIT
-    // Optional compile-time wire audit: per-packet counters and inflight tracking to assert protocol invariants.
-    typedef struct
-    {
-        // Packet counters
-        uint64_t sent_hello;
-        uint64_t sent_send_meta;
-        uint64_t sent_resume_req;
-        uint64_t sent_resume_resp;
-        uint64_t sent_verify;
-        uint64_t sent_data;
-        uint64_t sent_data_ack;
-        uint64_t sent_done;
-        uint64_t sent_error;
-        uint64_t sent_eot;
-        uint64_t sent_eot_ack;
-        uint64_t sent_done_ack;
-        // Recv packet counters
-        uint64_t recv_hello;
-        uint64_t recv_send_meta;
-        uint64_t recv_resume_req;
-        uint64_t recv_resume_resp;
-        uint64_t recv_verify;
-        uint64_t recv_data;
-        uint64_t recv_data_ack;
-        uint64_t recv_done;
-        uint64_t recv_error;
-        uint64_t recv_eot;
-        uint64_t recv_eot_ack;
-        uint64_t recv_done_ack;
-        // Inflight and window audit (sender perspective)
-        uint32_t max_inflight_observed; // maximum simultaneous packets in flight during a file
-        uint32_t current_inflight;      // current inflight at last update
-    } val_wire_audit_t;
-
-    // Retrieve a snapshot of the current wire audit stats.
-    // Returns VAL_OK when auditing is compiled in; VAL_ERR_INVALID_ARG on bad inputs.
-    val_status_t val_get_wire_audit(val_session_t *session, val_wire_audit_t *out);
-    // Reset wire audit counters to zero.
-    val_status_t val_reset_wire_audit(val_session_t *session);
-#endif // VAL_ENABLE_WIRE_AUDIT
+    // (Type moved above for use by val_config_t)
 
 #if VAL_ENABLE_METRICS
     // Optional compile-time metrics collection (enabled when VAL_ENABLE_METRICS=1 at build time)

@@ -54,7 +54,6 @@ static int test_meta(void) {
     strcpy(in.filename, "file.bin");
     strcpy(in.sender_path, "path/to");
     in.file_size = 0x0123456789ABCDEFULL;
-    in.file_crc32 = 0xDEADBEEF;
 
     val_serialize_meta(&in, buf);
     val_meta_payload_t out;

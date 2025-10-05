@@ -1,3 +1,27 @@
+## 0.7.0
+
+Breaking changes
+
+- Removed whole-file CRC32 from SEND_META payload and public API.
+	- Wire: VAL_WIRE_META_SIZE reduced by 4 bytes (filename + path + size only).
+	- API: val_meta_payload_t no longer contains file_crc32.
+	- Integrity is provided by per-packet CRCs and optional tail verification during resume.
+- Simplified resume modes to a tail-only scheme:
+Other removals
+
+- Removed error detail flag VAL_ERROR_DETAIL_CRC_FILE (0x00000400). It had no remaining code paths.
+
+	- Modes: VAL_RESUME_NEVER, VAL_RESUME_SKIP_EXISTING, VAL_RESUME_TAIL.
+	- New resume config fields: tail_cap_bytes, min_verify_bytes, mismatch_skip.
+	- Legacy FULL/TAIL variants are removed; use mismatch_skip=1 to emulate "skip on mismatch" behavior.
+
+Migration notes
+
+- If your code referenced meta.file_crc32, remove it. No replacement is needed; keep using per-packet CRCs and (optionally) tail verify.
+- If you previously used VAL_RESUME_CRC_TAIL[_OR_ZERO] or VAL_RESUME_CRC_FULL[_OR_ZERO]:
+	- Use VAL_RESUME_TAIL and set mismatch_skip=0 (restart) or 1 (skip) to choose the mismatch policy.
+	- Use tail_cap_bytes to cap the verification window; the core clamps to a safe maximum.
+
 # Changelog
 
 All notable changes to VAL Protocol will be documented in this file.
@@ -25,11 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Streaming Mode**: Continuous non-blocking transmission using ACKs as heartbeats (not flow control) - provides significant performance improvement, especially beneficial for memory-constrained devices (enables high throughput with small windows like WINDOW_2/4)
 - **Adaptive Transmission System**: Dynamic window-based flow control with discrete rungs (1, 2, 4, 8, 16, 32, 64 packets) that automatically adjusts based on network conditions
 - **Powerful Abstraction Layer**: Complete separation of protocol from transport/filesystem/system - enables custom encryption, compression, hardware CRC, in-memory transfers, any byte source
-- **Six Resume Modes**: NEVER, SKIP_EXISTING, CRC_TAIL, CRC_TAIL_OR_ZERO, CRC_FULL, CRC_FULL_OR_ZERO
+- **Simplified Resume Modes**: NEVER, SKIP_EXISTING, TAIL (tail verification with configurable cap and unified mismatch policy)
 - **Metadata Validation Framework**: Application callbacks to accept/skip/abort files based on metadata
 - **Connection Health Monitoring**: Graceful failure on excessive retry rates (>50%)
 - **Emergency Cancellation**: Best-effort CANCEL packet (ASCII CAN 0x18) with session abort
-- **Wire Audit**: Optional compile-time packet counters and inflight window tracking (VAL_ENABLE_WIRE_AUDIT)
+- Removed Wire Audit (compile-time) in favor of a runtime packet capture hook (config.capture.on_packet)
 - **Metrics Collection**: Optional compile-time statistics (VAL_ENABLE_METRICS)
 - **Comprehensive Logging**: Five log levels (CRITICAL, WARNING, INFO, DEBUG, TRACE) with compile-time gating
 - **RFC 6298 Adaptive Timeouts**: RTT-based timeout computation with Karn's algorithm

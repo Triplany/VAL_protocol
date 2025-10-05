@@ -110,8 +110,7 @@ struct val_session_s
     uint32_t peer_features;       // features advertised by peer during handshake
     val_timing_t timing;
     // last error info
-    val_status_t last_error_code;
-    uint32_t last_error_detail;
+    val_error_t last_error;
     // --- Adaptive transmission state (Phase 1 scaffolding) ---
     // Negotiated/active mode tracking
     val_tx_mode_t current_tx_mode;     // current active window rung
@@ -158,18 +157,7 @@ struct val_session_s
     // Metrics counters (zeroed at session create)
     val_metrics_t metrics;
 #endif
-#if VAL_ENABLE_WIRE_AUDIT
-    // Wire audit counters (zeroed at session create)
-    struct
-    {
-        // Packet counters
-        uint64_t sent[16];
-        uint64_t recv[16];
-        // Inflight/window audit (sender perspective)
-        uint32_t max_inflight_observed;
-        uint32_t current_inflight;
-    } audit;
-#endif
+    // No wire audit; use capture hook via config
     // thread-safety primitive (coarse serialization per session)
 #if defined(_WIN32)
     CRITICAL_SECTION lock;
@@ -190,7 +178,7 @@ typedef struct val_inflight_packet_s
 } val_inflight_packet_t;
 
 // Transmission mode helpers
-static inline int val_tx_mode_is_valid(val_tx_mode_t mode)
+static VAL_FORCE_INLINE int val_tx_mode_is_valid(val_tx_mode_t mode)
 {
     switch (mode)
     {
@@ -207,12 +195,12 @@ static inline int val_tx_mode_is_valid(val_tx_mode_t mode)
     }
 }
 
-static inline val_tx_mode_t val_tx_mode_sanitize(val_tx_mode_t mode)
+static VAL_FORCE_INLINE val_tx_mode_t val_tx_mode_sanitize(val_tx_mode_t mode)
 {
     return val_tx_mode_is_valid(mode) ? mode : VAL_TX_STOP_AND_WAIT;
 }
 
-static inline uint32_t val_tx_mode_window(val_tx_mode_t mode)
+static VAL_FORCE_INLINE uint32_t val_tx_mode_window(val_tx_mode_t mode)
 {
     switch (mode)
     {
@@ -227,7 +215,7 @@ static inline uint32_t val_tx_mode_window(val_tx_mode_t mode)
     }
 }
 
-static inline val_tx_mode_t val_tx_mode_from_window(uint32_t window)
+static VAL_FORCE_INLINE val_tx_mode_t val_tx_mode_from_window(uint32_t window)
 {
     switch (window)
     {
@@ -255,11 +243,46 @@ static inline val_tx_mode_t val_tx_mode_from_window(uint32_t window)
     }
 }
 
+// --- Handshake negotiation helpers (shared) ---
+// Compute the negotiated transmission cap (largest common window rung) from local config and peer handshake.
+static VAL_FORCE_INLINE val_tx_mode_t val_negotiated_tx_cap(const val_config_t *local_cfg, const val_handshake_t *peer_hs)
+{
+    if (!local_cfg || !peer_hs)
+        return VAL_TX_STOP_AND_WAIT;
+    val_tx_mode_t local_max = val_tx_mode_sanitize(local_cfg->adaptive_tx.max_performance_mode);
+    val_tx_mode_t peer_max = val_tx_mode_sanitize((val_tx_mode_t)peer_hs->max_performance_mode);
+    uint32_t local_w = val_tx_mode_window(local_max);
+    uint32_t peer_w = val_tx_mode_window(peer_max);
+    uint32_t shared_w = (local_w < peer_w) ? local_w : peer_w;
+    return val_tx_mode_from_window(shared_w);
+}
+
+// Select a conservative initial mode based on each side's preference and the negotiated cap.
+// Logic: clamp both preferences to the cap, then choose the slower (smaller window) of the two.
+static VAL_FORCE_INLINE val_tx_mode_t val_select_initial_mode(val_tx_mode_t local_pref,
+                                                             val_tx_mode_t peer_pref,
+                                                             val_tx_mode_t shared_cap)
+{
+    val_tx_mode_t lp = val_tx_mode_sanitize(local_pref);
+    val_tx_mode_t pp = val_tx_mode_sanitize(peer_pref);
+    uint32_t cap_w = val_tx_mode_window(shared_cap);
+    // Clamp preferences to cap
+    if (val_tx_mode_window(lp) > cap_w)
+        lp = shared_cap;
+    if (val_tx_mode_window(pp) > cap_w)
+        pp = shared_cap;
+    // Choose the slower (smaller window) of the two
+    uint32_t init_w = (val_tx_mode_window(lp) < val_tx_mode_window(pp))
+                          ? val_tx_mode_window(lp)
+                          : val_tx_mode_window(pp);
+    return val_tx_mode_from_window(init_w);
+}
+
 // Mode synchronization payloads
 // Extended handshake payload with adaptive fields declared in val_wire.h
 
 // Internal locking helpers (recursive on POSIX via mutex attr; CRITICAL_SECTION is recursive on Windows)
-static inline void val_internal_lock(val_session_t *s)
+static VAL_FORCE_INLINE void val_internal_lock(val_session_t *s)
 {
 #if defined(_WIN32)
     EnterCriticalSection(&s->lock);
@@ -267,7 +290,7 @@ static inline void val_internal_lock(val_session_t *s)
     pthread_mutex_lock(&s->lock);
 #endif
 }
-static inline void val_internal_unlock(val_session_t *s)
+static VAL_FORCE_INLINE void val_internal_unlock(val_session_t *s)
 {
 #if defined(_WIN32)
     LeaveCriticalSection(&s->lock);
@@ -301,42 +324,42 @@ uint32_t val_internal_get_timeout(val_session_t *s, val_operation_type_t op);
 
 #if VAL_ENABLE_METRICS
 // Internal helpers to update metrics; compile to no-ops when disabled
-static inline void val_metrics_inc_timeout(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_timeout(val_session_t *s)
 {
     if (s)
         s->metrics.timeouts++;
 }
-static inline void val_metrics_inc_retrans(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_retrans(val_session_t *s)
 {
     if (s)
         s->metrics.retransmits++;
 }
-static inline void val_metrics_inc_crcerr(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_crcerr(val_session_t *s)
 {
     if (s)
         s->metrics.crc_errors++;
 }
-static inline void val_metrics_inc_rtt_sample(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_rtt_sample(val_session_t *s)
 {
     if (s)
         s->metrics.rtt_samples++;
 }
-static inline void val_metrics_note_handshake(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_note_handshake(val_session_t *s)
 {
     if (s)
         s->metrics.handshakes++;
 }
-static inline void val_metrics_inc_files_sent(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_files_sent(val_session_t *s)
 {
     if (s)
         s->metrics.files_sent++;
 }
-static inline void val_metrics_inc_files_recv(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_files_recv(val_session_t *s)
 {
     if (s)
         s->metrics.files_recv++;
 }
-static inline void val_metrics_add_sent(val_session_t *s, size_t bytes, uint8_t type)
+static VAL_FORCE_INLINE void val_metrics_add_sent(val_session_t *s, size_t bytes, uint8_t type)
 {
     if (s)
     {
@@ -345,7 +368,7 @@ static inline void val_metrics_add_sent(val_session_t *s, size_t bytes, uint8_t 
         s->metrics.send_by_type[(unsigned)(type & 31u)]++;
     }
 }
-static inline void val_metrics_add_recv(val_session_t *s, size_t bytes, uint8_t type)
+static VAL_FORCE_INLINE void val_metrics_add_recv(val_session_t *s, size_t bytes, uint8_t type)
 {
     if (s)
     {
@@ -355,41 +378,41 @@ static inline void val_metrics_add_recv(val_session_t *s, size_t bytes, uint8_t 
     }
 }
 #else
-static inline void val_metrics_inc_timeout(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_timeout(val_session_t *s)
 {
     (void)s;
 }
-static inline void val_metrics_inc_retrans(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_retrans(val_session_t *s)
 {
     (void)s;
 }
-static inline void val_metrics_inc_crcerr(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_crcerr(val_session_t *s)
 {
     (void)s;
 }
-static inline void val_metrics_inc_rtt_sample(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_rtt_sample(val_session_t *s)
 {
     (void)s;
 }
-static inline void val_metrics_note_handshake(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_note_handshake(val_session_t *s)
 {
     (void)s;
 }
-static inline void val_metrics_inc_files_sent(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_files_sent(val_session_t *s)
 {
     (void)s;
 }
-static inline void val_metrics_inc_files_recv(val_session_t *s)
+static VAL_FORCE_INLINE void val_metrics_inc_files_recv(val_session_t *s)
 {
     (void)s;
 }
-static inline void val_metrics_add_sent(val_session_t *s, size_t bytes, uint8_t type)
+static VAL_FORCE_INLINE void val_metrics_add_sent(val_session_t *s, size_t bytes, uint8_t type)
 {
     (void)s;
     (void)bytes;
     (void)type;
 }
-static inline void val_metrics_add_recv(val_session_t *s, size_t bytes, uint8_t type)
+static VAL_FORCE_INLINE void val_metrics_add_recv(val_session_t *s, size_t bytes, uint8_t type)
 {
     (void)s;
     (void)bytes;
@@ -398,7 +421,7 @@ static inline void val_metrics_add_recv(val_session_t *s, size_t bytes, uint8_t 
 #endif
 
 // Optional transport helpers (safe wrappers)
-static inline int val_internal_transport_is_connected(val_session_t *s)
+static VAL_FORCE_INLINE int val_internal_transport_is_connected(val_session_t *s)
 {
     if (!s || !s->config)
         return 0;
@@ -412,7 +435,7 @@ static inline int val_internal_transport_is_connected(val_session_t *s)
     return 1;
 }
 
-static inline void val_internal_transport_flush(val_session_t *s)
+static VAL_FORCE_INLINE void val_internal_transport_flush(val_session_t *s)
 {
     if (s && s->config && s->config->transport.flush)
     {
@@ -442,15 +465,14 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s);
 // Error helpers
 val_status_t val_internal_send_error(val_session_t *s, val_status_t code, uint32_t detail);
 
-// Record last error in session
+// Record last error in session (unified)
 void val_internal_set_last_error(val_session_t *s, val_status_t code, uint32_t detail);
-// New: detailed setter
-static inline void val_internal_set_error_detailed(val_session_t *s, val_status_t code, uint32_t detail)
+// Full setter including op/site string
+void val_internal_set_last_error_full(val_session_t *s, val_status_t code, uint32_t detail, const char *op);
+// Compatibility helper: previous API name; now routes to full setter with op=__FUNCTION__ and logs numeric-only
+static VAL_FORCE_INLINE void val_internal_set_error_detailed(val_session_t *s, val_status_t code, uint32_t detail)
 {
-    if (!s)
-        return;
-    val_internal_set_last_error(s, code, detail);
-    // Numeric-only logging; on MCU builds avoid string lookups
+    val_internal_set_last_error_full(s, code, detail, __FUNCTION__);
     VAL_LOG_ERROR_CODE(s, code, detail);
 }
 
@@ -463,7 +485,9 @@ static inline void val_internal_set_error_detailed(val_session_t *s, val_status_
     val_internal_set_error_detailed((s), VAL_ERR_FEATURE_NEGOTIATION, VAL_SET_MISSING_FEATURE((missing_mask)))
 #define VAL_SET_PERFORMANCE_ERROR(s, detail) val_internal_set_error_detailed((s), VAL_ERR_PERFORMANCE, (detail))
 
-// Connection health monitoring: graceful failure on extreme conditions
+// Connection health monitoring (diagnostics). When VAL_BUILD_DIAGNOSTICS is not defined,
+// these become no-ops to save code size and runtime.
+#ifdef VAL_BUILD_DIAGNOSTICS
 // Tracks retry rate and aborts if connection quality is unacceptable
 static inline val_status_t val_internal_check_health(val_session_t *s)
 {
@@ -511,6 +535,15 @@ static inline val_status_t val_internal_check_health(val_session_t *s)
     VAL_LOG_DEBUGF((s), "health: retry recorded, total ops=%u retries=%u", \
                    (s)->health.operations, (s)->health.retries); \
 } while(0)
+#else
+static inline val_status_t val_internal_check_health(val_session_t *s)
+{
+    (void)s;
+    return VAL_OK;
+}
+#define VAL_HEALTH_RECORD_OPERATION(s) do { (void)(s); } while(0)
+#define VAL_HEALTH_RECORD_RETRY(s) do { (void)(s); } while(0)
+#endif
 
 // Internal CRC incremental helpers (for file-level CRC)
 uint32_t val_crc32_init_state(void);
@@ -522,6 +555,13 @@ uint32_t val_internal_crc32(val_session_t *s, const void *data, size_t length);
 uint32_t val_internal_crc32_init(val_session_t *s);
 uint32_t val_internal_crc32_update(val_session_t *s, uint32_t state, const void *data, size_t length);
 uint32_t val_internal_crc32_final(val_session_t *s, uint32_t state);
+
+// Compute CRC32 over a file region using the session's configured filesystem and recv buffer.
+// Reads [start_offset, start_offset+length) from the given open file handle in chunk sizes based
+// on the negotiated/effective packet size, updating the CRC incrementally. Returns VAL_OK and
+// writes the CRC to out_crc on success. On error, returns VAL_ERR_IO or VAL_ERR_INVALID_ARG.
+val_status_t val_internal_crc32_region(val_session_t *s, void *file_handle, uint64_t start_offset,
+                                       uint64_t length, uint32_t *out_crc);
 
 // Adaptive transmission mode management
 void val_internal_record_transmission_error(val_session_t *s);

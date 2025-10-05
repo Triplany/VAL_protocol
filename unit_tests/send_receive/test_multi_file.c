@@ -54,8 +54,8 @@ int main(void)
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = {.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
-    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 2048);
-    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 2048);
+    ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_TAIL, 2048);
+    ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_TAIL, 2048);
 
     val_session_t *tx = NULL;
     val_session_t *rx = NULL;
@@ -102,30 +102,7 @@ int main(void)
     }
 #endif
 
-#if VAL_ENABLE_WIRE_AUDIT
-    {
-        val_wire_audit_t a_tx = {0}, a_rx = {0};
-        if (val_get_wire_audit(tx, &a_tx) == VAL_OK && val_get_wire_audit(rx, &a_rx) == VAL_OK)
-        {
-            if (a_rx.sent_data != 0)
-            {
-                fprintf(stderr, "wire_audit: receiver sent DATA unexpectedly (count=%llu)\n", (unsigned long long)a_rx.sent_data);
-                return 12;
-            }
-            if (a_tx.sent_done_ack != 0 || a_tx.sent_eot_ack != 0)
-            {
-                fprintf(stderr, "wire_audit: sender sent *_ACK unexpectedly (done_ack=%llu eot_ack=%llu)\n",
-                        (unsigned long long)a_tx.sent_done_ack, (unsigned long long)a_tx.sent_eot_ack);
-                return 13;
-            }
-        }
-        else
-        {
-            fprintf(stderr, "val_get_wire_audit failed\n");
-            return 14;
-        }
-    }
-#endif
+/* Wire audit removed; rely on functional outcomes */
 
     val_session_destroy(tx);
     val_session_destroy(rx);

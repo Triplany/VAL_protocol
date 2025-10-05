@@ -126,8 +126,8 @@ int main(void) {
     
     // Filesystem (standard C)
     cfg.filesystem.fopen = (void*(*)(void*, const char*, const char*))fopen;
-    cfg.filesystem.fread = (int(*)(void*, void*, size_t, size_t, void*))fread;
-    cfg.filesystem.fwrite = (int(*)(void*, const void*, size_t, size_t, void*))fwrite;
+    cfg.filesystem.fread = (size_t(*)(void*, void*, size_t, size_t, void*))fread;
+    cfg.filesystem.fwrite = (size_t(*)(void*, const void*, size_t, size_t, void*))fwrite;
     cfg.filesystem.fseek = (int(*)(void*, void*, long, int))fseek;
     cfg.filesystem.ftell = (long(*)(void*, void*))ftell;
     cfg.filesystem.fclose = (int(*)(void*, void*))fclose;
@@ -145,9 +145,11 @@ int main(void) {
     cfg.timeouts.min_timeout_ms = 100;
     cfg.timeouts.max_timeout_ms = 10000;
     
-    // Resume: tail-or-zero (robust default)
-    cfg.resume.mode = VAL_RESUME_CRC_TAIL_OR_ZERO;
-    cfg.resume.crc_verify_bytes = 16384; // 16 KB tail
+    // Resume: tail verification (robust default)
+    cfg.resume.mode = VAL_RESUME_TAIL;
+    cfg.resume.tail_cap_bytes = 16384; // 16 KB cap for tail window
+    cfg.resume.min_verify_bytes = 0;   // optional
+    cfg.resume.mismatch_skip = 0;      // restart on mismatch (set 1 to skip file)
     
     // Create session
     val_session_t *session = NULL;
@@ -236,12 +238,12 @@ The repository includes complete TCP examples with all features enabled.
 ### With Advanced Options
 
 ```bash
-# Large MTU, full-file resume, verbose logging
-./val_example_send --mtu 32768 --resume full --log-level debug \
+# Large MTU, tail resume, verbose logging
+./val_example_send --mtu 32768 --resume tail --log-level debug \
     --tx-mode 64 --streaming on \
     192.168.1.100 9000 bigfile.iso
 
-./val_example_receive --mtu 32768 --resume full --log-level debug \
+./val_example_receive --mtu 32768 --resume tail --log-level debug \
     --accept-streaming on \
     9000 ./downloads
 ```
@@ -256,8 +258,8 @@ cfg.buffers.packet_size = 1024;
 cfg.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
 cfg.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
 cfg.adaptive_tx.allow_streaming = 0;
-cfg.resume.mode = VAL_RESUME_CRC_TAIL;
-cfg.resume.crc_verify_bytes = 1024; // Small tail
+cfg.resume.mode = VAL_RESUME_TAIL;
+cfg.resume.tail_cap_bytes = 1024; // Small tail cap
 ```
 
 ### High-Speed LAN
@@ -268,7 +270,7 @@ cfg.buffers.packet_size = (2*1024*1024); // 2 MB
 cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
 cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_32;
 cfg.adaptive_tx.allow_streaming = 1;
-cfg.resume.mode = VAL_RESUME_CRC_FULL_OR_ZERO;
+cfg.resume.mode = VAL_RESUME_TAIL;
 ```
 
 ### Unreliable Link (WiFi/Cellular)
@@ -368,8 +370,8 @@ val_config_set_validator(&cfg, my_validator, NULL);
 - Verify both sides are using compatible packet sizes
 
 **Resume always fails**
-- Try VAL_RESUME_CRC_TAIL_OR_ZERO mode (more forgiving)
-- Increase crc_verify_bytes to cover modified regions
+- Ensure VAL_RESUME_TAIL mode is selected
+- Increase resume.tail_cap_bytes to cover modified regions
 - Use VAL_RESUME_NEVER to disable resume and overwrite
 
 See [Troubleshooting Guide](troubleshooting.md) for more help.

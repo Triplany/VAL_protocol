@@ -12,17 +12,19 @@
 // the compiler entirely when VAL_LOG_LEVEL==0 because no callers remain.
 void val_internal_log(val_session_t *s, int level, const char *file, int line, const char *msg)
 {
-    if (!s || !s->config)
+    if (!s || !s->config || !s->config->debug.log)
         return;
-    // Runtime level filter: forward only if logger exists and level <= min_level (non-zero)
-    if (s->config->debug.log)
-    {
-        int minlvl = s->config->debug.min_level;
-        if (minlvl == 0)
-            return; // OFF
-        if (level <= minlvl)
-            s->config->debug.log(s->config->debug.context, level, file, line, msg);
-    }
+#if VAL_LOG_LEVEL == 0
+    (void)level; (void)file; (void)line; (void)msg;
+    return;
+#else
+    // Forward directly; compile-time VAL_LOG_LEVEL and call-site macros gate noise
+    int minlvl = s->config->debug.min_level;
+    if (minlvl == 0)
+        return;
+    if (level <= minlvl)
+        s->config->debug.log(s->config->debug.context, level, file, line, msg);
+#endif
 }
 
 void val_internal_logf(val_session_t *s, int level, const char *file, int line, const char *fmt, ...)
@@ -32,10 +34,14 @@ void val_internal_logf(val_session_t *s, int level, const char *file, int line, 
     int needed;
     if (!s || !s->config || !s->config->debug.log || !fmt)
         return;
-    // Runtime filter check before doing any formatting work
+    // Avoid formatting work when OFF or filtered out
+#if VAL_LOG_LEVEL == 0
+    return;
+#else
     int minlvl = s->config->debug.min_level;
     if (minlvl == 0 || level > minlvl)
         return;
+#endif
     va_start(ap, fmt);
     // Try to compute required length portably
     va_copy(ap2, ap);
@@ -146,22 +152,36 @@ uint32_t val_get_builtin_features(void)
     return VAL_BUILTIN_FEATURES;
 }
 
+// Inline helper to sanitize timeout bounds consistently
+static VAL_FORCE_INLINE void val_sanitize_timeouts_pair(uint32_t in_min, uint32_t in_max, uint32_t *out_min, uint32_t *out_max)
+{
+    uint32_t min_to = in_min ? in_min : 200u;
+    uint32_t max_to = in_max ? in_max : 8000u;
+    if (min_to > max_to)
+    {
+        uint32_t t = min_to;
+        min_to = max_to;
+        max_to = t;
+    }
+    if (out_min) *out_min = min_to;
+    if (out_max) *out_max = max_to;
+}
+
+static VAL_FORCE_INLINE void val_sanitize_timeouts_cfg(const val_config_t *cfg, uint32_t *out_min, uint32_t *out_max)
+{
+    uint32_t in_min = cfg ? cfg->timeouts.min_timeout_ms : 200u;
+    uint32_t in_max = cfg ? cfg->timeouts.max_timeout_ms : 8000u;
+    val_sanitize_timeouts_pair(in_min, in_max, out_min, out_max);
+}
+
 // Public: expose current transmitter mode (thread-safe)
 val_status_t val_get_current_tx_mode(val_session_t *session, val_tx_mode_t *out_mode)
 {
     if (!session || !out_mode)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     *out_mode = session->current_tx_mode;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return VAL_OK;
 }
 
@@ -170,17 +190,9 @@ val_status_t val_get_peer_tx_mode(val_session_t *session, val_tx_mode_t *out_mod
 {
     if (!session || !out_mode)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     *out_mode = session->peer_tx_mode;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return VAL_OK;
 }
 
@@ -189,17 +201,9 @@ val_status_t val_is_streaming_engaged(val_session_t *session, int *out_streaming
 {
     if (!session || !out_streaming_engaged)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     *out_streaming_engaged = session->streaming_engaged ? 1 : 0;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return VAL_OK;
 }
 
@@ -207,17 +211,9 @@ val_status_t val_is_peer_streaming_engaged(val_session_t *session, int *out_peer
 {
     if (!session || !out_peer_streaming_engaged)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     *out_peer_streaming_engaged = session->peer_streaming_engaged ? 1 : 0;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return VAL_OK;
 }
 
@@ -226,18 +222,10 @@ val_status_t val_get_streaming_allowed(val_session_t *session, int *out_send_all
 {
     if (!session || !out_send_allowed || !out_recv_allowed)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     *out_send_allowed = session->send_streaming_allowed ? 1 : 0;
     *out_recv_allowed = session->recv_streaming_allowed ? 1 : 0;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return VAL_OK;
 }
 
@@ -246,94 +234,12 @@ val_status_t val_get_effective_packet_size(val_session_t *session, size_t *out_p
 {
     if (!session || !out_packet_size)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     *out_packet_size = session->effective_packet_size ? session->effective_packet_size : session->config->buffers.packet_size;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return VAL_OK;
 }
 
-#if VAL_ENABLE_WIRE_AUDIT
-static void val__audit_zero(val_session_t *s)
-{
-    if (!s)
-        return;
-    memset(&s->audit, 0, sizeof(s->audit));
-}
-
-val_status_t val_get_wire_audit(val_session_t *session, val_wire_audit_t *out)
-{
-    if (!session || !out)
-        return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
-    // Map internal compact arrays to public struct
-    memset(out, 0, sizeof(*out));
-    // Sent
-    out->sent_hello = session->audit.sent[VAL_PKT_HELLO];
-    out->sent_send_meta = session->audit.sent[VAL_PKT_SEND_META];
-    out->sent_resume_req = session->audit.sent[VAL_PKT_RESUME_REQ];
-    out->sent_resume_resp = session->audit.sent[VAL_PKT_RESUME_RESP];
-    out->sent_verify = session->audit.sent[VAL_PKT_VERIFY];
-    out->sent_data = session->audit.sent[VAL_PKT_DATA];
-    out->sent_data_ack = session->audit.sent[VAL_PKT_DATA_ACK];
-    out->sent_done = session->audit.sent[VAL_PKT_DONE];
-    out->sent_error = session->audit.sent[VAL_PKT_ERROR];
-    out->sent_eot = session->audit.sent[VAL_PKT_EOT];
-    out->sent_eot_ack = session->audit.sent[VAL_PKT_EOT_ACK];
-    out->sent_done_ack = session->audit.sent[VAL_PKT_DONE_ACK];
-    // Recv
-    out->recv_hello = session->audit.recv[VAL_PKT_HELLO];
-    out->recv_send_meta = session->audit.recv[VAL_PKT_SEND_META];
-    out->recv_resume_req = session->audit.recv[VAL_PKT_RESUME_REQ];
-    out->recv_resume_resp = session->audit.recv[VAL_PKT_RESUME_RESP];
-    out->recv_verify = session->audit.recv[VAL_PKT_VERIFY];
-    out->recv_data = session->audit.recv[VAL_PKT_DATA];
-    out->recv_data_ack = session->audit.recv[VAL_PKT_DATA_ACK];
-    out->recv_done = session->audit.recv[VAL_PKT_DONE];
-    out->recv_error = session->audit.recv[VAL_PKT_ERROR];
-    out->recv_eot = session->audit.recv[VAL_PKT_EOT];
-    out->recv_eot_ack = session->audit.recv[VAL_PKT_EOT_ACK];
-    out->recv_done_ack = session->audit.recv[VAL_PKT_DONE_ACK];
-    // Window audit
-    out->max_inflight_observed = session->audit.max_inflight_observed;
-    out->current_inflight = session->audit.current_inflight;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
-    return VAL_OK;
-}
-
-val_status_t val_reset_wire_audit(val_session_t *session)
-{
-    if (!session)
-        return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
-    val__audit_zero(session);
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
-    return VAL_OK;
-}
-#endif // VAL_ENABLE_WIRE_AUDIT
 
 // Metadata validation helpers
 void val_config_validation_disabled(val_config_t *config)
@@ -387,6 +293,37 @@ uint32_t val_internal_crc32_final(val_session_t *s, uint32_t state)
         return s->config->crc.crc32_final(s->config->crc.crc_context, state);
     }
     return val_crc32_finalize_state(state);
+}
+
+val_status_t val_internal_crc32_region(val_session_t *s, void *file_handle, uint64_t start_offset,
+                                       uint64_t length, uint32_t *out_crc)
+{
+    if (!s || !s->config || !s->config->filesystem.fseek || !s->config->filesystem.fread || !out_crc)
+        return VAL_ERR_INVALID_ARG;
+    if (!s->config->buffers.recv_buffer)
+        return VAL_ERR_INVALID_ARG;
+    size_t step = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size;
+    if (step == 0)
+        return VAL_ERR_INVALID_ARG;
+    if (step > s->config->buffers.packet_size)
+        step = s->config->buffers.packet_size;
+    // Seek to start
+    if (s->config->filesystem.fseek(s->config->filesystem.fs_context, file_handle, (long)start_offset, SEEK_SET) != 0)
+        return VAL_ERR_IO;
+    uint32_t state = val_internal_crc32_init(s);
+    uint64_t left = length;
+    while (left > 0)
+    {
+        size_t take = (left < (uint64_t)step) ? (size_t)left : step;
+        size_t rr = s->config->filesystem.fread(s->config->filesystem.fs_context,
+                                                s->config->buffers.recv_buffer, 1, take, file_handle);
+        if (rr != take)
+            return VAL_ERR_IO;
+        state = val_internal_crc32_update(s, state, s->config->buffers.recv_buffer, take);
+        left -= take;
+    }
+    *out_crc = val_internal_crc32_final(s, state);
+    return VAL_OK;
 }
 
 size_t val_internal_strnlen(const char *s, size_t maxlen)
@@ -446,18 +383,11 @@ void val_internal_set_last_error(val_session_t *s, val_status_t code, uint32_t d
     if (!s)
         return;
     // Protect last error fields with session lock
-#if defined(_WIN32)
-    EnterCriticalSection(&s->lock);
-#else
-    pthread_mutex_lock(&s->lock);
-#endif
-    s->last_error_code = code;
-    s->last_error_detail = detail;
-#if defined(_WIN32)
-    LeaveCriticalSection(&s->lock);
-#else
-    pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_lock(s);
+    s->last_error.code = code;
+    s->last_error.detail = detail;
+    // Keep op if previously set; call sites using val_internal_set_error_ex will override op via a small shim below
+    val_internal_unlock(s);
 }
 
 val_status_t val_get_last_error(val_session_t *session, val_status_t *code, uint32_t *detail_mask)
@@ -465,20 +395,33 @@ val_status_t val_get_last_error(val_session_t *session, val_status_t *code, uint
     if (!session)
         return VAL_ERR_INVALID_ARG;
     // Protect reads with session lock
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     if (code)
-        *code = session->last_error_code;
+        *code = session->last_error.code;
     if (detail_mask)
-        *detail_mask = session->last_error_detail;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+        *detail_mask = session->last_error.detail;
+    val_internal_unlock(session);
+    return VAL_OK;
+}
+
+void val_internal_set_last_error_full(val_session_t *s, val_status_t code, uint32_t detail, const char *op)
+{
+    if (!s)
+        return;
+    val_internal_lock(s);
+    s->last_error.code = code;
+    s->last_error.detail = detail;
+    s->last_error.op = op;
+    val_internal_unlock(s);
+}
+
+val_status_t val_get_error(val_session_t *session, val_error_t *out)
+{
+    if (!session || !out)
+        return VAL_ERR_INVALID_ARG;
+    val_internal_lock(session);
+    *out = session->last_error;
+    val_internal_unlock(session);
     return VAL_OK;
 }
 
@@ -486,18 +429,19 @@ static uint32_t validate_config_details(const val_config_t *cfg)
 {
     uint32_t detail = 0;
     if (!cfg)
-        return VAL_ERROR_DETAIL_INVALID_STATE; // generic invalid
+        return VAL_SET_MISSING_HOOKS(); // precise missing config
     if (!cfg->transport.send || !cfg->transport.recv)
         detail |= VAL_ERROR_DETAIL_CONNECTION; // use transport-related code as proxy
+    // Filesystem hooks missing -> mark as MISSING_HOOKS in context for precision
     if (!cfg->filesystem.fopen || !cfg->filesystem.fread || !cfg->filesystem.fwrite || !cfg->filesystem.fseek ||
         !cfg->filesystem.ftell || !cfg->filesystem.fclose)
-        detail |= VAL_ERROR_DETAIL_PERMISSION; // filesystem hooks missing
+        detail |= VAL_SET_MISSING_HOOKS();
     if (!cfg->buffers.send_buffer || !cfg->buffers.recv_buffer)
         detail |= VAL_ERROR_DETAIL_PAYLOAD_SIZE; // buffers missing
     if (cfg->buffers.packet_size < VAL_MIN_PACKET_SIZE || cfg->buffers.packet_size > VAL_MAX_PACKET_SIZE)
         detail |= VAL_ERROR_DETAIL_PACKET_SIZE;
     if (!cfg->system.get_ticks_ms)
-        detail |= VAL_ERROR_DETAIL_TIMEOUT_HELLO; // indicate required clock missing
+        detail |= VAL_SET_MISSING_HOOKS(); // missing clock hook
     return detail;
 }
 
@@ -537,8 +481,9 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     s->effective_packet_size = s->cfg.buffers.packet_size; // default until handshake negotiates min
     s->handshake_done = 0;
     s->peer_features = 0;
-    s->last_error_code = VAL_OK;
-    s->last_error_detail = 0;
+    s->last_error.code = VAL_OK;
+    s->last_error.detail = 0;
+    s->last_error.op = NULL;
     // Initialize adaptive TX scaffolding
     s->current_tx_mode = VAL_TX_STOP_AND_WAIT;
     s->peer_tx_mode = VAL_TX_STOP_AND_WAIT;
@@ -567,23 +512,10 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
 #if VAL_ENABLE_METRICS
     memset(&s->metrics, 0, sizeof(s->metrics));
 #endif
-#if VAL_ENABLE_WIRE_AUDIT
-    memset(&s->audit, 0, sizeof(s->audit));
-#endif
     // Initialize adaptive timing state
     // Clamp/sanitize config bounds: if invalid, swap, and default when zero.
-    uint32_t min_to = config->timeouts.min_timeout_ms ? config->timeouts.min_timeout_ms : 200u;
-    uint32_t max_to = config->timeouts.max_timeout_ms ? config->timeouts.max_timeout_ms : 8000u;
-    if (min_to == 0)
-        min_to = 200u;
-    if (max_to == 0)
-        max_to = 8000u;
-    if (min_to > max_to)
-    {
-        uint32_t tmp = min_to;
-        min_to = max_to;
-        max_to = tmp;
-    }
+    uint32_t min_to, max_to;
+    val_sanitize_timeouts_cfg(config, &min_to, &max_to);
     s->timing.min_timeout_ms = min_to;
     s->timing.max_timeout_ms = max_to;
     s->timing.srtt_ms = max_to / 2u;   // conservative initial SRTT
@@ -591,7 +523,7 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     s->timing.samples_taken = 0;
     s->timing.in_retransmit = 0;
     // Clock presence is guaranteed by validate_config(); no runtime fallback paths.
-    // No legacy resume policy defaults; simplified resume config has only mode and crc_verify_bytes.
+    // No legacy resume policy defaults; simplified resume config has only mode and tail_cap_bytes/min_verify_bytes and mismatch policy.
 #if VAL_LOG_LEVEL == 0
     s->cfg.debug.min_level = 0; // OFF in builds without logging
 #else
@@ -653,14 +585,8 @@ void val_internal_init_timing(val_session_t *s)
 {
     if (!s)
         return;
-    uint32_t min_to = s->config->timeouts.min_timeout_ms ? s->config->timeouts.min_timeout_ms : 200u;
-    uint32_t max_to = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : 8000u;
-    if (min_to > max_to)
-    {
-        uint32_t t = min_to;
-        min_to = max_to;
-        max_to = t;
-    }
+    uint32_t min_to, max_to;
+    val_sanitize_timeouts_cfg(s->config, &min_to, &max_to);
     s->timing.min_timeout_ms = min_to;
     s->timing.max_timeout_ms = max_to;
     s->timing.srtt_ms = max_to / 2u;
@@ -753,14 +679,8 @@ uint32_t val_internal_get_timeout(val_session_t *s, val_operation_type_t op)
         rto = 0xFFFFFFFFull;
     uint32_t rto32 = (uint32_t)rto;
     // Clamp to [min,max]
-    uint32_t min_to = s->timing.min_timeout_ms ? s->timing.min_timeout_ms : 200u;
-    uint32_t max_to = s->timing.max_timeout_ms ? s->timing.max_timeout_ms : 8000u;
-    if (min_to > max_to)
-    {
-        uint32_t t = min_to;
-        min_to = max_to;
-        max_to = t;
-    }
+    uint32_t min_to, max_to;
+    val_sanitize_timeouts_pair(s->timing.min_timeout_ms, s->timing.max_timeout_ms, &min_to, &max_to);
     return val__clamp_u32(rto32, min_to, max_to);
 }
 
@@ -804,20 +724,16 @@ static void fill_header(val_packet_header_t *h, val_packet_type_t type, uint32_t
 int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len, uint64_t offset)
 {
     // Serialize low-level send operations; recursive with public API locks
-#if defined(_WIN32)
-    EnterCriticalSection(&s->lock);
-#else
-    pthread_mutex_lock(&s->lock);
-#endif
+    val_internal_lock(s);
+    // Cache hooks used repeatedly in this function (function pointers + context)
+    void *io = s->config->transport.io_context;
+    int (*send_fn)(void *, const void *, size_t) = s->config->transport.send;
+    uint32_t (*ticks_fn)(void) = s->config->system.get_ticks_ms;
     // Optional preflight connection check
     if (!val_internal_transport_is_connected(s))
     {
         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+        val_internal_unlock(s);
         return VAL_ERR_IO;
     }
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size; // MTU
@@ -826,21 +742,17 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
         // Payload does not fit into negotiated MTU
         val_internal_set_error_detailed(s, VAL_ERR_INVALID_ARG, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
         VAL_LOG_ERROR(s, "send_packet: payload too large for MTU");
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
         return VAL_ERR_INVALID_ARG;
     }
     uint8_t *buf = (uint8_t *)s->config->buffers.send_buffer;
     uint32_t seq = s->seq_counter++;
     val_packet_header_t header;
     fill_header(&header, type, payload_len, offset, seq);
+    // Serialize header once with header_crc=0, compute CRC over 24 bytes, then write CRC in-place
     val_serialize_header(&header, buf);
     uint32_t header_crc = val_internal_crc32(s, buf, VAL_WIRE_HEADER_SIZE);
-    header.header_crc = header_crc;
-    val_serialize_header(&header, buf);
+    VAL_PUT_LE32(buf + 20, header_crc);
     uint8_t *payload_dst = buf + VAL_WIRE_HEADER_SIZE;
     if (payload_len && payload)
     {
@@ -851,12 +763,8 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
     uint32_t pkt_crc = val_internal_crc32(s, buf, used);
     VAL_PUT_LE32(buf + used, pkt_crc);
     size_t total_len = used + VAL_WIRE_TRAILER_SIZE;
-    int rc = s->config->transport.send(s->config->transport.io_context, buf, total_len);
-#if defined(_WIN32)
-    LeaveCriticalSection(&s->lock);
-#else
-    pthread_mutex_unlock(&s->lock);
-#endif
+    int rc = send_fn ? send_fn(io, buf, total_len) : -1;
+    val_internal_unlock(s);
     if (rc != (int)total_len)
     {
         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_SEND_FAILED);
@@ -865,13 +773,21 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
     }
     // Metrics: count one packet and bytes on successful low-level send
     val_metrics_add_sent(s, total_len, (uint8_t)type);
-#if VAL_ENABLE_WIRE_AUDIT
-    if ((unsigned)type < 16u)
+    // Packet capture hook (TX)
+    if (s->config->capture.on_packet)
     {
-        // Bump outside of the lock to keep overhead minimal; tearing is acceptable for test-only stats
-        s->audit.sent[(unsigned)type]++;
+        val_packet_record_t rec;
+        rec.direction = VAL_DIR_TX;
+        rec.type = (uint8_t)type;
+        rec.wire_len = (uint32_t)total_len;
+        rec.payload_len = payload_len;
+        rec.offset = offset;
+        rec.crc_ok = 1; // not meaningful on TX
+        uint32_t now = ticks_fn ? ticks_fn() : 0u;
+        rec.timestamp_ms = now;
+        rec.session_id = (const void *)s;
+        s->config->capture.on_packet(s->config->capture.context, &rec);
     }
-#endif
     // Best-effort flush after control packets where timely delivery matters
     if (type == VAL_PKT_DONE || type == VAL_PKT_EOT || type == VAL_PKT_HELLO || type == VAL_PKT_ERROR || type == VAL_PKT_CANCEL)
     {
@@ -884,25 +800,20 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
                              uint32_t *payload_len_out, uint64_t *offset_out, uint32_t timeout_ms)
 {
     // Serialize low-level recv operations; recursive with public API locks
-#if defined(_WIN32)
-    EnterCriticalSection(&s->lock);
-#else
-    pthread_mutex_lock(&s->lock);
-#endif
+    val_internal_lock(s);
+    void *io = s->config->transport.io_context;
+    int (*recv_fn)(void *, void *, size_t, size_t *, uint32_t) = s->config->transport.recv;
+    uint32_t (*ticks_fn)(void) = s->config->system.get_ticks_ms;
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size; // MTU
     uint8_t *buf = (uint8_t *)s->config->buffers.recv_buffer;
     size_t got = 0;
     // Read header first
-    int rc = s->config->transport.recv(s->config->transport.io_context, buf, VAL_WIRE_HEADER_SIZE, &got, timeout_ms);
+    int rc = recv_fn ? recv_fn(io, buf, VAL_WIRE_HEADER_SIZE, &got, timeout_ms) : -1;
     if (rc < 0)
     {
         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
         VAL_LOG_ERROR(s, "recv_packet: transport error on header");
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
         return VAL_ERR_IO;
     }
     if (got != VAL_WIRE_HEADER_SIZE)
@@ -910,11 +821,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         // Benign timeout while waiting for a header; record without emitting a CRITICAL numeric log
         val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
         VAL_LOG_DEBUG(s, "recv_packet: header timeout");
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
         val_metrics_inc_timeout(s);
         return VAL_ERR_TIMEOUT;
     }
@@ -945,17 +852,12 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         {
             memmove(window, window + 1, VAL_WIRE_HEADER_SIZE - 1);
             size_t gotb = 0;
-            int rc2 = s->config->transport.recv(s->config->transport.io_context, window + VAL_WIRE_HEADER_SIZE - 1, 1,
-                                                 &gotb, timeout_ms);
+            int rc2 = recv_fn ? recv_fn(io, window + VAL_WIRE_HEADER_SIZE - 1, 1, &gotb, timeout_ms) : -1;
             if (rc2 < 0)
             {
                 VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
                 VAL_LOG_ERROR(s, "recv_packet: transport error during resync");
-#if defined(_WIN32)
-                LeaveCriticalSection(&s->lock);
-#else
-                pthread_mutex_unlock(&s->lock);
-#endif
+                val_internal_unlock(s);
                 return VAL_ERR_IO;
             }
             if (gotb != 1)
@@ -963,11 +865,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
                 // Resync timeout — record without CRITICAL numeric log
                 val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
                 VAL_LOG_DEBUG(s, "recv_packet: timeout while resyncing after bad header");
-#if defined(_WIN32)
-                LeaveCriticalSection(&s->lock);
-#else
-                pthread_mutex_unlock(&s->lock);
-#endif
+                val_internal_unlock(s);
                 val_metrics_inc_timeout(s);
                 return VAL_ERR_TIMEOUT;
             }
@@ -992,11 +890,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
             if (bytes_scanned > scan_limit)
             {
                 VAL_LOG_ERROR(s, "recv_packet: resync failed after scanning limit");
-#if defined(_WIN32)
-                LeaveCriticalSection(&s->lock);
-#else
-                pthread_mutex_unlock(&s->lock);
-#endif
+                val_internal_unlock(s);
                 return VAL_ERR_CRC;
             }
         }
@@ -1007,11 +901,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     if (header.wire_version != 0)
     {
         val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION_MAJOR);
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
         return VAL_ERR_INCOMPATIBLE_VERSION;
     }
 
@@ -1020,39 +910,26 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
         VAL_LOG_ERROR(s, "recv_packet: payload_len exceeds MTU");
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
         return VAL_ERR_PROTOCOL;
     }
 
     if (payload_len > 0)
     {
         size_t got2 = 0;
-        rc = s->config->transport.recv(s->config->transport.io_context, buf + VAL_WIRE_HEADER_SIZE, payload_len, &got2,
-                                       timeout_ms);
+    rc = recv_fn ? recv_fn(io, buf + VAL_WIRE_HEADER_SIZE, payload_len, &got2, timeout_ms) : -1;
         if (rc < 0)
         {
             VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
             VAL_LOG_ERROR(s, "recv_packet: transport error on payload");
-#if defined(_WIN32)
-            LeaveCriticalSection(&s->lock);
-#else
-            pthread_mutex_unlock(&s->lock);
-#endif
+            val_internal_unlock(s);
             return VAL_ERR_IO;
         }
         if (got2 != payload_len)
         {
             val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
             VAL_LOG_DEBUG(s, "recv_packet: payload timeout");
-#if defined(_WIN32)
-            LeaveCriticalSection(&s->lock);
-#else
-            pthread_mutex_unlock(&s->lock);
-#endif
+            val_internal_unlock(s);
             val_metrics_inc_timeout(s);
             return VAL_ERR_TIMEOUT;
         }
@@ -1060,28 +937,19 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 
     uint8_t trailer_bytes[VAL_WIRE_TRAILER_SIZE];
     size_t got3 = 0;
-    rc = s->config->transport.recv(s->config->transport.io_context, trailer_bytes, VAL_WIRE_TRAILER_SIZE, &got3,
-                                   timeout_ms);
+    rc = recv_fn ? recv_fn(io, trailer_bytes, VAL_WIRE_TRAILER_SIZE, &got3, timeout_ms) : -1;
     if (rc < 0)
     {
         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
         VAL_LOG_ERROR(s, "recv_packet: transport error on trailer");
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
         return VAL_ERR_IO;
     }
     if (got3 != VAL_WIRE_TRAILER_SIZE)
     {
         val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
         VAL_LOG_DEBUG(s, "recv_packet: trailer timeout");
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
         val_metrics_inc_timeout(s);
         return VAL_ERR_TIMEOUT;
     }
@@ -1095,11 +963,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 #if VAL_ENABLE_METRICS
         s->metrics.crc_errors++;
 #endif
-#if defined(_WIN32)
-        LeaveCriticalSection(&s->lock);
-#else
-        pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
         return VAL_ERR_CRC;
     }
 
@@ -1122,29 +986,30 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         if (payload_len > payload_cap)
         {
             val_internal_set_error_detailed(s, VAL_ERR_INVALID_ARG, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
-#if defined(_WIN32)
-            LeaveCriticalSection(&s->lock);
-#else
-            pthread_mutex_unlock(&s->lock);
-#endif
+            val_internal_unlock(s);
             return VAL_ERR_INVALID_ARG;
         }
         memcpy(payload_out, buf + VAL_WIRE_HEADER_SIZE, payload_len);
     }
 
-#if defined(_WIN32)
-    LeaveCriticalSection(&s->lock);
-#else
-    pthread_mutex_unlock(&s->lock);
-#endif
+    val_internal_unlock(s);
 
     val_metrics_add_recv(s, (size_t)(VAL_WIRE_HEADER_SIZE + payload_len + VAL_WIRE_TRAILER_SIZE), type_byte);
-#if VAL_ENABLE_WIRE_AUDIT
-    if ((unsigned)type_byte < 16u)
+    // Packet capture hook (RX)
+    if (s->config->capture.on_packet)
     {
-        s->audit.recv[(unsigned)type_byte]++;
+        val_packet_record_t rec;
+        rec.direction = VAL_DIR_RX;
+        rec.type = type_byte;
+        rec.wire_len = VAL_WIRE_HEADER_SIZE + payload_len + VAL_WIRE_TRAILER_SIZE;
+        rec.payload_len = payload_len;
+        rec.offset = header.offset;
+        rec.crc_ok = 1; // we verified CRC above
+        uint32_t now = ticks_fn ? ticks_fn() : 0u;
+        rec.timestamp_ms = now;
+        rec.session_id = (const void *)s;
+        s->config->capture.on_packet(s->config->capture.context, &rec);
     }
-#endif
     return VAL_OK;
 }
 
@@ -1157,37 +1022,28 @@ val_status_t val_emergency_cancel(val_session_t *session)
 {
     if (!session)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
+    void (*delay_fn)(uint32_t) = session->cfg.system.delay_ms;
     // Send CANCEL a few times with tiny backoff
     val_status_t last = VAL_ERR_IO;
     uint32_t backoff = session->cfg.retries.backoff_ms_base ? session->cfg.retries.backoff_ms_base : 5u;
     uint8_t tries = 3;
     while (tries--)
     {
-        val_status_t st = val_internal_send_packet(session, VAL_PKT_CANCEL, NULL, 0, 0);
-        fprintf(stdout, "[VAL] emergency_cancel: send CANCEL attempt=%u st=%d\n", (unsigned)(3 - tries), (int)st);
-        fflush(stdout);
+    val_status_t st = val_internal_send_packet(session, VAL_PKT_CANCEL, NULL, 0, 0);
+    VAL_LOG_INFOF(session, "emergency_cancel: attempt=%u st=%d", (unsigned)(3 - tries), (int)st);
         if (st == VAL_OK)
             last = VAL_OK;
-        if (session->cfg.system.delay_ms)
-            session->cfg.system.delay_ms(backoff);
+        if (delay_fn)
+            delay_fn(backoff);
         if (backoff < 50u)
             backoff <<= 1;
     }
     val_internal_transport_flush(session);
     // Mark session aborted regardless of wire outcome so local loops can exit early
     val_internal_set_last_error(session, VAL_ERR_ABORTED, 0);
-    fprintf(stdout, "[VAL] emergency_cancel: marked session aborted (last_error set)\n");
-    fflush(stdout);
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    VAL_LOG_WARN(session, "emergency_cancel: marked session aborted (last_error set)");
+    val_internal_unlock(session);
     return last;
 }
 
@@ -1195,7 +1051,7 @@ int val_check_for_cancel(val_session_t *session)
 {
     if (!session)
         return 0;
-    return (session->last_error_code == VAL_ERR_ABORTED) ? 1 : 0;
+    return (session->last_error.code == VAL_ERR_ABORTED) ? 1 : 0;
 }
 
 extern val_status_t val_internal_receive_files(val_session_t *session, const char *output_directory);
@@ -1206,11 +1062,7 @@ val_status_t val_receive_files(val_session_t *session, const char *output_direct
 {
     if (!session)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     if (output_directory)
     {
         size_t n = val_internal_strnlen(output_directory, VAL_MAX_PATH);
@@ -1227,19 +1079,11 @@ val_status_t val_receive_files(val_session_t *session, const char *output_direct
     val_status_t hs = val_internal_do_handshake_receiver(session);
     if (hs != VAL_OK)
     {
-#if defined(_WIN32)
-        LeaveCriticalSection(&session->lock);
-#else
-        pthread_mutex_unlock(&session->lock);
-#endif
+        val_internal_unlock(session);
         return hs;
     }
     val_status_t rs = val_internal_receive_files(session, session->output_directory);
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return rs;
 }
 
@@ -1406,12 +1250,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     s->metrics.handshakes++;
 #endif
     // Adaptive TX negotiation (window rung + streaming flags)
-    val_tx_mode_t local_max = val_tx_mode_sanitize(s->cfg.adaptive_tx.max_performance_mode);
-    val_tx_mode_t peer_max = val_tx_mode_sanitize((val_tx_mode_t)peer_h.max_performance_mode);
-    uint32_t local_max_window = val_tx_mode_window(local_max);
-    uint32_t peer_max_window = val_tx_mode_window(peer_max);
-    uint32_t shared_window = (local_max_window < peer_max_window) ? local_max_window : peer_max_window;
-    val_tx_mode_t negotiated_cap = val_tx_mode_from_window(shared_window);
+    val_tx_mode_t negotiated_cap = val_negotiated_tx_cap(&s->cfg, &peer_h);
     s->min_negotiated_mode = negotiated_cap;       // best performance both support (largest window rung allowed)
     s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT; // smallest rung always supported
     // Streaming allowed from us to peer if we allow streaming and peer accepts incoming streaming
@@ -1420,19 +1259,10 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     s->send_streaming_allowed = (uint8_t)(local_allow && peer_rx_accept);
     // Streaming we accept when peer sends to us (single policy governs acceptance)
     s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
-    // Initial window rung selection (conservative): pick the slower (numerically larger) of our preferred
-    // and the peer's preferred, clamped to the negotiated cap. This avoids jumping to a rung faster than
-    // the peer would like immediately after handshake.
-    val_tx_mode_t local_pref = val_tx_mode_sanitize(s->cfg.adaptive_tx.preferred_initial_mode);
-    val_tx_mode_t peer_pref = val_tx_mode_sanitize((val_tx_mode_t)peer_h.preferred_initial_mode);
-    if (val_tx_mode_window(local_pref) > shared_window)
-        local_pref = negotiated_cap;
-    if (val_tx_mode_window(peer_pref) > shared_window)
-        peer_pref = negotiated_cap;
-    uint32_t init_window = (val_tx_mode_window(local_pref) < val_tx_mode_window(peer_pref))
-                               ? val_tx_mode_window(local_pref)
-                               : val_tx_mode_window(peer_pref);
-    val_tx_mode_t init_mode = val_tx_mode_from_window(init_window);
+    // Initial mode: conservative selection using shared helper
+    val_tx_mode_t init_mode = val_select_initial_mode(s->cfg.adaptive_tx.preferred_initial_mode,
+                                                     (val_tx_mode_t)peer_h.preferred_initial_mode,
+                                                     negotiated_cap);
     s->current_tx_mode = init_mode;
     s->peer_tx_mode = s->current_tx_mode;
     // features compatibility: ensure required features supported. For now, just note the peer features; could gate behavior
@@ -1561,32 +1391,19 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
         s->metrics.handshakes++;
 #endif
         // Adaptive TX negotiation (window rung + streaming flags)
-        val_tx_mode_t local_max = val_tx_mode_sanitize(s->cfg.adaptive_tx.max_performance_mode);
-        val_tx_mode_t peer_max = val_tx_mode_sanitize((val_tx_mode_t)peer_h.max_performance_mode);
-        uint32_t local_max_window = val_tx_mode_window(local_max);
-        uint32_t peer_max_window = val_tx_mode_window(peer_max);
-        uint32_t shared_window = (local_max_window < peer_max_window) ? local_max_window : peer_max_window;
-        val_tx_mode_t negotiated_cap = val_tx_mode_from_window(shared_window);
+        val_tx_mode_t negotiated_cap = val_negotiated_tx_cap(&s->cfg, &peer_h);
         s->min_negotiated_mode = negotiated_cap;
         s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT;
-    // Streaming allowed from us to peer if we allow streaming and peer accepts
-    uint8_t peer_rx_accept = (peer_h.streaming_flags & 2u) ? 1u : 0u;
-    uint8_t local_allow = (s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
-    s->send_streaming_allowed = (uint8_t)(local_allow && peer_rx_accept);
-    // What we accept for inbound is governed by our single policy
-    s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
-        // Initial window rung selection (conservative): pick the slower (numerically larger) of our preferred
-        // and the peer's preferred, clamped to the negotiated cap.
-        val_tx_mode_t local_pref = val_tx_mode_sanitize(s->cfg.adaptive_tx.preferred_initial_mode);
-        val_tx_mode_t peer_pref = val_tx_mode_sanitize((val_tx_mode_t)peer_h.preferred_initial_mode);
-        if (val_tx_mode_window(local_pref) > shared_window)
-            local_pref = negotiated_cap;
-        if (val_tx_mode_window(peer_pref) > shared_window)
-            peer_pref = negotiated_cap;
-        uint32_t init_window = (val_tx_mode_window(local_pref) < val_tx_mode_window(peer_pref))
-                                   ? val_tx_mode_window(local_pref)
-                                   : val_tx_mode_window(peer_pref);
-        val_tx_mode_t init_mode = val_tx_mode_from_window(init_window);
+        // Streaming allowed from us to peer if we allow streaming and peer accepts
+        uint8_t peer_rx_accept = (peer_h.streaming_flags & 2u) ? 1u : 0u;
+        uint8_t local_allow = (s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
+        s->send_streaming_allowed = (uint8_t)(local_allow && peer_rx_accept);
+        // What we accept for inbound is governed by our single policy
+        s->recv_streaming_allowed = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
+        // Initial mode: conservative selection using shared helper
+        val_tx_mode_t init_mode = val_select_initial_mode(s->cfg.adaptive_tx.preferred_initial_mode,
+                                                         (val_tx_mode_t)peer_h.preferred_initial_mode,
+                                                         negotiated_cap);
         s->current_tx_mode = init_mode;
         s->peer_tx_mode = s->current_tx_mode;
     }
@@ -1754,17 +1571,9 @@ val_status_t val_get_metrics(val_session_t *session, val_metrics_t *out)
 {
     if (!session || !out)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     *out = session->metrics;
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return VAL_OK;
 }
 
@@ -1772,17 +1581,9 @@ val_status_t val_reset_metrics(val_session_t *session)
 {
     if (!session)
         return VAL_ERR_INVALID_ARG;
-#if defined(_WIN32)
-    EnterCriticalSection(&session->lock);
-#else
-    pthread_mutex_lock(&session->lock);
-#endif
+    val_internal_lock(session);
     memset(&session->metrics, 0, sizeof(session->metrics));
-#if defined(_WIN32)
-    LeaveCriticalSection(&session->lock);
-#else
-    pthread_mutex_unlock(&session->lock);
-#endif
+    val_internal_unlock(session);
     return VAL_OK;
 }
 #endif // VAL_ENABLE_METRICS

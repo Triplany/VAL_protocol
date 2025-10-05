@@ -55,8 +55,8 @@ static int copy_prefix(const char *src, const char *dst, size_t bytes)
 static void make_cfgs(val_config_t *cfg_tx, val_config_t *cfg_rx, test_duplex_t *d_tx, test_duplex_t *d_rx, void *sb_a,
                       void *rb_a, void *sb_b, void *rb_b, size_t packet)
 {
-    ts_make_config(cfg_tx, sb_a, rb_a, packet, d_tx, VAL_RESUME_CRC_TAIL_OR_ZERO, 8192);
-    ts_make_config(cfg_rx, sb_b, rb_b, packet, d_rx, VAL_RESUME_CRC_TAIL_OR_ZERO, 8192);
+    ts_make_config(cfg_tx, sb_a, rb_a, packet, d_tx, VAL_RESUME_TAIL, 8192);
+    ts_make_config(cfg_rx, sb_b, rb_b, packet, d_rx, VAL_RESUME_TAIL, 8192);
     ts_set_console_logger(cfg_tx);
     ts_set_console_logger(cfg_rx);
 }
@@ -298,14 +298,11 @@ static int scenario_existing_diff_same_size(val_resume_mode_t mode)
     switch (mode)
     {
     case VAL_RESUME_NEVER:
-    case VAL_RESUME_CRC_TAIL_OR_ZERO:
-    case VAL_RESUME_CRC_FULL_OR_ZERO:
+    case VAL_RESUME_TAIL:
         if (sz_out != sz_in || crc_out != crc_in)
             return 4; // overwrite/resume to input
         break;
     case VAL_RESUME_SKIP_EXISTING:
-    case VAL_RESUME_CRC_TAIL:
-    case VAL_RESUME_CRC_FULL:
         if (sz_out != before_size || crc_out != before_crc)
             return 5; // skip
         break;
@@ -362,14 +359,11 @@ static int scenario_existing_larger(val_resume_mode_t mode)
     switch (mode)
     {
     case VAL_RESUME_NEVER:
-    case VAL_RESUME_CRC_TAIL_OR_ZERO:
-    case VAL_RESUME_CRC_FULL_OR_ZERO:
+    case VAL_RESUME_TAIL:
         if (sz_out != sz_in || crc_out != crc_in)
             return 4; // overwrite to input
         break;
     case VAL_RESUME_SKIP_EXISTING:
-    case VAL_RESUME_CRC_TAIL:
-    case VAL_RESUME_CRC_FULL:
         if (sz_out != before_size || crc_out != before_crc)
             return 5; // skip existing larger file
         break;
@@ -381,9 +375,8 @@ static int scenario_existing_larger(val_resume_mode_t mode)
 
 int main(void)
 {
-    val_resume_mode_t modes[] = {VAL_RESUME_NEVER,    VAL_RESUME_SKIP_EXISTING,
-                                 VAL_RESUME_CRC_TAIL, VAL_RESUME_CRC_TAIL_OR_ZERO,
-                                 VAL_RESUME_CRC_FULL, VAL_RESUME_CRC_FULL_OR_ZERO};
+    // New simplified modes set
+    val_resume_mode_t modes[] = {VAL_RESUME_NEVER, VAL_RESUME_SKIP_EXISTING, VAL_RESUME_TAIL};
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
     {
         val_resume_mode_t m = modes[i];
