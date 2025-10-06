@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -282,6 +283,25 @@ static VAL_FORCE_INLINE val_tx_mode_t val_select_initial_mode(val_tx_mode_t loca
 // Extended handshake payload with adaptive fields declared in val_wire.h
 
 // Internal locking helpers (recursive on POSIX via mutex attr; CRITICAL_SECTION is recursive on Windows)
+static VAL_FORCE_INLINE void val_internal_lock_init(val_session_t *s)
+{
+#if defined(_WIN32)
+    InitializeCriticalSection(&s->lock);
+#else
+    // Initialize a recursive mutex so internal helpers can lock even when public API already holds the lock
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+#if defined(PTHREAD_MUTEX_RECURSIVE)
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+#else
+    // Fallback for platforms using the NP constant
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE_NP);
+#endif
+    pthread_mutex_init(&s->lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+#endif
+}
+
 static VAL_FORCE_INLINE void val_internal_lock(val_session_t *s)
 {
 #if defined(_WIN32)
@@ -299,11 +319,161 @@ static VAL_FORCE_INLINE void val_internal_unlock(val_session_t *s)
 #endif
 }
 
+static VAL_FORCE_INLINE void val_internal_lock_destroy(val_session_t *s)
+{
+#if defined(_WIN32)
+    DeleteCriticalSection(&s->lock);
+#else
+    pthread_mutex_destroy(&s->lock);
+#endif
+}
+
+// Cross-platform path helpers
+static VAL_FORCE_INLINE char val_internal_path_sep(void)
+{
+#if defined(_WIN32)
+    return '\\';
+#else
+    return '/';
+#endif
+}
+
+// Joins dir and name using the platform path separator. If dir is empty or NULL, just writes name.
+// Returns the number of characters written (snprintf-style) or a negative value on error.
+static VAL_FORCE_INLINE int val_internal_join_path(char *dst, size_t cap, const char *dir, const char *name)
+{
+    if (!dst || cap == 0)
+        return -1;
+    if (!name)
+        name = "";
+    if (dir && dir[0])
+        return snprintf(dst, cap, "%s%c%s", dir, val_internal_path_sep(), name);
+    return snprintf(dst, cap, "%s", name);
+}
+
 // Internal helpers
 int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len,
                              uint64_t offset);
 int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *payload_out, uint32_t payload_cap,
                              uint32_t *payload_len_out, uint64_t *offset_out, uint32_t timeout_ms);
+
+// Micro-poll until a packet arrives or the absolute deadline passes, slicing waits to remain cancel-responsive.
+// Returns VAL_OK and fills out_type/len/off on packet; VAL_ERR_TIMEOUT when deadline elapses; VAL_ERR_ABORTED on cancel;
+// any other error is returned immediately. TIMEOUT/CRC within slices are treated as benign and do not end early.
+val_status_t val_internal_recv_until_deadline(val_session_t *s,
+                                              val_packet_type_t *out_type,
+                                              uint8_t *payload_out, uint32_t payload_cap,
+                                              uint32_t *out_len, uint64_t *out_off,
+                                              uint32_t deadline_ms,
+                                              uint32_t max_slice_ms);
+
+// Generic control wait helper callbacks
+typedef int (*val_ctrl_accept_fn)(val_session_t *s, val_packet_type_t t,
+                                  const uint8_t *payload, uint32_t len, uint64_t off, void *ctx);
+typedef val_status_t (*val_ctrl_on_timeout_fn)(val_session_t *s, void *ctx);
+
+// Wait for a specific control condition using micro-polling, retries, and optional backoff/resend.
+// - Calls recv-until-deadline in short slices to remain cancel-responsive.
+// - CANCEL => VAL_ERR_ABORTED; ERROR => VAL_ERR_PROTOCOL.
+// - On TIMEOUT/CRC: optional on_timeout() is invoked (e.g., to resend), then backoff doubles per retry.
+// - accept() returns 1 to accept and stop, 0 to ignore and continue, <0 to treat as protocol error.
+// On success, returns VAL_OK and writes the last observed packet to out_*.
+val_status_t val_internal_wait_control(val_session_t *s,
+                                       uint32_t timeout_ms,
+                                       uint8_t retries,
+                                       uint32_t backoff_ms_base,
+                                       uint8_t *scratch, uint32_t scratch_cap,
+                                       val_packet_type_t *out_type,
+                                       uint32_t *out_len,
+                                       uint64_t *out_off,
+                                       val_ctrl_accept_fn accept,
+                                       val_ctrl_on_timeout_fn on_timeout,
+                                       void *ctx);
+
+// Centralized control ACK waits
+val_status_t val_internal_wait_done_ack(val_session_t *s, uint64_t file_size);
+val_status_t val_internal_wait_eot_ack(val_session_t *s);
+
+// Centralized VERIFY result wait with resend-on-timeout. Caller should have already
+// constructed the VERIFY payload bytes (e.g., serialized val_resume_resp_t with verify_crc/len).
+// On success, returns VAL_OK and writes the resolved resume offset to out_resume_offset as follows:
+//  - Peer OK     -> out_resume_offset = end_off (resume at requested end)
+//  - Peer SKIP   -> out_resume_offset = UINT64_MAX (sentinel to skip file)
+//  - Peer MISMATCH -> out_resume_offset = 0 (restart from zero)
+// If the peer returns a non-OK error status, that status is propagated as the function return.
+val_status_t val_internal_wait_verify_result(val_session_t *s,
+                                             const uint8_t *verify_payload,
+                                             uint32_t verify_payload_len,
+                                             uint64_t end_off,
+                                             uint64_t *out_resume_offset);
+
+// Centralized RESUME_RESP wait with resend-on-timeout policy.
+// Ignores benign MODE_SYNC/ACK packets, aborts on CANCEL, and on timeout resends RESUME_REQ.
+// On success, writes the RESUME_RESP payload bytes into payload_out (up to payload_cap) and sets out_len/off.
+val_status_t val_internal_wait_resume_resp(val_session_t *s,
+                                           uint32_t base_timeout_ms,
+                                           uint8_t retries,
+                                           uint32_t backoff_ms_base,
+                                           uint8_t *payload_out,
+                                           uint32_t payload_cap,
+                                           uint32_t *out_len,
+                                           uint64_t *out_off);
+
+// Receiver-side: wait for a VERIFY request from sender (after we signaled VERIFY_FIRST).
+// If a stray RESUME_REQ arrives while waiting, re-send the provided RESUME_RESP payload.
+// On success, write the VERIFY payload into payload_out and set out_len/off.
+val_status_t val_internal_wait_verify_request_rx(val_session_t *s,
+                                                 uint32_t base_timeout_ms,
+                                                 uint8_t retries,
+                                                 uint32_t backoff_ms_base,
+                                                 const uint8_t *resume_resp_payload,
+                                                 uint32_t resume_resp_len,
+                                                 uint8_t *payload_out,
+                                                 uint32_t payload_cap,
+                                                 uint32_t *out_len,
+                                                 uint64_t *out_off);
+
+// Backoff helper: delay current backoff, double with ceiling, and decrement retries.
+static VAL_FORCE_INLINE void val_internal_backoff_step(val_session_t *s, uint32_t *backoff_ms, uint8_t *retries)
+{
+    if (!s || !backoff_ms || !retries)
+        return;
+    if (*retries == 0)
+        return;
+    if (*backoff_ms && s->config && s->config->system.delay_ms)
+        s->config->system.delay_ms(*backoff_ms);
+    // Cap exponential growth to a sane upper bound (e.g., 4 seconds) to avoid very long sleeps
+    uint32_t next = (*backoff_ms == 0) ? 0 : (*backoff_ms << 1);
+    if (next > 4000u)
+        next = 4000u;
+    *backoff_ms = next;
+    --(*retries);
+}
+
+// Tiny sugar wrappers over val_internal_wait_control to centralize policy and shrink call sites.
+// DONE_ACK/EOT_ACK also record RTT when rtt_start_ms!=0 and we did not retransmit.
+val_status_t val_internal_wait_done_ack_ex(val_session_t *s, uint32_t base_timeout_ms, uint8_t retries,
+                                           uint32_t backoff_ms_base, uint32_t rtt_start_ms);
+val_status_t val_internal_wait_eot_ack_ex(val_session_t *s, uint32_t base_timeout_ms, uint8_t retries,
+                                          uint32_t backoff_ms_base, uint32_t rtt_start_ms);
+
+// HELLO wait: if sender_or_receiver!=0 (sender), will re-send HELLO on timeouts; receiver uses no resend.
+val_status_t val_internal_wait_hello(val_session_t *s, uint32_t base_timeout_ms, uint8_t retries,
+                                     uint32_t backoff_ms_base, int sender_or_receiver);
+
+// VERIFY wait with optional handling of stray RESUME_REQ: if resend_ctx provided and contains a RESUME_RESP
+// payload, the wrapper will re-send that payload whenever a benign RESUME_REQ arrives while waiting.
+typedef struct val_verify_wait_ctx_s {
+    const uint8_t *verify_payload;
+    uint32_t verify_payload_len;
+    const uint8_t *resume_resp_payload; // optional; if non-null and len>0, sent on stray RESUME_REQ
+    uint32_t resume_resp_len;
+    uint64_t end_off;                 // desired resume offset if OK
+    uint64_t *out_resume_offset;      // where to write the mapping (OK->end_off, SKIPPED->UINT64_MAX, MISMATCH->0)
+} val_verify_wait_ctx_t;
+
+val_status_t val_internal_wait_verify(val_session_t *s, uint32_t base_timeout_ms, uint8_t retries,
+                                      uint32_t backoff_ms_base, const val_verify_wait_ctx_t *resend_ctx);
 
 // Operation kinds for timeout selection
 typedef enum

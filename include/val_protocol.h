@@ -38,6 +38,11 @@ extern "C"
 #include <stddef.h>
 #include <stdint.h>
 
+// Streaming overlay compile-time flag: default ON unless explicitly disabled by integrator
+#ifndef VAL_ENABLE_STREAMING
+#define VAL_ENABLE_STREAMING 1
+#endif
+
 // Protocol constants
 #define VAL_MAGIC 0x56414C00u // "VAL\0"
 #define VAL_VERSION_MAJOR 0u

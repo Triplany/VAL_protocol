@@ -1,4 +1,5 @@
 #include "val_internal.h"
+#include "val_scheduler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,30 +10,7 @@
 //  - no DATA received recently (>= interval_ms)
 //  - no ACK sent recently (>= interval_ms)
 //  - last heartbeat was >= interval_ms ago
-static VAL_FORCE_INLINE void val_maybe_send_heartbeat_ack(val_session_t *s,
-                                                          uint64_t high_water,
-                                                          uint32_t interval_ms,
-                                                          uint32_t *hb_last_ms,
-                                                          uint32_t *last_ack_ms,
-                                                          uint32_t last_data_ms)
-{
-    if (!s || !hb_last_ms || !last_ack_ms)
-        return;
-    if (!(s->recv_streaming_allowed && s->peer_streaming_engaged))
-        return;
-    uint32_t now = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
-    if (now == 0u)
-        return;
-    int idle_no_data = (last_data_ms == 0 || (now - last_data_ms) >= interval_ms);
-    int no_recent_ack = (*last_ack_ms == 0 || (now - *last_ack_ms) >= interval_ms);
-    if (idle_no_data && no_recent_ack && (*hb_last_ms == 0 || (now - *hb_last_ms) >= interval_ms))
-    {
-        VAL_LOG_DEBUGF(s, "data: heartbeat DATA_ACK off=%llu", (unsigned long long)high_water);
-        (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, high_water);
-        *hb_last_ms = now;
-        *last_ack_ms = now;
-    }
-}
+// Heartbeat moved to scheduler module (val_rx_maybe_send_heartbeat)
 
 static val_status_t send_resume_response(val_session_t *s, val_resume_action_t action, uint64_t offset, uint32_t crc,
                                          uint64_t verify_len)
@@ -56,11 +34,7 @@ static val_status_t val_construct_target_path(val_session_t *session, const char
         return VAL_ERR_INVALID_ARG;
     char sanitized[VAL_MAX_FILENAME + 1];
     val_clean_filename(filename, sanitized, sizeof(sanitized));
-#ifdef _WIN32
-    int n = snprintf(target_path, target_path_size, "%s\\%s", session->output_directory, sanitized);
-#else
-    int n = snprintf(target_path, target_path_size, "%s/%s", session->output_directory, sanitized);
-#endif
+    int n = val_internal_join_path(target_path, target_path_size, session->output_directory, sanitized);
     if (n < 0 || n >= (int)target_path_size)
         return VAL_ERR_INVALID_ARG;
     return VAL_OK;
@@ -97,66 +71,27 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
                                                  uint64_t verify_len, val_status_t on_match_status)
 {
     VAL_LOG_DEBUG(s, "verify: starting exchange");
-    // Wait for sender to echo back the CRC in a VERIFY packet
+    // Wait for sender to echo back the CRC in a VERIFY packet using centralized helper
     uint8_t buf[128];
-    uint32_t len = 0;
-    uint64_t off = 0;
-    val_packet_type_t t = 0;
+    uint32_t len = 0; uint64_t off = 0;
     uint32_t to = val_internal_get_timeout(s, VAL_OP_VERIFY);
     uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
-    val_status_t st = VAL_OK;
     uint32_t t0v = s->config->system.get_ticks_ms();
     s->timing.in_retransmit = 0;
-    for (;;)
+    val_status_t st = val_internal_wait_verify_request_rx(s, to, tries, backoff,
+                                                          /*resume_resp_payload*/ NULL, /*resume_resp_len*/ 0,
+                                                          buf, (uint32_t)sizeof(buf), &len, &off);
+    if (st != VAL_OK)
     {
-        VAL_HEALTH_RECORD_OPERATION(s);
-        val_status_t health = val_internal_check_health(s);
-        if (health != VAL_OK)
-            return health;
-            
-        if (!val_internal_transport_is_connected(s))
-        {
-            VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_CONNECTION);
-            return VAL_ERR_IO;
-        }
-        st = val_internal_recv_packet(s, &t, buf, sizeof(buf), &len, &off, to);
-        if (st != VAL_OK)
-        {
-            if (st != VAL_ERR_TIMEOUT || tries == 0)
-            {
-                if (st == VAL_ERR_TIMEOUT && tries == 0)
-                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                return st;
-            }
-            VAL_LOG_DEBUG(s, "verify: waiting for sender CRC");
-            val_metrics_inc_timeout(s);
-            VAL_HEALTH_RECORD_RETRY(s);
-            if (backoff && s->config->system.delay_ms)
-                s->config->system.delay_ms(backoff);
-            if (backoff)
-                backoff <<= 1;
-            --tries;
-            continue;
-        }
-        // Handle possible duplicate RESUME_REQ caused by sender timeout
-        if (t == VAL_PKT_RESUME_REQ)
-        {
-            VAL_LOG_INFO(s, "verify: got duplicate RESUME_REQ; re-sending RESUME_RESP");
-            (void)send_resume_response(s, VAL_RESUME_ACTION_VERIFY_FIRST, resume_offset_expected, expected_crc, verify_len);
-            continue; // keep waiting for VERIFY
-        }
-        if (t != VAL_PKT_VERIFY)
-        {
-            VAL_LOG_DEBUG(s, "verify: ignoring unexpected packet during verify wait");
-            continue;
-        }
-        if (t0v && !s->timing.in_retransmit)
-        {
-            uint32_t now = s->config->system.get_ticks_ms();
-            val_internal_record_rtt(s, now - t0v);
-        }
-        break;
+        if (st == VAL_ERR_TIMEOUT)
+            VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
+        return st;
+    }
+    if (t0v && !s->timing.in_retransmit)
+    {
+        uint32_t now = s->config->system.get_ticks_ms();
+        val_internal_record_rtt(s, now - t0v);
     }
     VAL_LOG_DEBUG(s, "verify: received VERIFY from sender");
     VAL_LOG_INFO(s, "verify: type ok");
@@ -213,17 +148,9 @@ static val_resume_action_t determine_resume_action(val_session_t *session, const
 
     char full_output_path[512];
     if (session->output_directory[0])
-    {
-#ifdef _WIN32
-        snprintf(full_output_path, sizeof(full_output_path), "%s\\%s", session->output_directory, filename);
-#else
-        snprintf(full_output_path, sizeof(full_output_path), "%s/%s", session->output_directory, filename);
-#endif
-    }
+        val_internal_join_path(full_output_path, sizeof(full_output_path), session->output_directory, filename);
     else
-    {
         snprintf(full_output_path, sizeof(full_output_path), "%s", filename);
-    }
 
     void *file = session->config->filesystem.fopen(session->config->filesystem.fs_context, full_output_path, "rb");
     if (!file)
@@ -518,17 +445,9 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
         val_clean_filename(meta.filename, clean_name, sizeof(clean_name));
         char full_output_path[512];
         if (s->output_directory[0])
-        {
-#ifdef _WIN32
-            snprintf(full_output_path, sizeof(full_output_path), "%s\\%s", s->output_directory, clean_name);
-#else
-            snprintf(full_output_path, sizeof(full_output_path), "%s/%s", s->output_directory, clean_name);
-#endif
-        }
+            val_internal_join_path(full_output_path, sizeof(full_output_path), s->output_directory, clean_name);
         else
-        {
             snprintf(full_output_path, sizeof(full_output_path), "%s", clean_name);
-        }
 
         // Perform optional metadata validation (ACCEPT/SKIP/ABORT)
         int validation_skipped = 0;
@@ -608,18 +527,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
     uint32_t last_data_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0; // last DATA receipt
         // Map peer's current TX mode (window rung) to a window size used as the ACK stride
         // We cannot ACK less frequently than once per window, otherwise sender will stall at in-flight cap.
-        uint32_t ack_stride = 2;
-    switch (s->peer_tx_mode)
-        {
-        case VAL_TX_WINDOW_2:  ack_stride = 2;  break;
-        case VAL_TX_WINDOW_4:  ack_stride = 4;  break;
-        case VAL_TX_WINDOW_8:  ack_stride = 8;  break;
-        case VAL_TX_WINDOW_16: ack_stride = 16; break;
-        case VAL_TX_WINDOW_32: ack_stride = 32; break;
-        case VAL_TX_WINDOW_64: ack_stride = 64; break;
-    case VAL_TX_STOP_AND_WAIT: ack_stride = 1; break;
-    default:                ack_stride = 2;  break; // unknown: conservative
-        }
+        uint32_t ack_stride = val_rx_ack_stride_from_mode(s->peer_tx_mode);
         // In streaming mode, keep ACKs coalesced once per peer window to avoid sender stalling; heartbeats continue.
         if (s->peer_streaming_engaged)
         {
@@ -647,7 +555,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     }
                         
                     // Streaming: sparse heartbeat DATA_ACK (liveness) only when idle
-                    val_maybe_send_heartbeat_ack(s, written, 3000u, &hb_last_ms, &last_ack_ms, last_data_ms);
+                    val_rx_maybe_send_heartbeat(s, written, 3000u, &hb_last_ms, &last_ack_ms, last_data_ms);
                     if (!val_internal_transport_is_connected(s))
                     {
                         if (!skipping && f)
@@ -880,17 +788,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     uint8_t prev_streaming = s->peer_streaming_engaged;
                     s->peer_streaming_engaged = (ms.flags & 1u) ? 1 : 0;
                     // Adapt ACK coalescing stride dynamically to peer's reported window rung
-                    switch (s->peer_tx_mode)
-                    {
-                    case VAL_TX_WINDOW_2:  ack_stride = 2;  break;
-                    case VAL_TX_WINDOW_4:  ack_stride = 4;  break;
-                    case VAL_TX_WINDOW_8:  ack_stride = 8;  break;
-                    case VAL_TX_WINDOW_16: ack_stride = 16; break;
-                    case VAL_TX_WINDOW_32: ack_stride = 32; break;
-                    case VAL_TX_WINDOW_64: ack_stride = 64; break;
-                    case VAL_TX_STOP_AND_WAIT: ack_stride = 1; break;
-                    default:                ack_stride = 2;  break;
-                    }
+                    ack_stride = val_rx_ack_stride_from_mode(s->peer_tx_mode);
                     // If peer is in streaming mode, we still ACK once per window (no suppression) to keep pipeline moving.
                     if (s->peer_streaming_engaged)
                     {

@@ -149,3 +149,7 @@ endif()
 # Stress tests for extreme network conditions (>5% loss, graceful failure validation)
 add_transport_profile_test(ut_transport_stress transport/test_transport_stress.c)
 set_property(TEST ut_transport_stress PROPERTY LABELS "stress")
+
+# Assert graceful failure occurs within a bounded time under extreme loss
+add_transport_profile_test(ut_timebound_failures transport/test_timebound_failures.c)
+set_property(TEST ut_timebound_failures PROPERTY LABELS "stress;quick")

@@ -1115,6 +1115,10 @@ void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t pa
     cfg->retries.data_retries = 4;
     cfg->retries.ack_retries = 6;
     cfg->retries.backoff_ms_base = 10; // was 50
+
+    // Install a default console logger for unit tests so library diagnostics are visible
+    // when VAL_LOG_LEVEL permits. Tests can override the level via ts_set_console_logger* helpers.
+    ts_set_console_logger(cfg);
 }
 
 static void ts_console_log(void *ctx, int level, const char *file, int line, const char *message)
