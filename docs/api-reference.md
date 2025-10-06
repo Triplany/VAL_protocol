@@ -534,7 +534,7 @@ typedef struct {
     char filename[128];             // Sanitized basename
     char sender_path[128];          // Original path hint
     uint64_t file_size;             // File size
-    // Removed: whole-file CRC32 from metadata
+    // Note: whole-file CRC32 is not part of metadata
 } val_meta_payload_t;
 ```
 

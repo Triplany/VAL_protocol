@@ -944,7 +944,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     val_deserialize_header(buf, &header);
     if (header.wire_version != 0)
     {
-        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION_MAJOR);
+        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION);
     val_internal_unlock(s);
         return VAL_ERR_INCOMPATIBLE_VERSION;
     }
@@ -1714,7 +1714,7 @@ static void val__fill_local_hello(val_session_t *s, size_t packet_size, val_hand
     hello->preferred_initial_mode = (uint8_t)s->cfg.adaptive_tx.preferred_initial_mode;
     hello->mode_sync_interval = s->cfg.adaptive_tx.mode_sync_interval;
 #if VAL_ENABLE_STREAMING
-    hello->streaming_flags = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? 0x3u : 0x0u);
+    hello->streaming_flags = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? (VAL_STREAM_CAN_SEND | VAL_STREAM_ACCEPT) : 0u);
 #else
     // Streaming overlay disabled at compile time -> advertise none
     hello->streaming_flags = 0u;
@@ -1740,7 +1740,7 @@ static val_status_t val__adopt_peer_hello(val_session_t *s, const val_handshake_
     }
     if (peer_h->version_major != VAL_VERSION_MAJOR)
     {
-        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION_MAJOR);
+        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION);
         return VAL_ERR_INCOMPATIBLE_VERSION;
     }
     // MTU negotiation: take min
@@ -1773,8 +1773,8 @@ static val_status_t val__adopt_peer_hello(val_session_t *s, const val_handshake_
 
     // Streaming permissions
 #if VAL_ENABLE_STREAMING
-    uint8_t peer_can_stream = (peer_h->streaming_flags & 1u) ? 1u : 0u;
-    uint8_t peer_accepts_stream = (peer_h->streaming_flags & 2u) ? 1u : 0u;
+    uint8_t peer_can_stream = (peer_h->streaming_flags & VAL_STREAM_CAN_SEND) ? 1u : 0u;
+    uint8_t peer_accepts_stream = (peer_h->streaming_flags & VAL_STREAM_ACCEPT) ? 1u : 0u;
     uint8_t local_allow = (s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
     s->send_streaming_allowed = (uint8_t)(local_allow && peer_accepts_stream);
     s->recv_streaming_allowed = (uint8_t)(local_allow && peer_can_stream);
@@ -1904,7 +1904,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     }
     if (peer_h.version_major != VAL_VERSION_MAJOR)
     {
-        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION_MAJOR);
+        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION);
         return VAL_ERR_INCOMPATIBLE_VERSION;
     }
     // Adopt peer first to set MTU, features, and modes
@@ -2003,7 +2003,7 @@ void val_internal_record_transmission_error(val_session_t *s)
     ms.current_mode = (uint32_t)new_mode;
     ms.sequence = ++s->mode_sync_sequence;
     ms.consecutive_errors = s->consecutive_errors;
-    ms.consecutive_success = s->consecutive_successes;
+    ms.consecutive_successes = s->consecutive_successes;
     // Set streaming flag only when streaming overlay is enabled
 #if VAL_ENABLE_STREAMING
     ms.flags = s->streaming_engaged ? 1u : 0u;
@@ -2054,7 +2054,7 @@ void val_internal_record_transmission_success(val_session_t *s)
             ms.current_mode = (uint32_t)new_mode;
             ms.sequence = ++s->mode_sync_sequence;
             ms.consecutive_errors = s->consecutive_errors;
-            ms.consecutive_success = s->consecutive_successes;
+            ms.consecutive_successes = s->consecutive_successes;
             ms.flags = s->streaming_engaged ? 1u : 0u;
             uint8_t ms_wire[VAL_WIRE_MODE_SYNC_SIZE];
             val_serialize_mode_sync(&ms, ms_wire);
@@ -2089,7 +2089,7 @@ void val_internal_record_transmission_success(val_session_t *s)
                 ms2.current_mode = (uint32_t)s->current_tx_mode;
                 ms2.sequence = ++s->mode_sync_sequence;
                 ms2.consecutive_errors = s->consecutive_errors;
-                ms2.consecutive_success = s->consecutive_successes;
+                ms2.consecutive_successes = s->consecutive_successes;
                 ms2.flags = 1u; // streaming engaged
                 uint8_t ms_wire2[VAL_WIRE_MODE_SYNC_SIZE];
                 val_serialize_mode_sync(&ms2, ms_wire2);

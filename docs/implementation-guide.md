@@ -113,7 +113,7 @@ unit_tests/CMakeLists.txt   # Test configuration
 ```cmake
 VAL_ENABLE_ERROR_STRINGS=ON   # Build error string utilities (default: ON)
 VAL_ENABLE_METRICS=OFF        # Enable metrics collection (default: OFF)
-# Wire audit removed. Use the runtime packet capture hook via config.capture.on_packet.
+# Use the runtime packet capture hook via config.capture.on_packet for non-intrusive wire observation.
 VAL_LOG_LEVEL=4               # Compile-time log level 0-5 (default: 4 debug, 0 release)
 ```
 
@@ -187,7 +187,6 @@ src/val_error_strings.c  (only if VAL_ENABLE_ERROR_STRINGS=1)
 ```
 -DVAL_LOG_LEVEL=0          # Disable logging
 -DVAL_ENABLE_METRICS=0     # Disable metrics
-# Wire audit flags removed; no-op. 
 ```
 
 **Example Makefile:**

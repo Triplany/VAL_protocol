@@ -206,7 +206,7 @@ extern "C"
 
     typedef struct
     {
-        // Window rungs (discrete). These replace any prior mixed "streaming" enum.
+    // Window rungs (discrete). Streaming is a pacing overlay, not an enum value.
         val_tx_mode_t max_performance_mode;   // Max window rung supported by this endpoint (cap)
         val_tx_mode_t preferred_initial_mode; // Initial rung (clamped to cap). If out of range, defaults to cap
         // Streaming policy: single switch governs both sending and accepting streaming.

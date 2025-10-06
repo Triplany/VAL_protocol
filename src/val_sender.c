@@ -616,9 +616,9 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
             }
             if (action == VAL_RESUME_ACTION_VERIFY_FIRST)
             {
-                // Compute CRC over [resume_offset - verify_len, resume_offset)
+                // Compute CRC over [resume_offset - verify_length, resume_offset)
                 uint64_t end_off = rr.resume_offset;
-                uint64_t vlen = rr.verify_len;
+                uint64_t vlen = rr.verify_length;
                 uint32_t my_crc = 0;
                 val_status_t cst = compute_crc_region(s, filepath, end_off, vlen, &my_crc);
                 if (cst != VAL_OK)
@@ -628,7 +628,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
                 v.action = 0;
                 v.resume_offset = end_off;
                 v.verify_crc = my_crc;
-                v.verify_len = vlen;
+                v.verify_length = vlen;
                 uint8_t verify_wire[VAL_WIRE_RESUME_RESP_SIZE];
                 val_serialize_resume_resp(&v, verify_wire);
                 st = val_internal_send_packet(s, VAL_PKT_VERIFY, verify_wire, VAL_WIRE_RESUME_RESP_SIZE, 0);
@@ -720,15 +720,15 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         return VAL_ERR_ABORTED;
     }
     // Prepare windowed send
-    size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size;
-    if (P <= (VAL_WIRE_HEADER_SIZE + VAL_WIRE_TRAILER_SIZE))
+    size_t mtu_bytes = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size;
+    if (mtu_bytes <= (VAL_WIRE_HEADER_SIZE + VAL_WIRE_TRAILER_SIZE))
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
         return VAL_ERR_INVALID_ARG;
     }
     uint8_t *send_buf_bytes = (uint8_t *)s->config->buffers.send_buffer;
     uint8_t *payload_area = send_buf_bytes ? (send_buf_bytes + VAL_WIRE_HEADER_SIZE) : NULL;
-    size_t max_payload = (size_t)(P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE);
+    size_t max_payload = (size_t)(mtu_bytes - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE);
     uint64_t last_acked = resume_off;
     uint64_t next_to_send = resume_off;
     uint32_t inflight = 0;
@@ -846,19 +846,19 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         
         // Establish a window and persist retry/backoff state across restarts until target ACK is reached
         uint64_t window_start = last_acked;
-        uint32_t to_ack_base = val_internal_get_timeout(s, VAL_OP_DATA_ACK);
-        uint32_t to_ack = to_ack_base;
+    uint32_t to_ack_base = val_internal_get_timeout(s, VAL_OP_DATA_ACK);
+    uint32_t ack_timeout_ms = to_ack_base;
         if (first_ack_grace && last_acked == resume_off)
         {
             uint32_t ext = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : to_ack_base;
-            if (ext > to_ack)
-                to_ack = ext;
+            if (ext > ack_timeout_ms)
+                ack_timeout_ms = ext;
             VAL_LOG_INFO(s, "data: extended first DATA_ACK wait after resume");
         }
         uint8_t tries_rem = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
         if (first_ack_grace && last_acked == resume_off)
             tries_rem = (uint8_t)(tries_rem + first_ack_extra_tries);
-        uint32_t backoff_cur = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+    uint32_t backoff_ms = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
         // Loop until we advance to target ACK without exhausting retries
         for (;;)
         {
@@ -906,7 +906,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
 
             const uint64_t target_ack = next_to_send;
             uint32_t t0 = s->config->system.get_ticks_ms();
-            uint32_t wait_deadline = s->config->system.get_ticks_ms() + to_ack;
+            uint32_t wait_deadline = s->config->system.get_ticks_ms() + ack_timeout_ms;
             s->timing.in_retransmit = 0;
 
             val_sender_ack_ctx_t ack_ctx = {
@@ -924,11 +924,11 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 .mode_used = &mode_used,
                 .window_size = &win,
                 .first_ack_grace_flag = &first_ack_grace,
-                .to_ack = to_ack,
+                .to_ack = ack_timeout_ms,
                 .to_ack_base = to_ack_base,
                 .tries = tries_rem,
                 .tries_initial = (uint8_t)(s->config->retries.ack_retries ? s->config->retries.ack_retries : 0),
-                .backoff = backoff_cur,
+                .backoff = backoff_ms,
                 .backoff_initial = (s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0),
                 .wait_deadline = wait_deadline,
                 .t0 = t0,
@@ -997,7 +997,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
 
             // Persist remaining retries/backoff across restarts in this window
             tries_rem = ack_ctx.tries;
-            backoff_cur = ack_ctx.backoff;
+            backoff_ms = ack_ctx.backoff;
 
             if (restart_window)
             {

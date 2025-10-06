@@ -134,7 +134,7 @@ void val_serialize_resume_resp(const val_resume_resp_t *resp, uint8_t *wire_data
     VAL_PUT_LE32(wire_data + 0, resp->action);
     VAL_PUT_LE64(wire_data + 4, resp->resume_offset);
     VAL_PUT_LE32(wire_data + 12, resp->verify_crc);
-    VAL_PUT_LE64(wire_data + 16, resp->verify_len);
+    VAL_PUT_LE64(wire_data + 16, resp->verify_length);
 }
 
 void val_deserialize_resume_resp(const uint8_t *wire_data, val_resume_resp_t *resp)
@@ -145,7 +145,7 @@ void val_deserialize_resume_resp(const uint8_t *wire_data, val_resume_resp_t *re
     resp->action = VAL_GET_LE32(wire_data + 0);
     resp->resume_offset = VAL_GET_LE64(wire_data + 4);
     resp->verify_crc = VAL_GET_LE32(wire_data + 12);
-    resp->verify_len = VAL_GET_LE64(wire_data + 16);
+    resp->verify_length = VAL_GET_LE64(wire_data + 16);
 }
 
 void val_serialize_error_payload(const val_error_payload_t *payload, uint8_t *wire_data)
@@ -174,7 +174,7 @@ void val_serialize_mode_sync(const val_mode_sync_t *sync, uint8_t *wire_data)
     VAL_PUT_LE32(wire_data + 0, sync->current_mode);
     VAL_PUT_LE32(wire_data + 4, sync->sequence);
     VAL_PUT_LE32(wire_data + 8, sync->consecutive_errors);
-    VAL_PUT_LE32(wire_data + 12, sync->consecutive_success);
+    VAL_PUT_LE32(wire_data + 12, sync->consecutive_successes);
     VAL_PUT_LE32(wire_data + 16, sync->flags);
 }
 
@@ -186,7 +186,7 @@ void val_deserialize_mode_sync(const uint8_t *wire_data, val_mode_sync_t *sync)
     sync->current_mode = VAL_GET_LE32(wire_data + 0);
     sync->sequence = VAL_GET_LE32(wire_data + 4);
     sync->consecutive_errors = VAL_GET_LE32(wire_data + 8);
-    sync->consecutive_success = VAL_GET_LE32(wire_data + 12);
+    sync->consecutive_successes = VAL_GET_LE32(wire_data + 12);
     sync->flags = VAL_GET_LE32(wire_data + 16);
 }
 

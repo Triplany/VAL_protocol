@@ -1,4 +1,4 @@
-````markdown
+# VAL Protocol Documentation
 # VAL Protocol Documentation
 
 📚 **[Complete Documentation](docs/README.md)** | [Getting Started](docs/getting-started.md) | [API Reference](docs/api-reference.md) | [Protocol Spec](docs/protocol-specification.md)
@@ -16,7 +16,7 @@
 - **Public headers**: `include/` - Public API (`val_protocol.h`, `val_errors.h`)
 - **Sources**: `src/` - Core implementation
 - **Examples**: `examples/tcp/` - Complete TCP send/receive examples
-- **Unit tests**: `unit_tests/` - Comprehensive test suite (80+ tests)
+- **Unit tests**: `unit_tests/` - Comprehensive test suite
 - **Documentation**: `docs/` - Complete protocol and API documentation
 
 ### Protocol Notes
@@ -39,7 +39,7 @@ _Dedicated to Valerie Lee - for all her support over the years allowing me to ch
 
 ## Overview
 
-VAL Protocol is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. A small, efficient protocol featuring fixed header + variable payload (bounded by a negotiated MTU) + trailer CRC. It supports adaptive transmission with continuous streaming mode, comprehensive resume modes, cumulative ACKs, per-file CRC integrity, and avoids dynamic allocations in steady state.
+VAL Protocol is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. A small, efficient protocol featuring fixed header + variable payload (bounded by a negotiated MTU) + trailer CRC. It supports adaptive transmission with continuous streaming mode, comprehensive resume modes, cumulative ACKs, and avoids dynamic allocations in steady state. Integrity is enforced by header and trailer CRCs; whole-file CRCs are not used on the wire.
 
 ### Key Features
 
@@ -52,14 +52,24 @@ VAL Protocol is a robust, blocking-I/O file transfer protocol library written in
 - **Robust Error Handling**: Comprehensive error codes with detailed 32-bit diagnostic masks
 - **Optional Diagnostics**: Compile-time metrics collection and a lightweight packet capture hook
 
-- Development guide: [DEVELOPMENT.md](./DEVELOPMENT.md)
-- Packet flow reference: [PROTOCOL_FLOW.md](./PROTOCOL_FLOW.md)
+- Development topics are covered across the docs/ guides.
 - Pre‑1.0 policy: backward compatibility isn’t guaranteed until v1.0. The current on‑wire behavior uses cumulative DATA_ACKs, DONE_ACK, and two CRCs (header + trailer). All multi‑byte fields are little‑endian.
   - The packet header includes a reserved `wire_version` byte (after `type`) that is always 0 in the base protocol; receivers validate it and reject non‑zero as incompatible for future evolution.
 - Public headers: `include/`
 - Sources: `src/`
 - Examples: `examples/tcp/` (TCP send/receive)
 - Unit tests: `unit_tests/` (CTest executables; artifacts like ut_artifacts live under the build tree)
+
+## At a glance
+
+- On-wire header (24 bytes):
+  - type (1), wire_version (1, always 0), reserved2 (2), payload_len (4), seq (4), offset (8), header_crc (4)
+- Integrity: CRC-32 over header (bytes 0–19), and a trailer CRC over header+payload+padding
+- Handshake (HELLO): includes version, packet_size, max/preferred TX mode, and streaming_flags
+- Streaming flags (include/val_wire.h):
+  - VAL_STREAM_CAN_SEND (bit 0) — this endpoint can stream when sending
+  - VAL_STREAM_ACCEPT (bit 1) — this endpoint accepts a streaming peer
+  - Effective permissions are directional and visible via val_get_streaming_allowed()
 
 ## Features (from source)
 
@@ -83,13 +93,13 @@ VAL Protocol is a robust, blocking-I/O file transfer protocol library written in
     - `val_is_streaming_engaged(session, &engaged)` — whether pacing is currently engaged on this side
     - `val_get_peer_tx_mode(session, &out_mode)`, `val_is_peer_streaming_engaged(session, &engaged)` — best-effort peer state
 - Diagnostics (optional, compile‑time)
-  - Metrics: `VAL_ENABLE_METRICS` — packet/byte counters, timeouts, retransmits, crc errors, etc.
+  - Metrics: `VAL_ENABLE_METRICS` — packet/byte counters, timeouts, retransmits, CRC errors, etc.
   - Packet capture hook: configure `config.capture.on_packet` to observe TX/RX packets (type, sizes, offset)
   - Emergency cancel: `val_emergency_cancel(session)` sends a best‑effort CANCEL and marks the session aborted.
 
 Limitations
 - Very large verification windows (>4 GiB) are not currently supported by the example filesystem adapter during VERIFY CRC computation.
-  The core clamps verification windows for responsiveness: tail modes are capped by default (≈2 MiB); FULL verifies full‑prefix up to a cap,
+  The core clamps verification windows for responsiveness: tail modes are capped by default (≈8 MiB by default, configurable), with an optional minimum.
   and falls back to a large‑tail verify beyond that. Application integrations can supply their own filesystem and CRC providers to remove these limits.
 
 ## Build options

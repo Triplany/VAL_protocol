@@ -326,7 +326,6 @@ cfg.debug.min_level = VAL_LOG_DEBUG;  // Or VAL_LOG_TRACE
 - **Detail Mask**:
   - `VAL_ERROR_DETAIL_CRC_HEADER`: Header CRC failed
   - `VAL_ERROR_DETAIL_CRC_TRAILER`: Trailer CRC failed
-   - 0x00000400 (CRC_FILE): removed; whole-file CRC is no longer part of the protocol
 - **Fix**: Check transport reliability, test CRC implementation
 
 ### VAL_ERR_RESUME_VERIFY (-7)
@@ -336,8 +335,7 @@ cfg.debug.min_level = VAL_LOG_DEBUG;  // Or VAL_LOG_TRACE
 ### VAL_ERR_INCOMPATIBLE_VERSION (-8)
 - **Cause**: Protocol version mismatch
 - **Detail Mask**:
-  - `VAL_ERROR_DETAIL_VERSION_MAJOR`: Major version differs
-  - `VAL_ERROR_DETAIL_VERSION_MINOR`: Minor version differs
+   - `VAL_ERROR_DETAIL_VERSION`: Version differs
 - **Fix**: Ensure both sides use compatible versions
 
 ### VAL_ERR_PACKET_SIZE_MISMATCH (-9)

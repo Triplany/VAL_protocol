@@ -2,18 +2,17 @@
 
 Breaking changes
 
-- Removed whole-file CRC32 from SEND_META payload and public API.
+- Whole-file CRC32 is not part of SEND_META or the public API.
 	- Wire: VAL_WIRE_META_SIZE reduced by 4 bytes (filename + path + size only).
 	- API: val_meta_payload_t no longer contains file_crc32.
 	- Integrity is provided by per-packet CRCs and optional tail verification during resume.
 - Simplified resume modes to a tail-only scheme:
 Other removals
 
-- Removed error detail flag VAL_ERROR_DETAIL_CRC_FILE (0x00000400). It had no remaining code paths.
 
 	- Modes: VAL_RESUME_NEVER, VAL_RESUME_SKIP_EXISTING, VAL_RESUME_TAIL.
 	- New resume config fields: tail_cap_bytes, min_verify_bytes, mismatch_skip.
-	- Legacy FULL/TAIL variants are removed; use mismatch_skip=1 to emulate "skip on mismatch" behavior.
+	- FULL/TAIL variants are consolidated under a simplified policy; use mismatch_skip=1 for skip-on-mismatch behavior.
 
 Migration notes
 
@@ -53,7 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Metadata Validation Framework**: Application callbacks to accept/skip/abort files based on metadata
 - **Connection Health Monitoring**: Graceful failure on excessive retry rates (>50%)
 - **Emergency Cancellation**: Best-effort CANCEL packet (ASCII CAN 0x18) with session abort
-- Removed Wire Audit (compile-time) in favor of a runtime packet capture hook (config.capture.on_packet)
 - **Metrics Collection**: Optional compile-time statistics (VAL_ENABLE_METRICS)
 - **Comprehensive Logging**: Five log levels (CRITICAL, WARNING, INFO, DEBUG, TRACE) with compile-time gating
 - **RFC 6298 Adaptive Timeouts**: RTT-based timeout computation with Karn's algorithm

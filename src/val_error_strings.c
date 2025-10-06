@@ -107,10 +107,8 @@ const char *val_error_detail_to_string(uint32_t d)
     if (d & VAL_ERROR_DETAIL_OFFSET_ERROR)
         append_flag(tls, sizeof(tls), &len, "OFFSET_ERROR");
     // Protocol
-    if (d & VAL_ERROR_DETAIL_VERSION_MAJOR)
-        append_flag(tls, sizeof(tls), &len, "VERSION_MAJOR");
-    if (d & VAL_ERROR_DETAIL_VERSION_MINOR)
-        append_flag(tls, sizeof(tls), &len, "VERSION_MINOR");
+    if (d & VAL_ERROR_DETAIL_VERSION)
+        append_flag(tls, sizeof(tls), &len, "VERSION");
     if (d & VAL_ERROR_DETAIL_PACKET_SIZE)
         append_flag(tls, sizeof(tls), &len, "PACKET_SIZE");
     if (d & VAL_ERROR_DETAIL_FEATURE_MISSING)

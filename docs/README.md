@@ -70,11 +70,11 @@ This documentation is organized into the following sections:
 - **Streaming Mode**: Continuous transmission using ACKs as keepalive heartbeats rather than flow control - enables high throughput with small windows, particularly beneficial for RAM-constrained devices (WINDOW_2 + streaming can approach WINDOW_64 performance with far less memory)
 - **Adaptive Transmission**: Dynamic window sizing (1-64 packets) that automatically escalates/de-escalates based on network quality and RTT measurements
 - **Powerful Abstraction Layer**: Complete separation of concerns - implement custom encryption, compression, in-memory transfers, hardware CRC acceleration, or use any byte source/sink (files, RAM, flash, network buffers)
-- **Resume Support**: Six CRC-verified resume modes including tail verification and full-file verification with automatic corruption detection
+- **Resume Support**: Simplified, CRC-verified resume with tail-only verification (configurable cap) and skip-existing policy
 - **Embedded-Friendly**: Zero dynamic allocations in steady state, configurable memory footprint, blocking I/O design for bare-metal and RTOS integration
 - **Transport Agnostic**: Works seamlessly over TCP, UART, RS-485, CAN, USB CDC, SPI, or any reliable byte stream - no OS networking stack required
 - **Robust Error Handling**: Comprehensive error reporting with detailed 32-bit diagnostic masks segmented by category
-- **Metrics & Diagnostics**: Optional compile-time metrics collection, wire audit trails, and health monitoring
+- **Metrics & Diagnostics**: Optional compile-time metrics collection and a lightweight packet capture hook
 
 ## Current Status
 

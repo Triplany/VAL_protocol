@@ -276,7 +276,7 @@ struct val_handshake_t {
 
 **Negotiation Rules:**
 
-1. **Version Compatibility**: Both sides must have same `version_major`
+1. **Version Compatibility**: Both sides must have the same `version_major`
 2. **Packet Size**: Use minimum of both sides' `packet_size`
 3. **Features**: Intersection of supported features
 4. **TX Mode**: Use most conservative `max_performance_mode`
@@ -304,7 +304,6 @@ struct val_meta_payload_t {
     char     filename[128];      // Sanitized basename (UTF-8)
     char     sender_path[128];   // Original path hint (UTF-8)
     uint64_t file_size;          // File size in bytes
-  // Removed: whole-file CRC32 (protocol now uses per-packet CRC and optional tail-verify for resume)
 };
 ```
 
@@ -322,10 +321,10 @@ Header-only packet requesting resume options. The receiver evaluates local file 
 
 ```c
 struct val_resume_resp_t {
-    uint32_t action;          // val_resume_action_t
-    uint64_t resume_offset;   // Resume from this offset
-    uint32_t verify_crc;      // Expected CRC for verification
-    uint64_t verify_len;      // Length of verification region
+  uint32_t action;          // val_resume_action_t
+  uint64_t resume_offset;   // Resume from this offset
+  uint32_t verify_crc;      // Expected CRC for verification
+  uint64_t verify_length;   // Length of verification region
 };
 ```
 
@@ -361,7 +360,7 @@ When `VERIFY_FIRST` action is requested:
 Sender                                  Receiver
   │                                        │
   │<────── RESUME_RESP (VERIFY) ───────────│
-  │        (with verify_crc/len)           │
+  │        (with verify_crc/verify_length) │
   │                                        │
   │──────── VERIFY (echo CRC) ────────────>│
   │                                        │
@@ -610,8 +609,7 @@ Bits 28-31: Context (payload selector)
 - 0x8000: Offset error
 
 **Protocol Details (16-23):**
-- 0x010000: Version major
-- 0x020000: Version minor
+- 0x010000: Version mismatch
 - 0x040000: Packet size
 - 0x080000: Feature missing
 - 0x100000: Invalid state

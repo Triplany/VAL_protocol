@@ -44,13 +44,17 @@ typedef struct
     uint8_t max_performance_mode;
     uint8_t preferred_initial_mode;
     uint16_t mode_sync_interval;
-    uint8_t streaming_flags;
+    uint8_t streaming_flags; // bit0: sender can stream, bit1: accepts peer streaming
     uint8_t reserved_streaming[3];
     uint16_t supported_features16;
     uint16_t required_features16;
     uint16_t requested_features16;
     uint32_t reserved2;
 } val_handshake_t;
+
+// Streaming flag bits (handshake.streaming_flags)
+#define VAL_STREAM_CAN_SEND  (1u << 0)
+#define VAL_STREAM_ACCEPT    (1u << 1)
 
 typedef struct
 {
@@ -63,7 +67,7 @@ typedef struct
     uint32_t action;
     uint64_t resume_offset;
     uint32_t verify_crc;
-    uint64_t verify_len;
+    uint64_t verify_length;
 } val_resume_resp_t;
 
 typedef struct
@@ -71,7 +75,7 @@ typedef struct
     uint32_t current_mode;
     uint32_t sequence;
     uint32_t consecutive_errors;
-    uint32_t consecutive_success;
+    uint32_t consecutive_successes;
     uint32_t flags;
 } val_mode_sync_t;
 

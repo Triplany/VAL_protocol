@@ -35,7 +35,7 @@ static int mock_recv(void *ctx, void *buffer, size_t buffer_size, size_t *receiv
         memset(&payload, 0, sizeof(payload));
         payload.magic = VAL_MAGIC;
         payload.version_major = VAL_VERSION_MAJOR;
-        payload.version_minor = VAL_VERSION_MINOR;
+    payload.version_minor = VAL_VERSION_MINOR;
         payload.packet_size = 1024;
         payload.max_performance_mode = VAL_TX_WINDOW_8; // Peer supports up to 8-packet window
         payload.preferred_initial_mode = VAL_TX_WINDOW_4;
@@ -277,7 +277,7 @@ static void test_adaptive_negotiation(void)
     for (int i = 0; i < 6; i++)
     {
         val_internal_record_transmission_success(session);
-        printf("After %d successes - mode: %d, consecutive_successes: %d\n", i + 1, session->current_tx_mode,
+    printf("After %d successes - mode: %d, consecutive_successes: %d\n", i + 1, session->current_tx_mode,
                session->consecutive_successes);
     }
 

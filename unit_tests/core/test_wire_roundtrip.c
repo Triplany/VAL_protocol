@@ -69,7 +69,7 @@ static int test_resume_resp(void) {
     in.action = 3;
     in.resume_offset = 0x1020304050607080ULL;
     in.verify_crc = 0xAABBCCDD;
-    in.verify_len = 0xFEEDBEEFULL;
+    in.verify_length = 0xFEEDBEEFULL;
 
     val_serialize_resume_resp(&in, buf);
     val_resume_resp_t out = {0};
@@ -97,7 +97,7 @@ static int test_mode_sync(void) {
     in.current_mode = VAL_TX_WINDOW_8;
     in.sequence = 77;
     in.consecutive_errors = 2;
-    in.consecutive_success = 10;
+    in.consecutive_successes = 10;
     in.flags = 0x55AA55AAu;
 
     val_serialize_mode_sync(&in, buf);

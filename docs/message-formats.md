@@ -157,7 +157,6 @@ struct val_meta_payload_t {
     char     filename[128];    // Sanitized basename (UTF-8, null-terminated)
     char     sender_path[128]; // Original path hint (UTF-8, null-terminated)
     uint64_t file_size;        // File size in bytes (LE)
-    // Removed file_crc32: not used by protocol
 };  // 264 bytes
 ```
 
@@ -198,7 +197,7 @@ struct val_resume_resp_t {
     uint32_t action;         // val_resume_action_t (LE)
     uint64_t resume_offset;  // Resume from this offset (LE)
     uint32_t verify_crc;     // Expected CRC for verification (LE)
-    uint64_t verify_len;     // Length of verification region (LE)
+    uint64_t verify_length;  // Length of verification region (LE)
 };  // 24 bytes
 ```
 
@@ -215,7 +214,7 @@ typedef enum {
 
 **Action Details**:
 
-| Action | resume_offset | verify_crc | verify_len | Meaning |
+| Action | resume_offset | verify_crc | verify_length | Meaning |
 |--------|---------------|------------|------------|---------|
 | START_ZERO | 0 | 0 | 0 | Start fresh from beginning |
 | START_OFFSET | N | 0 | 0 | Resume from offset N (no verification) |
@@ -407,7 +406,7 @@ struct val_mode_sync_t {
     uint32_t current_mode;         // Current val_tx_mode_t (LE)
     uint32_t sequence;             // Sync sequence number (LE)
     uint32_t consecutive_errors;   // Recent error count (LE)
-    uint32_t consecutive_success;  // Recent success count (LE)
+    uint32_t consecutive_successes;  // Recent success count (LE)
     uint32_t flags;                // Bit 0: streaming_engaged (LE)
 };  // 20 bytes
 ```

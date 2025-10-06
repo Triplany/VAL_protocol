@@ -62,7 +62,7 @@ static int roundtrip_all(void) {
         in.action = 2;
         in.resume_offset = 0x1122334455667788ULL;
         in.verify_crc = 0x01020304;
-        in.verify_len = 0x0A0B0C0D0E0F1011ULL;
+    in.verify_length = 0x0A0B0C0D0E0F1011ULL;
         val_serialize_resume_resp(&in, buf);
         val_deserialize_resume_resp(buf, &out);
         if (memcmp(&in, &out, sizeof(in)) != 0) fails++;
@@ -84,7 +84,7 @@ static int roundtrip_all(void) {
         in.current_mode = VAL_TX_WINDOW_4;
         in.sequence = 7;
         in.consecutive_errors = 1;
-        in.consecutive_success = 9;
+    in.consecutive_successes = 9;
         in.flags = 0xCAFEBABE;
         val_serialize_mode_sync(&in, buf);
         val_deserialize_mode_sync(buf, &out);

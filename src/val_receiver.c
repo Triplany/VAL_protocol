@@ -13,13 +13,13 @@
 // Heartbeat moved to scheduler module (val_rx_maybe_send_heartbeat)
 
 static val_status_t send_resume_response(val_session_t *s, val_resume_action_t action, uint64_t offset, uint32_t crc,
-                                         uint64_t verify_len)
+                                         uint64_t verify_length)
 {
     val_resume_resp_t resp;
     resp.action = (uint32_t)action;
     resp.resume_offset = offset;
     resp.verify_crc = crc;
-    resp.verify_len = verify_len;
+    resp.verify_length = verify_length;
     uint8_t resp_wire[VAL_WIRE_RESUME_RESP_SIZE];
     val_serialize_resume_resp(&resp, resp_wire);
     return val_internal_send_packet(s, VAL_PKT_RESUME_RESP, resp_wire, VAL_WIRE_RESUME_RESP_SIZE, offset);
@@ -68,7 +68,7 @@ static val_status_t val_handle_validation_action(val_session_t *session, val_val
 }
 
 static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resume_offset_expected, uint32_t expected_crc,
-                                                 uint64_t verify_len, val_status_t on_match_status)
+                                                 uint64_t verify_length, val_status_t on_match_status)
 {
     VAL_LOG_DEBUG(s, "verify: starting exchange");
     // Wait for sender to echo back the CRC in a VERIFY packet using centralized helper
@@ -108,7 +108,7 @@ static val_status_t handle_verification_exchange(val_session_t *s, uint64_t resu
     uint32_t their_verify_crc = vr.verify_crc;
     // Optional sanity logs to help diagnose mismatches
     VAL_LOG_DEBUGF(s, "verify: expected off=%llu len=%llu, got off=%llu len=%llu", (unsigned long long)resume_offset_expected,
-                   (unsigned long long)verify_len, (unsigned long long)vr.resume_offset, (unsigned long long)vr.verify_len);
+                   (unsigned long long)verify_length, (unsigned long long)vr.resume_offset, (unsigned long long)vr.verify_length);
     VAL_LOG_DEBUG(s, "verify: computing result");
     int32_t result;
     if (their_verify_crc == expected_crc)
@@ -522,9 +522,9 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
     // ACK coalescing state (per-file)
         uint32_t pkts_since_ack = 0;
     // Streaming heartbeat state (per-file): send sparse ACKs only when idle
-    uint32_t hb_last_ms = 0;
-    uint32_t last_ack_ms = 0;   // timestamp of last DATA_ACK we sent
-    uint32_t last_data_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0; // last DATA receipt
+    uint32_t heartbeat_last_ms = 0;
+    uint32_t last_ack_sent_ms = 0;   // timestamp of last DATA_ACK we sent
+    uint32_t last_data_rx_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0; // last DATA receipt
         // Map peer's current TX mode (window rung) to a window size used as the ACK stride
         // We cannot ACK less frequently than once per window, otherwise sender will stall at in-flight cap.
         uint32_t ack_stride = val_rx_ack_stride_from_mode(s->peer_tx_mode);
@@ -555,7 +555,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     }
                         
                     // Streaming: sparse heartbeat DATA_ACK (liveness) only when idle
-                    val_rx_maybe_send_heartbeat(s, written, 3000u, &hb_last_ms, &last_ack_ms, last_data_ms);
+                    val_rx_maybe_send_heartbeat(s, written, 3000u, &heartbeat_last_ms, &last_ack_sent_ms, last_data_rx_ms);
                     if (!val_internal_transport_is_connected(s))
                     {
                         if (!skipping && f)
@@ -607,7 +607,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
             if (t == VAL_PKT_DATA)
             {
                 if (s->config->system.get_ticks_ms)
-                    last_data_ms = s->config->system.get_ticks_ms();
+                    last_data_rx_ms = s->config->system.get_ticks_ms();
                 // Determine ordering before mutating 'written'
                 int in_order = (off == written) ? 1 : 0;
                 int dup_or_overlap = (off < written) ? 1 : 0;
@@ -642,7 +642,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                             return st2;
                         }
                         if (s->config->system.get_ticks_ms)
-                            last_ack_ms = s->config->system.get_ticks_ms();
+                            last_ack_sent_ms = s->config->system.get_ticks_ms();
                         pkts_since_ack = 0;
                         // Continue to next iteration to process DONE
                         continue;
@@ -656,7 +656,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                                    (unsigned long long)written);
                     (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
                     if (s->config->system.get_ticks_ms)
-                        last_ack_ms = s->config->system.get_ticks_ms();
+                        last_ack_sent_ms = s->config->system.get_ticks_ms();
                 }
                 else /* sender_ahead */
                 {
@@ -671,7 +671,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                     // Also send an ACK at our current high-water to help the sender resync
                     (void)val_internal_send_packet(s, VAL_PKT_DATA_ACK, NULL, 0, written);
                     if (s->config->system.get_ticks_ms)
-                        last_ack_ms = s->config->system.get_ticks_ms();
+                        last_ack_sent_ms = s->config->system.get_ticks_ms();
                 }
                 if (s->config->callbacks.on_progress)
                 {
@@ -737,7 +737,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                             return st2;
                         }
                         if (s->config->system.get_ticks_ms)
-                            last_ack_ms = s->config->system.get_ticks_ms();
+                            last_ack_sent_ms = s->config->system.get_ticks_ms();
                         pkts_since_ack = 0;
                     }
                 }
@@ -752,7 +752,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                         return st2;
                     }
                     if (s->config->system.get_ticks_ms)
-                        last_ack_ms = s->config->system.get_ticks_ms();
+                        last_ack_sent_ms = s->config->system.get_ticks_ms();
                     pkts_since_ack = 0;
                 }
             }

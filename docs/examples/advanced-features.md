@@ -28,8 +28,8 @@ VAL Protocol fills a specific niche that existing protocols don't address well:
 | HTTP(S) | TCP/IP only | ⚠️ Range requests | ❌ TCP-level only | ❌ Needs full stack | Web, cloud, APIs |
 | FTP | TCP/IP only | ✅ REST command | ❌ Fixed | ❌ Complex protocol | Traditional file servers |
 | XMODEM | Any serial | ⚠️ Basic | ❌ Stop-and-wait | ✅ Simple | Ancient terminals, bootstrap |
-| YMODEM | Any serial | ⚠️ File-level | ❌ 1KB blocks | ✅ Simple | Batch files, legacy |
-| ZMODEM | Any serial | ✅ Good | ⚠️ Streaming only | ⚠️ Complex CRC | Legacy serial, still common |
+| YMODEM | Any serial | ⚠️ File-level | ❌ 1KB blocks | ✅ Simple | Batch file workflows |
+| ZMODEM | Any serial | ✅ Good | ⚠️ Streaming only | ⚠️ Complex CRC | Traditional serial transfers |
 | TFTP | UDP/IP only | ❌ No resume | ❌ Fixed window | ⚠️ Needs UDP | Bootloaders, network boot |
 
 ### Real-World Scenarios
@@ -45,10 +45,6 @@ VAL Protocol fills a specific niche that existing protocols don't address well:
 **🏭 Industrial PLC Communication**
 - **Problem:** Need file transfer over RS-485 Modbus network. No TCP/IP available. Must be deterministic and recover from power interruptions.
 - **VAL Solution:** Works over any transport. Deterministic blocking behavior. Resume from exact byte offset after power loss.
-
-**🚀 Space/Aerospace Data Downlink**
-- **Problem:** Intermittent connection, strict memory limits, can't tolerate corruption, need every byte accounted for.
-- **VAL Solution:** CRC on every packet, metrics tracking, zero dynamic allocation, proven resume modes.
 
 **🔌 USB Device File Sync**
 - **Problem:** Custom USB device (not mass storage class) needs file transfer. Can't use filesystem drivers. Need progress tracking.
@@ -470,7 +466,7 @@ cfg.buffers.packet_size = 8192;
 cfg.resume.mode = VAL_RESUME_TAIL;
 cfg.resume.tail_cap_bytes = 8 * 1024 * 1024;  // 8 MiB cap (example)
 cfg.resume.min_verify_bytes = 0;
-cfg.resume.mismatch_skip = 1;  // emulate legacy "skip on mismatch"
+cfg.resume.mismatch_skip = 1;  // choose skip-on-mismatch policy
 ```
 
 **Behavior:**
@@ -641,7 +637,7 @@ cfg.callbacks.on_health_check = on_health_check;
 void* stack_alloc(void *ctx, size_t size) {
     // VAL doesn't actually allocate anything dynamically by default
     // This is for custom user data if needed
-    return NULL;  // Not used
+    return NULL;
 }
 
 void stack_free(void *ctx, void *ptr) {
