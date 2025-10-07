@@ -611,7 +611,6 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 // Determine ordering before mutating 'written'
                 int in_order = (off == written) ? 1 : 0;
                 int dup_or_overlap = (off < written) ? 1 : 0;
-                int sender_ahead = (off > written) ? 1 : 0;
                 // Cumulative ACK semantics
                 if (in_order)
                 {

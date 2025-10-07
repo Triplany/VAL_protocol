@@ -58,6 +58,9 @@ int main(void)
     test_duplex_t end_rx = {.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     ts_make_config(&cfg_tx, send_a, recv_a, packet, &end_tx, VAL_RESUME_TAIL, 2048);
     ts_make_config(&cfg_rx, send_b, recv_b, packet, &end_rx, VAL_RESUME_TAIL, 2048);
+
+    // ts_make_config installs real system hooks by default
+
     // Disable resume for this test to avoid inheriting offsets from previous runs
     cfg_tx.resume.mode = VAL_RESUME_NEVER;
     cfg_rx.resume.mode = VAL_RESUME_NEVER;

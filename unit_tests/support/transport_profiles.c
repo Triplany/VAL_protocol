@@ -96,19 +96,26 @@ static struct
 // ---- RNG (reuse existing pcg32 or provide simple one) ----
 static uint64_t g_rng_state = 0x853c49e6748fea9bull;
 
-static uint32_t sim_rand(void)
+// Mark internal helpers as possibly-unused to avoid compiler warnings in some build configs
+#if defined(_MSC_VER)
+#define TS_MAYBE_UNUSED
+#else
+#define TS_MAYBE_UNUSED __attribute__((unused))
+#endif
+
+static TS_MAYBE_UNUSED uint32_t sim_rand(void)
 {
     // Simple LCG for deterministic behavior
     g_rng_state = g_rng_state * 6364136223846793005ULL + 1442695040888963407ULL;
     return (uint32_t)(g_rng_state >> 32);
 }
 
-static void sim_rand_seed(uint32_t seed)
+static TS_MAYBE_UNUSED void sim_rand_seed(uint32_t seed)
 {
     g_rng_state = seed;
 }
 
-static float sim_rand_float(void)
+static TS_MAYBE_UNUSED float sim_rand_float(void)
 {
     return (float)sim_rand() / (float)0xFFFFFFFFU;
 }
@@ -126,7 +133,7 @@ static int should_be_in_burst(uint32_t now_ms)
 }
 
 // Calculate current loss rate
-static float get_current_loss_rate(uint32_t now_ms)
+static TS_MAYBE_UNUSED float get_current_loss_rate(uint32_t now_ms)
 {
     if (should_be_in_burst(now_ms))
         return g_sim.profile.burst_loss_rate;
@@ -134,7 +141,7 @@ static float get_current_loss_rate(uint32_t now_ms)
 }
 
 // Apply bandwidth throttling by calculating delay for N bytes
-static uint32_t calculate_bandwidth_delay_ms(size_t bytes)
+static TS_MAYBE_UNUSED uint32_t calculate_bandwidth_delay_ms(size_t bytes)
 {
     if (g_sim.profile.bandwidth_bps == 0)
         return 0;
@@ -146,7 +153,7 @@ static uint32_t calculate_bandwidth_delay_ms(size_t bytes)
 }
 
 // Apply latency with jitter
-static uint32_t calculate_latency_ms(void)
+static TS_MAYBE_UNUSED uint32_t calculate_latency_ms(void)
 {
     uint32_t base = g_sim.profile.base_latency_ms;
     if (g_sim.profile.jitter_ms == 0)

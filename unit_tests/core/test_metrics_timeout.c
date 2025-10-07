@@ -78,7 +78,11 @@ int main(void)
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_NEVER, 1024);
+    cfg_tx.system.get_ticks_ms = ts_ticks;
+    cfg_tx.system.delay_ms = ts_delay;
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_NEVER, 1024);
+    cfg_rx.system.get_ticks_ms = ts_ticks;
+    cfg_rx.system.delay_ms = ts_delay;
     // Verbose logs to watch retransmit/timeout logic closely
     ts_set_console_logger_with_level(&cfg_tx, VAL_LOG_TRACE);
     ts_set_console_logger_with_level(&cfg_rx, VAL_LOG_TRACE);

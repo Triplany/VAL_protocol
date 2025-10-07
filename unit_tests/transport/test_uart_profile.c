@@ -53,7 +53,7 @@ static int test_uart_basic_transfer(void)
     // Receiver uses reverse direction
     test_duplex_t rx_duplex = {.a2b = duplex.b2a, .b2a = duplex.a2b, .max_packet = duplex.max_packet};
     ts_make_config(&rx_cfg, rx_send_buf, rx_recv_buf, packet_size, &rx_duplex, VAL_RESUME_NEVER, 0);
-    
+
     // Create sessions
     val_session_t *tx = NULL, *rx = NULL;
     uint32_t detail;

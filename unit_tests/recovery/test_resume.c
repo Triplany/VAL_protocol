@@ -105,9 +105,9 @@ int main(void)
     // Setup sessions with TAIL resume to validate trailing window
     uint8_t *sb_a = (uint8_t *)calloc(1, packet), *rb_a = (uint8_t *)calloc(1, packet);
     uint8_t *sb_b = (uint8_t *)calloc(1, packet), *rb_b = (uint8_t *)calloc(1, packet);
+    val_config_t cfg_tx, cfg_rx;
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
-    val_config_t cfg_tx, cfg_rx;
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_TAIL, 8192);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_TAIL, 8192);
     ts_set_console_logger(&cfg_tx);

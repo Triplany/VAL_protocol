@@ -273,8 +273,10 @@ extern "C"
         {
             // Monotonic millisecond clock. Always required by VAL; no built-in defaults.
             uint32_t (*get_ticks_ms)(void);
-            // Optional delay helper for backoff/sleeps between retries. When NULL, the
-            // implementation uses a minimal spin/yield or platform fallback where applicable.
+            // Millisecond delay helper for backoff/sleeps between retries. Always required by VAL.
+            // Applications and tests MUST provide a valid delay implementation. There is no
+            // internal fallback; supplying NULL will cause session creation to fail with
+            // VAL_ERR_INVALID_ARG.
             void (*delay_ms)(uint32_t ms);
         } system;
 

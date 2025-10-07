@@ -48,6 +48,8 @@ static int run_veto_case(void)
     ts_make_config(&cfg_tx, sb_tx, rb_tx, pkt, &end_tx, VAL_RESUME_TAIL, 1024);
     ts_make_config(&cfg_rx, sb_rx, rb_rx, pkt, &end_rx, VAL_RESUME_TAIL, 1024);
 
+    // ts_make_config installs defaults
+
     // Configure adaptive TX/window and streaming flags.
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;

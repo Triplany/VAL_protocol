@@ -56,6 +56,7 @@ static void make_cfgs(val_config_t *cfg_tx, val_config_t *cfg_rx, test_duplex_t 
 {
     ts_make_config(cfg_tx, sb_a, rb_a, packet, d_tx, VAL_RESUME_TAIL, 8192);
     ts_make_config(cfg_rx, sb_b, rb_b, packet, d_rx, VAL_RESUME_TAIL, 8192);
+    // ts_make_config installs real system hooks by default
     ts_set_console_logger(cfg_tx);
     ts_set_console_logger(cfg_rx);
 }

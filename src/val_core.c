@@ -631,6 +631,8 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
         missing = 1;
     if (!config->system.get_ticks_ms)
         missing = 1;
+    if (!config->system.delay_ms)
+        missing = 1;
     if (!config->buffers.send_buffer || !config->buffers.recv_buffer || config->buffers.packet_size == 0)
         missing = 1;
     if (missing)
@@ -864,7 +866,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     {
         // Benign timeout while waiting for a header; record without emitting a CRITICAL numeric log
         val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
-        VAL_LOG_DEBUG(s, "recv_packet: header timeout");
+    VAL_LOG_DEBUGF(s, "recv_packet: header timeout ts=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u));
     val_internal_unlock(s);
         val_metrics_inc_timeout(s);
         return VAL_ERR_TIMEOUT;
@@ -908,7 +910,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
             {
                 // Resync timeout — record without CRITICAL numeric log
                 val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
-                VAL_LOG_DEBUG(s, "recv_packet: timeout while resyncing after bad header");
+                VAL_LOG_DEBUGF(s, "recv_packet: timeout while resyncing after bad header ts=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u));
                 val_internal_unlock(s);
                 val_metrics_inc_timeout(s);
                 return VAL_ERR_TIMEOUT;
@@ -972,7 +974,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         if (got2 != payload_len)
         {
             val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
-            VAL_LOG_DEBUG(s, "recv_packet: payload timeout");
+            VAL_LOG_DEBUGF(s, "recv_packet: payload timeout ts=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u));
             val_internal_unlock(s);
             val_metrics_inc_timeout(s);
             return VAL_ERR_TIMEOUT;
@@ -992,7 +994,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     if (got3 != VAL_WIRE_TRAILER_SIZE)
     {
         val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
-        VAL_LOG_DEBUG(s, "recv_packet: trailer timeout");
+    VAL_LOG_DEBUGF(s, "recv_packet: trailer timeout ts=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u));
     val_internal_unlock(s);
         val_metrics_inc_timeout(s);
         return VAL_ERR_TIMEOUT;

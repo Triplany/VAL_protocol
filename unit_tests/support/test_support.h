@@ -112,9 +112,9 @@ extern "C"
     // System hooks
     //
     // Test clock policy:
-    // - ts_make_config() can install a real, monotonic millisecond clock and delay function if
-    //   the caller leaves cfg->system.get_ticks_ms or cfg->system.delay_ms NULL (tests only).
-    //   In production, a clock is always required and must be provided by the application.
+    // - ts_make_config() installs a real, monotonic millisecond clock and delay function when
+    //   cfg->system.get_ticks_ms or cfg->system.delay_ms are NULL (tests only). Tests can override
+    //   these hooks after calling ts_make_config(). In production, applications must supply them.
     // - Platform implementations:
     //     * Windows: GetTickCount64() for ticks; Sleep(ms) for delay
     //     * POSIX: clock_gettime(CLOCK_MONOTONIC) for ticks; nanosleep() for delay

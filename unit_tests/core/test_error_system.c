@@ -1,4 +1,5 @@
 #include "../../src/val_internal.h"
+#include "../support/test_support.h"
 #include "val_protocol.h"
 #if VAL_ENABLE_ERROR_STRINGS
 #include "val_error_strings.h"
@@ -6,37 +7,36 @@
 #include <stdio.h>
 #include <string.h>
 
-// Minimal monotonic clock stub for environments requiring a clock
-static uint32_t ut_ticks(void)
-{
-    return 0u;
-}
+// Note: ts_make_config installs real system hooks by default; no local stubs needed.
 
 int main(void)
 {
 
-    // Build a minimal config with dummy pointers just to create a session object
-    uint8_t buf[1024];
+    // Create a valid session using the in-memory duplex transport via test support
+    test_duplex_t d;
+    test_duplex_init(&d, 1024, 4);
+    uint8_t sb[1024];
+    uint8_t rb[1024];
     val_config_t cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.buffers.send_buffer = buf;
-    cfg.buffers.recv_buffer = buf;
-    cfg.buffers.packet_size = sizeof(buf);
-    cfg.filesystem.fopen = (void *(*)(void *, const char *, const char *))0x1; // non-null to pass validation
-    cfg.filesystem.fread = (size_t (*)(void *, void *, size_t, size_t, void *))0x1;
-    cfg.filesystem.fwrite = (size_t (*)(void *, const void *, size_t, size_t, void *))0x1;
-    cfg.filesystem.fseek = (int (*)(void *, void *, long, int))0x1;
-    cfg.filesystem.ftell = (long (*)(void *, void *))0x1;
-    cfg.filesystem.fclose = (int (*)(void *, void *))0x1;
-    cfg.transport.send = (int (*)(void *, const void *, size_t))0x1;
-    cfg.transport.recv = (int (*)(void *, void *, size_t, size_t *, uint32_t))0x1;
-    cfg.system.get_ticks_ms = ut_ticks;
+    ts_make_config(&cfg, sb, rb, sizeof(sb), &d, VAL_RESUME_NEVER, 0);
+    // Be explicit for this focused test
+    cfg.system.get_ticks_ms = ts_ticks;
+    cfg.system.delay_ms = ts_delay;
     val_session_t *s = NULL;
-    uint32_t d = 0;
-    val_status_t rc = val_session_create(&cfg, &s, &d);
+    uint32_t create_detail = 0;
+    val_status_t rc = val_session_create(&cfg, &s, &create_detail);
     if (rc != VAL_OK || !s)
     {
-        printf("create failed rc=%d d=0x%08X\n", (int)rc, (unsigned)d);
+        fprintf(stderr,
+                "create failed rc=%d d=0x%08X\n"
+                "  transport.send=%p recv=%p io_ctx=%p\n"
+                "  system.ticks=%p delay=%p\n"
+                "  buffers.sb=%p rb=%p P=%zu\n",
+                (int)rc, (unsigned)create_detail,
+                (void*)cfg.transport.send, (void*)cfg.transport.recv, cfg.transport.io_context,
+                (void*)cfg.system.get_ticks_ms, (void*)cfg.system.delay_ms,
+                cfg.buffers.send_buffer, cfg.buffers.recv_buffer, cfg.buffers.packet_size);
+        fflush(stderr);
         return 1;
     }
     // Set and get a feature negotiation error with missing features context
@@ -89,5 +89,6 @@ int main(void)
     }
 #endif
     val_session_destroy(s);
+    test_duplex_free(&d);
     return 0;
 }

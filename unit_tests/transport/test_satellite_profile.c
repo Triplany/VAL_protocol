@@ -281,13 +281,7 @@ static int test_satellite_timeout_adaptation(void)
 
 // Satellite weather event scenario (extreme >5% loss) is covered in the stress test suite.
 
-static int test_satellite_weather_event_info(void)
-{
-    printf("\n=== Test: Satellite Weather Event - SKIPPED ===\n");
-    printf("This test has been moved to the stress test suite.\n");
-    printf("Reason: >5%% packet loss should fail gracefully, not test for success.\n");
-    return 0;
-}
+/* removed: unused stub test function moved to stress suite */
 
 #if 0  // Disabled - moved to stress tests
 static int test_satellite_weather_event_OLD(void)

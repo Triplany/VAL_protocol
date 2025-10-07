@@ -1093,7 +1093,7 @@ void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t pa
     cfg->filesystem.fseek = ts_fseek;
     cfg->filesystem.ftell = ts_ftell;
     cfg->filesystem.fclose = ts_fclose;
-    // Provide default system clock/delay only if caller hasn't supplied their own
+    // Install default real system hooks for tests. Tests may override after this call.
     if (!cfg->system.get_ticks_ms)
         cfg->system.get_ticks_ms = ts_ticks;
     if (!cfg->system.delay_ms)

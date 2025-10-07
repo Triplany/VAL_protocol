@@ -41,6 +41,8 @@ static int test_conservative_initial_mode(void)
     ts_make_config(&cfg_tx, sb_tx, rb_tx, packet, &end_tx, VAL_RESUME_NEVER, 0);
     ts_make_config(&cfg_rx, sb_rx, rb_rx, packet, &end_rx, VAL_RESUME_NEVER, 0);
 
+    // Defaults from ts_make_config are sufficient for this test
+
     // Keep logs minimal
     ts_set_console_logger_with_level(&cfg_tx, 0);
     ts_set_console_logger_with_level(&cfg_rx, 0);

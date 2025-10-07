@@ -58,6 +58,9 @@ static int run_mode_and_check(val_tx_mode_t mode, unsigned expected_cap)
     val_config_t tx_cfg, rx_cfg;
     ts_make_config(&tx_cfg, tx_sbuf, tx_rbuf, P, &end_tx, VAL_RESUME_NEVER, 0);
     ts_make_config(&rx_cfg, rx_sbuf, rx_rbuf, P, &end_rx, VAL_RESUME_NEVER, 0);
+
+    // Defaults from ts_make_config
+
     // Keep logs quiet unless debugging
     ts_set_console_logger_with_level(&tx_cfg, VAL_LOG_WARNING);
     ts_set_console_logger_with_level(&rx_cfg, VAL_LOG_WARNING);

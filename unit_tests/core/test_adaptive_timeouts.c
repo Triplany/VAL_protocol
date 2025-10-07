@@ -1,4 +1,5 @@
 #include "../../src/val_internal.h"
+#include "../support/test_support.h"
 #include "val_protocol.h"
 #include <stdio.h>
 #include <string.h>
@@ -39,6 +40,7 @@ static val_session_t *make_session_with_bounds(uint32_t min_ms, uint32_t max_ms,
     cfg.transport.recv = (int (*)(void *, void *, size_t, size_t *, uint32_t))0x1;
     if (with_clock)
         cfg.system.get_ticks_ms = ut_ticks;
+    cfg.system.delay_ms = ts_delay;
     cfg.timeouts.min_timeout_ms = min_ms;
     cfg.timeouts.max_timeout_ms = max_ms;
     val_session_t *s = NULL;

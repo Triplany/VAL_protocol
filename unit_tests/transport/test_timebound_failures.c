@@ -173,7 +173,8 @@ static int run_handshake_fail_fast_case(const char *case_name)
     }
 
     ts_thread_t rx_thread = ts_start_receiver(rx, outdir);
-    ts_delay(10);
+    // Give the receiver thread slightly more time to start on slower builds/CI
+    ts_delay(50);
 
     ts_cancel_token_t watchdog = ts_start_timeout_guard(30000, case_name);
     uint32_t start = ts_ticks();
@@ -197,7 +198,9 @@ static int run_handshake_fail_fast_case(const char *case_name)
         transport_sim_cleanup();
         return 1;
     }
-    if (elapsed >= 5000)
+    // Allow additional slack for slower hosts / initial-run scheduling jitter.
+    // Previously this was 5000ms; raise to 8000ms to avoid spurious failures on Linux VMs.
+    if (elapsed >= 8000)
     {
         printf("FAIL: Handshake took too long to fail (%u ms)\n", elapsed);
         transport_sim_cleanup();

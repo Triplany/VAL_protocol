@@ -320,16 +320,16 @@ static void on_progress_announce_mode(const val_progress_info_t *info)
         }
     }
     val_tx_mode_t m = VAL_TX_STOP_AND_WAIT;
-    if (val_get_current_tx_mode(g_tx_session_for_progress, &m) == VAL_OK)
+            if (val_get_current_tx_mode(g_tx_session_for_progress, &m) == VAL_OK)
     {
         if (g_last_mode_reported != m)
         {
             g_last_mode_reported = m;
             // Print a friendly name
             const char *name = tx_mode_name(m);
-            int engaged = 0;
-            (void)val_is_streaming_engaged(g_tx_session_for_progress, &engaged);
-            fprintf(stdout, "[VAL][TX] mode changed -> %s%s\n", name, engaged ? " + streaming" : "");
+                    bool engaged = false;
+                    (void)val_is_streaming_engaged(g_tx_session_for_progress, &engaged);
+                    fprintf(stdout, "[VAL][TX] mode changed -> %s%s\n", name, engaged ? " + streaming" : "");
             fflush(stdout);
         }
     }
@@ -937,7 +937,7 @@ int main(int argc, char **argv)
 
     // Optional: print current mode at start
     {
-        val_tx_mode_t mode = VAL_TX_STOP_AND_WAIT;
+            val_tx_mode_t mode = VAL_TX_STOP_AND_WAIT;
         if (val_get_current_tx_mode(tx, &mode) == VAL_OK)
         {
             bool engaged = false;

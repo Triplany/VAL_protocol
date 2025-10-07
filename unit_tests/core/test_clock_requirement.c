@@ -13,6 +13,9 @@ int main(void)
 
     val_config_t cfg;
     ts_make_config(&cfg, send_buf, recv_buf, sizeof(send_buf), &link, VAL_RESUME_NEVER, 0);
+    // Ensure hooks are explicitly set for this test
+    cfg.system.get_ticks_ms = ts_ticks;
+    cfg.system.delay_ms = ts_delay;
 
     // Remove clock on purpose and expect session creation to fail (clock is always required)
     cfg.system.get_ticks_ms = NULL;
@@ -27,12 +30,8 @@ int main(void)
 
     // Provide a clock and expect success
     ts_make_config(&cfg, send_buf, recv_buf, sizeof(send_buf), &link, VAL_RESUME_NEVER, 0);
-    // Ensure we have a clock
-    if (!cfg.system.get_ticks_ms)
-    {
-        fprintf(stderr, "Test helper did not provide a clock\n");
-        return 1;
-    }
+    cfg.system.get_ticks_ms = ts_ticks;
+    cfg.system.delay_ms = ts_delay;
     s = NULL;
     d = 0;
     rc = val_session_create(&cfg, &s, &d);

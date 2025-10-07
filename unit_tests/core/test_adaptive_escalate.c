@@ -29,6 +29,8 @@ static int run_escalate(void)
     ts_make_config(&cfg_tx, sb_tx, rb_tx, pkt, &end_tx, VAL_RESUME_NEVER, 0);
     ts_make_config(&cfg_rx, sb_rx, rb_rx, pkt, &end_rx, VAL_RESUME_NEVER, 0);
 
+    // Defaults from ts_make_config
+
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
     cfg_tx.adaptive_tx.allow_streaming = true;

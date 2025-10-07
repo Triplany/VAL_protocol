@@ -41,6 +41,11 @@ add_library(val_protocol STATIC
 
 )
 target_include_directories(val_protocol PUBLIC include)
+# Allow the library to include internal headers located in src/ when building the target.
+# On some toolchains (notably Unix GCC/Clang) the private source headers must be explicitly
+# added to the target include path so public headers that include internal headers will
+# resolve correctly during compilation.
+target_include_directories(val_protocol PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # Build diagnostics and logging controls
 # - Logging is private to the library and compiled out (0) for non-Debug configs.
 # - Examples/tests can still enable their own logging, but it won’t affect the already-compiled core.

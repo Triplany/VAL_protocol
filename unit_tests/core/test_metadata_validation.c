@@ -141,6 +141,8 @@ static int run_case(val_metadata_validator_t validator, const char *tag, int exp
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_NEVER, 1024);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_NEVER, 1024);
 
+    // Defaults from ts_make_config suffice
+
     // install validator on receiver
     cfg_rx.metadata_validation.validator = validator;
     cfg_rx.metadata_validation.validator_context = NULL;

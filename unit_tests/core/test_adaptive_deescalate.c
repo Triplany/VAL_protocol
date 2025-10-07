@@ -29,6 +29,8 @@ static int run_deescalate(void)
     ts_make_config(&cfg_tx, sb_tx, rb_tx, pkt, &end_tx, VAL_RESUME_NEVER, 0);
     ts_make_config(&cfg_rx, sb_rx, rb_rx, pkt, &end_rx, VAL_RESUME_NEVER, 0);
 
+    // Defaults from ts_make_config
+
     // Enable detailed console logging to observe adaptive transitions and streaming state
     ts_set_console_logger_with_level(&cfg_tx, VAL_LOG_TRACE);
     ts_set_console_logger_with_level(&cfg_rx, VAL_LOG_TRACE);
