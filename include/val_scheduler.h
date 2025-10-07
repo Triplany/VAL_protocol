@@ -2,22 +2,23 @@
 #define VAL_SCHEDULER_H
 
 #include "val_internal.h"
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // Transmit-side scheduler helpers
-// Returns 1 when streaming overlay should be used for tight polling and ungated window, else 0.
-static VAL_FORCE_INLINE int val_tx_should_stream(val_session_t *s)
+// Returns true when streaming overlay should be used for tight polling and ungated window, else false.
+static VAL_FORCE_INLINE bool val_tx_should_stream(val_session_t *s)
 {
     if (!s)
-        return 0;
+        return false;
 #if VAL_ENABLE_STREAMING
-    return (s->send_streaming_allowed && s->cfg.adaptive_tx.allow_streaming && s->streaming_engaged) ? 1 : 0;
+    return (s->send_streaming_allowed && s->cfg.adaptive_tx.allow_streaming && s->streaming_engaged) ? true : false;
 #else
     (void)s;
-    return 0;
+    return false;
 #endif
 }
 

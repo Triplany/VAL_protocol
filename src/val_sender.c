@@ -675,16 +675,15 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
     st = request_resume_and_get_response(s, filepath, &resume_off);
     if (st != VAL_OK)
         return st;
+    // If receiver requested to skip this file entirely, resume_off is a sentinel (UINT64_MAX)
     if (resume_off == UINT64_MAX)
     {
-        // Skip file
         if (s->config->callbacks.on_file_start)
             s->config->callbacks.on_file_start(filename, reported_path ? reported_path : "", size, size);
-        // Send DONE/ACK path same as legacy
+        // Send DONE and wait for DONE_ACK without sending any data
         st = val_internal_send_packet(s, VAL_PKT_DONE, NULL, 0, size);
         if (st != VAL_OK)
             return st;
-        // Wait for DONE_ACK using centralized helper
         st = val_internal_wait_done_ack(s, size);
         if (st != VAL_OK)
         {

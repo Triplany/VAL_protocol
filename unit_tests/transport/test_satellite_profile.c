@@ -103,6 +103,13 @@ static int test_satellite_geo_high_latency(void)
     if (!ts_files_equal(infile, outfile))
     {
         printf("FAIL: File integrity check failed\n");
+        // Extra diagnostics to help locate the mismatch
+        uint64_t in_sz = ts_file_size(infile);
+        uint64_t out_sz = ts_file_size(outfile);
+        uint32_t in_crc = ts_file_crc32(infile);
+        uint32_t out_crc = ts_file_crc32(outfile);
+        printf("Input size: %llu, Output size: %llu\n", (unsigned long long)in_sz, (unsigned long long)out_sz);
+        printf("Input CRC32: 0x%08X, Output CRC32: 0x%08X\n", (unsigned)in_crc, (unsigned)out_crc);
         transport_sim_cleanup();
         return 1;
     }

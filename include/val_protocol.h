@@ -37,6 +37,7 @@ extern "C"
 #include "val_errors.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 // Streaming overlay compile-time flag: default ON unless explicitly disabled by integrator
 #ifndef VAL_ENABLE_STREAMING
@@ -146,7 +147,7 @@ extern "C"
         uint32_t wire_len;                // header + payload + trailer
         uint32_t payload_len;             // payload size in bytes
         uint64_t offset;                  // header offset
-        uint8_t crc_ok;                   // RX only: 1 if CRC verified, 0 otherwise; undefined for TX
+        bool crc_ok;                      // RX only: true if CRC verified, false otherwise; undefined for TX
         uint32_t timestamp_ms;            // session clock at hook time
         const void *session_id;           // opaque pointer for correlation (do not dereference)
     } val_packet_record_t;
@@ -186,8 +187,8 @@ extern "C"
         uint32_t tail_cap_bytes;
         // Optional minimum verification window in bytes (0 = none). Useful to avoid too-small windows.
         uint32_t min_verify_bytes;
-        // Mismatch policy for TAIL mode: 1 = skip file on mismatch; 0 = restart from zero on mismatch.
-        uint8_t mismatch_skip;
+    // Mismatch policy for TAIL mode: true = skip file on mismatch; false = restart from zero on mismatch.
+        bool mismatch_skip;
         uint8_t reserved0;
         uint16_t reserved1;
     } val_resume_config_t;
@@ -212,9 +213,9 @@ extern "C"
         // Streaming policy: single switch governs both sending and accepting streaming.
         // If 1, we will stream when sending and we allow the peer to stream to us.
         // If 0, we will not stream when sending and we require the peer not to stream to us.
-        uint8_t allow_streaming; // 0 = disallow streaming in either direction for this session; 1 = allow
+        bool allow_streaming; // false = disallow streaming in either direction for this session; true = allow
         // Optional +1 MTU retransmit cache for faster Go-Back-N recovery (MCU default: 0)
-        uint8_t retransmit_cache_enabled; // 0/1
+        bool retransmit_cache_enabled; // false/true
         uint8_t reserved0;
         // Adaptive stepping thresholds
         uint16_t degrade_error_threshold;    // Errors before degrading one rung
@@ -383,11 +384,11 @@ extern "C"
     // Returns VAL_OK and writes 0/1 to out_streaming_engaged on success; VAL_ERR_INVALID_ARG on bad inputs.
     // Note: Streaming is an overlay on top of the fastest window rung and may toggle based on runtime conditions
     // (e.g., sustained successes at max rung engage streaming; any error disengages it).
-    val_status_t val_is_streaming_engaged(val_session_t *session, int *out_streaming_engaged);
+    val_status_t val_is_streaming_engaged(val_session_t *session, bool *out_streaming_engaged);
 
     // Best-effort: Query whether the peer has engaged streaming pacing (observed via MODE_SYNC flags).
     // Returns VAL_OK and writes 0/1 to out_peer_streaming_engaged on success; VAL_ERR_INVALID_ARG on bad inputs.
-    val_status_t val_is_peer_streaming_engaged(val_session_t *session, int *out_peer_streaming_engaged);
+    val_status_t val_is_peer_streaming_engaged(val_session_t *session, bool *out_peer_streaming_engaged);
 
     // Get the peer's last-known adaptive transmission mode (as reported via handshake or mode sync).
     // This reflects the other side's TX window rung. Returns VAL_OK and writes to out_mode on success.
@@ -396,7 +397,7 @@ extern "C"
     // Query negotiated streaming permissions for this session.
     // On success, writes 0/1 to out_send_allowed (we may stream when sending) and out_recv_allowed (we accept peer streaming).
     // Returns VAL_ERR_INVALID_ARG on bad inputs.
-    val_status_t val_get_streaming_allowed(val_session_t *session, int *out_send_allowed, int *out_recv_allowed);
+    val_status_t val_get_streaming_allowed(val_session_t *session, bool *out_send_allowed, bool *out_recv_allowed);
 
     // Get the effective negotiated packet size (MTU) for this session.
     // Returns VAL_OK and writes to out_packet_size on success; VAL_ERR_INVALID_ARG on bad inputs.
@@ -416,7 +417,7 @@ extern "C"
     // Returns VAL_OK if at least one send succeeded; VAL_ERR_IO if all sends failed.
     val_status_t val_emergency_cancel(val_session_t *session);
     // Convenience helper to query if session is in cancelled state (last_error.code == VAL_ERR_ABORTED)
-    int val_check_for_cancel(val_session_t *session);
+    bool val_check_for_cancel(val_session_t *session);
 
     // Metadata validation helpers
     // Initialize with no validation (default - accept all files)

@@ -37,11 +37,11 @@ static int run_allowed_case(void)
     // Enable streaming on both sides and allow incoming
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;
-    cfg_tx.adaptive_tx.allow_streaming = 1;
+    cfg_tx.adaptive_tx.allow_streaming = true;
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;
-    cfg_rx.adaptive_tx.allow_streaming = 1;
+    cfg_rx.adaptive_tx.allow_streaming = true;
 
     val_session_t *tx = NULL, *rx = NULL;
     if (val_session_create(&cfg_tx, &tx, NULL) != VAL_OK || val_session_create(&cfg_rx, &rx, NULL) != VAL_OK)
@@ -56,13 +56,13 @@ static int run_allowed_case(void)
     if (!ts_files_equal(inpath, outpath))
         return 1;
 
-    int tx_send_ok = 0, tx_recv_ok = 0, rx_send_ok = 0, rx_recv_ok = 0;
+    bool tx_send_ok = false, tx_recv_ok = false, rx_send_ok = false, rx_recv_ok = false;
     if (val_get_streaming_allowed(tx, &tx_send_ok, &tx_recv_ok) != VAL_OK)
         return 1;
     if (val_get_streaming_allowed(rx, &rx_send_ok, &rx_recv_ok) != VAL_OK)
         return 1;
     // Sender should be allowed to stream (since receiver accepts incoming)
-    if (tx_send_ok != 1 || rx_recv_ok != 1)
+    if (!tx_send_ok || !rx_recv_ok)
         return 1;
 
     val_session_destroy(tx);

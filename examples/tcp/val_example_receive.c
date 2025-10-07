@@ -18,7 +18,7 @@ static void on_packet_capture_rx(void *ctx, const val_packet_record_t *rec)
     const char *dir = (rec->direction == VAL_DIR_TX) ? "TX" : "RX";
     fprintf(stdout, "[VAL][CAP][%s] type=%u wire=%u payload=%u off=%llu crc=%u t=%u\n",
             dir, (unsigned)rec->type, (unsigned)rec->wire_len, (unsigned)rec->payload_len,
-            (unsigned long long)rec->offset, (unsigned)rec->crc_ok, (unsigned)rec->timestamp_ms);
+        (unsigned long long)rec->offset, (unsigned)(rec->crc_ok ? 1 : 0), (unsigned)rec->timestamp_ms);
     fflush(stdout);
 }
 
@@ -307,7 +307,7 @@ static void on_progress_announce_mode_rx(const val_progress_info_t *info)
     if (!g_rx_post_handshake_printed)
     {
         size_t mtu = 0;
-        int send_stream_ok = 0, recv_stream_ok = 0;
+    bool send_stream_ok = false, recv_stream_ok = false;
         val_tx_mode_t m0 = VAL_TX_STOP_AND_WAIT;
         val_tx_mode_t pm0 = VAL_TX_STOP_AND_WAIT;
         if (val_get_effective_packet_size(g_rx_session_for_progress, &mtu) == VAL_OK)
@@ -315,7 +315,7 @@ static void on_progress_announce_mode_rx(const val_progress_info_t *info)
             (void)val_get_streaming_allowed(g_rx_session_for_progress, &send_stream_ok, &recv_stream_ok);
             (void)val_get_current_tx_mode(g_rx_session_for_progress, &m0);
             (void)val_get_peer_tx_mode(g_rx_session_for_progress, &pm0);
-            int pstream = 0;
+            bool pstream = false;
             (void)val_is_peer_streaming_engaged(g_rx_session_for_progress, &pstream);
         fprintf(stdout, "[VAL][RX] post-handshake: mtu=%zu, send_streaming=%s, accept_streaming=%s, local_tx_init=%s, peer_tx_init=%s, peer_streaming=%s\n",
             mtu, send_stream_ok ? "yes" : "no", recv_stream_ok ? "yes" : "no", tx_mode_name(m0), tx_mode_name(pm0), pstream ? "+streaming" : "off");
@@ -345,7 +345,7 @@ static void on_progress_announce_mode_rx(const val_progress_info_t *info)
         }
     }
     // And show peer streaming engage/disengage transitions
-    int ps = 0;
+    bool ps = false;
     if (val_is_peer_streaming_engaged(g_rx_session_for_progress, &ps) == VAL_OK)
     {
         if (g_peer_stream_last != ps)
@@ -394,7 +394,7 @@ static void print_metrics_rx(val_session_t *rx)
     fprintf(stdout, "\n==== Session Metrics (Receiver) ====\n");
     fprintf(stdout, "Packets: sent=%llu recv=%llu\n", (unsigned long long)m.packets_sent, (unsigned long long)m.packets_recv);
     fprintf(stdout, "Bytes:   sent=%llu recv=%llu\n", (unsigned long long)m.bytes_sent, (unsigned long long)m.bytes_recv);
-    fprintf(stdout, "Reliab:  timeouts=%u retrans=%u crc_err=%u\n", (unsigned)m.timeouts, (unsigned)m.retransmits, (unsigned)m.crc_errors);
+                bool send_stream_ok = false, recv_stream_ok = false;
     fprintf(stdout, "Session: handshakes=%u files_recv=%u rtt_samples=%u\n", (unsigned)m.handshakes, (unsigned)m.files_recv, (unsigned)m.rtt_samples);
     const char *names[32] = {0};
     names[VAL_PKT_HELLO] = "HELLO";
@@ -952,13 +952,13 @@ int main(int argc, char **argv)
     cfg.resume.mode = resume_mode;
     cfg.resume.tail_cap_bytes = tail_bytes;
     cfg.resume.min_verify_bytes = 0;
-    cfg.resume.mismatch_skip = 0; // default: restart on mismatch; set to 1 to skip on mismatch
+    cfg.resume.mismatch_skip = false; // default: restart on mismatch; set to true to skip on mismatch
     // Adaptive TX defaults; allow flags to override
     cfg.adaptive_tx.max_performance_mode = opt_max_mode;
     cfg.adaptive_tx.preferred_initial_mode = opt_tx_mode;
     // Single policy: allow_streaming governs both directions
-    cfg.adaptive_tx.allow_streaming = (uint8_t)((opt_streaming || opt_accept_streaming) ? 1 : 0);
-    cfg.adaptive_tx.retransmit_cache_enabled = 0;
+    cfg.adaptive_tx.allow_streaming = ((opt_streaming || opt_accept_streaming) ? true : false);
+    cfg.adaptive_tx.retransmit_cache_enabled = false;
     cfg.adaptive_tx.degrade_error_threshold = (uint16_t)opt_degrade;
     cfg.adaptive_tx.recovery_success_threshold = (uint16_t)opt_upgrade;
     cfg.adaptive_tx.mode_sync_interval = 0;
@@ -1040,7 +1040,7 @@ int main(int argc, char **argv)
         size_t mtu = 0;
         if (val_get_effective_packet_size(rx, &mtu) == VAL_OK)
         {
-            int send_stream_ok = 0, recv_stream_ok = 0;
+            bool send_stream_ok = false, recv_stream_ok = false;
             (void)val_get_streaming_allowed(rx, &send_stream_ok, &recv_stream_ok);
         val_tx_mode_t mode = VAL_TX_STOP_AND_WAIT;
         (void)val_get_current_tx_mode(rx, &mode);

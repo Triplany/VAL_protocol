@@ -19,7 +19,7 @@ static void on_packet_capture_tx(void *ctx, const val_packet_record_t *rec)
     // Keep it minimal; intended for quick visibility when VAL_CAPTURE=1 is set
     fprintf(stdout, "[VAL][CAP][%s] type=%u wire=%u payload=%u off=%llu crc=%u t=%u\n",
             dir, (unsigned)rec->type, (unsigned)rec->wire_len, (unsigned)rec->payload_len,
-            (unsigned long long)rec->offset, (unsigned)rec->crc_ok, (unsigned)rec->timestamp_ms);
+        (unsigned long long)rec->offset, (unsigned)(rec->crc_ok ? 1 : 0), (unsigned)rec->timestamp_ms);
     fflush(stdout);
 }
 
@@ -305,13 +305,13 @@ static void on_progress_announce_mode(const val_progress_info_t *info)
     if (!g_tx_post_handshake_printed)
     {
             size_t mtu = 0;
-        int send_stream_ok = 0, recv_stream_ok = 0;
+    bool send_stream_ok = false, recv_stream_ok = false;
         val_tx_mode_t m0 = VAL_TX_STOP_AND_WAIT;
         if (val_get_effective_packet_size(g_tx_session_for_progress, &mtu) == VAL_OK)
         {
             (void)val_get_streaming_allowed(g_tx_session_for_progress, &send_stream_ok, &recv_stream_ok);
             (void)val_get_current_tx_mode(g_tx_session_for_progress, &m0);
-            int engaged = 0;
+            bool engaged = false;
             (void)val_is_streaming_engaged(g_tx_session_for_progress, &engaged);
             fprintf(stdout, "[VAL][TX] post-handshake: mtu=%zu, send_streaming=%s, accept_streaming=%s, init_tx_mode=%s, streaming=%s\n",
                     mtu, send_stream_ok ? "yes" : "no", recv_stream_ok ? "yes" : "no", tx_mode_name(m0), engaged ? "on" : "off");
@@ -334,7 +334,7 @@ static void on_progress_announce_mode(const val_progress_info_t *info)
         }
     }
     // Also show local streaming engagement transitions even if mode didn't change
-    int s = 0;
+    bool s = false;
     if (val_is_streaming_engaged(g_tx_session_for_progress, &s) == VAL_OK)
     {
         if (g_tx_stream_last != s)
@@ -903,8 +903,8 @@ int main(int argc, char **argv)
     cfg.adaptive_tx.max_performance_mode = opt_max_mode;
     cfg.adaptive_tx.preferred_initial_mode = opt_tx_mode;
     // Single policy: allow_streaming governs both directions
-    cfg.adaptive_tx.allow_streaming = (uint8_t)((opt_streaming || opt_accept_streaming) ? 1 : 0);
-    cfg.adaptive_tx.retransmit_cache_enabled = 0;
+    cfg.adaptive_tx.allow_streaming = ((opt_streaming || opt_accept_streaming) ? true : false);
+    cfg.adaptive_tx.retransmit_cache_enabled = false;
     cfg.adaptive_tx.degrade_error_threshold = (uint16_t)opt_degrade;
     cfg.adaptive_tx.recovery_success_threshold = (uint16_t)opt_upgrade;
     cfg.adaptive_tx.mode_sync_interval = 0;
@@ -940,7 +940,7 @@ int main(int argc, char **argv)
         val_tx_mode_t mode = VAL_TX_STOP_AND_WAIT;
         if (val_get_current_tx_mode(tx, &mode) == VAL_OK)
         {
-            int engaged = 0;
+            bool engaged = false;
             (void)val_is_streaming_engaged(tx, &engaged);
             fprintf(stdout, "[VAL][TX] current-mode=%s%s\n", tx_mode_name(mode), engaged ? " + streaming" : "");
             fflush(stdout);
@@ -972,11 +972,11 @@ int main(int argc, char **argv)
         size_t mtu = 0;
         if (val_get_effective_packet_size(tx, &mtu) == VAL_OK)
         {
-            int send_stream_ok = 0, recv_stream_ok = 0;
+            bool send_stream_ok = false, recv_stream_ok = false;
             (void)val_get_streaming_allowed(tx, &send_stream_ok, &recv_stream_ok);
             val_tx_mode_t mode = VAL_TX_STOP_AND_WAIT;
             (void)val_get_current_tx_mode(tx, &mode);
-            int engaged = 0;
+            bool engaged = false;
             (void)val_is_streaming_engaged(tx, &engaged);
             fprintf(stdout, "[VAL][TX] negotiated: mtu=%zu, send_streaming=%s, accept_streaming=%s, init_tx_mode=%s, streaming=%s\n", mtu,
                     send_stream_ok ? "yes" : "no", recv_stream_ok ? "yes" : "no", tx_mode_name(mode), engaged ? "on" : "off");

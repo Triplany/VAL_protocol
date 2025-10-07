@@ -51,11 +51,11 @@ static int run_veto_case(void)
     // Configure adaptive TX/window and streaming flags.
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;
-    cfg_tx.adaptive_tx.allow_streaming = 1;         // sender would like to stream and accept peer
+    cfg_tx.adaptive_tx.allow_streaming = true;         // sender would like to stream and accept peer
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_64;
-    cfg_rx.adaptive_tx.allow_streaming = 0;         // VETO: do not allow peer to stream to me
+    cfg_rx.adaptive_tx.allow_streaming = false;         // VETO: do not allow peer to stream to me
 
     // Optional: keep logs lower noise in CI
     // ts_set_console_logger_with_level(&cfg_tx, VAL_LOG_WARNING);
@@ -95,8 +95,8 @@ static int run_veto_case(void)
     }
 
     // Query negotiated streaming permissions on both sessions after handshake/transfer
-    int tx_send_allowed = -1, tx_recv_allowed = -1;
-    int rx_send_allowed = -1, rx_recv_allowed = -1;
+    bool tx_send_allowed = false, tx_recv_allowed = false;
+    bool rx_send_allowed = false, rx_recv_allowed = false;
     if (val_get_streaming_allowed(tx, &tx_send_allowed, &tx_recv_allowed) != VAL_OK ||
         val_get_streaming_allowed(rx, &rx_send_allowed, &rx_recv_allowed) != VAL_OK)
     {
@@ -107,17 +107,17 @@ static int run_veto_case(void)
     }
 
     // Expectation: sender wanted to stream, but receiver vetoed -> sender may NOT stream
-    if (tx_send_allowed != 0)
+    if (tx_send_allowed)
     {
-        fprintf(stderr, "expected sender streaming vetoed, but got allowed=%d\n", tx_send_allowed);
+        fprintf(stderr, "expected sender streaming vetoed, but got allowed=%d\n", (int)tx_send_allowed);
         free(inpath);
         free(outpath);
         return 1;
     }
     // And receiver reports it does NOT accept peer streaming
-    if (rx_recv_allowed != 0)
+    if (rx_recv_allowed)
     {
-        fprintf(stderr, "expected receiver not accepting streaming, but got recv_allowed=%d\n", rx_recv_allowed);
+        fprintf(stderr, "expected receiver not accepting streaming, but got recv_allowed=%d\n", (int)rx_recv_allowed);
         free(inpath);
         free(outpath);
         return 1;

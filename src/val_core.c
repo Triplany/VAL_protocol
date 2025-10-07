@@ -339,12 +339,12 @@ val_status_t val_get_peer_tx_mode(val_session_t *session, val_tx_mode_t *out_mod
 }
 
 // Public: expose whether streaming pacing is currently engaged (thread-safe)
-val_status_t val_is_streaming_engaged(val_session_t *session, int *out_streaming_engaged)
+val_status_t val_is_streaming_engaged(val_session_t *session, bool *out_streaming_engaged)
 {
     if (!session || !out_streaming_engaged)
         return VAL_ERR_INVALID_ARG;
     val_internal_lock(session);
-    int engaged = session->streaming_engaged ? 1 : 0;
+    bool engaged = session->streaming_engaged ? true : false;
 #if VAL_ENABLE_STREAMING
     // If not yet latched but we're allowed to stream and there are no recent errors,
     // treat the session as effectively streaming-ready. This reflects "clean run" semantics
@@ -356,9 +356,9 @@ val_status_t val_is_streaming_engaged(val_session_t *session, int *out_streaming
     // }
     VAL_LOG_DEBUGF(session,
                    "query: streaming_engaged=%u, send_allowed=%u, allow_streaming=%u, consec_err=%u, consec_succ=%u, mode=%u, min_mode=%u",
-                   (unsigned)session->streaming_engaged,
-                   (unsigned)session->send_streaming_allowed,
-                   (unsigned)session->cfg.adaptive_tx.allow_streaming,
+                   (unsigned)(session->streaming_engaged ? 1 : 0),
+                   (unsigned)(session->send_streaming_allowed ? 1 : 0),
+                   (unsigned)(session->cfg.adaptive_tx.allow_streaming ? 1 : 0),
                    (unsigned)session->consecutive_errors,
                    (unsigned)session->consecutive_successes,
                    (unsigned)session->current_tx_mode,
@@ -369,31 +369,31 @@ val_status_t val_is_streaming_engaged(val_session_t *session, int *out_streaming
     return VAL_OK;
 }
 
-val_status_t val_is_peer_streaming_engaged(val_session_t *session, int *out_peer_streaming_engaged)
+val_status_t val_is_peer_streaming_engaged(val_session_t *session, bool *out_peer_streaming_engaged)
 {
     if (!session || !out_peer_streaming_engaged)
         return VAL_ERR_INVALID_ARG;
     val_internal_lock(session);
-    *out_peer_streaming_engaged = session->peer_streaming_engaged ? 1 : 0;
+    *out_peer_streaming_engaged = session->peer_streaming_engaged ? true : false;
     val_internal_unlock(session);
     return VAL_OK;
 }
 
 // Public: expose negotiated streaming permissions (thread-safe)
-val_status_t val_get_streaming_allowed(val_session_t *session, int *out_send_allowed, int *out_recv_allowed)
+val_status_t val_get_streaming_allowed(val_session_t *session, bool *out_send_allowed, bool *out_recv_allowed)
 {
     if (!session || !out_send_allowed || !out_recv_allowed)
         return VAL_ERR_INVALID_ARG;
     val_internal_lock(session);
-    *out_send_allowed = session->send_streaming_allowed ? 1 : 0;
-    *out_recv_allowed = session->recv_streaming_allowed ? 1 : 0;
+    *out_send_allowed = session->send_streaming_allowed ? true : false;
+    *out_recv_allowed = session->recv_streaming_allowed ? true : false;
 #if VAL_ENABLE_STREAMING
     VAL_LOG_DEBUGF(session,
                    "streaming_allowed query: send_allowed=%u recv_allowed=%u allow_streaming=%u handshake_done=%u",
-                   (unsigned)session->send_streaming_allowed,
-                   (unsigned)session->recv_streaming_allowed,
-                   (unsigned)session->cfg.adaptive_tx.allow_streaming,
-                   (unsigned)session->handshake_done);
+                   (unsigned)(session->send_streaming_allowed ? 1 : 0),
+                   (unsigned)(session->recv_streaming_allowed ? 1 : 0),
+                   (unsigned)(session->cfg.adaptive_tx.allow_streaming ? 1 : 0),
+                   (unsigned)(session->handshake_done ? 1 : 0));
 #endif
     val_internal_unlock(session);
     return VAL_OK;
@@ -668,7 +668,7 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     val_internal_lock_init(s);
     val_internal_init_timing(s);
     s->effective_packet_size = s->cfg.buffers.packet_size;
-    s->handshake_done = 0;
+    s->handshake_done = false;
     s->seq_counter = 0;
     s->last_error.code = VAL_OK;
     s->last_error.detail = 0;
@@ -685,10 +685,10 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
         pref = local_cap;
     s->current_tx_mode = pref;
     s->peer_tx_mode = s->current_tx_mode;
-    s->send_streaming_allowed = 0;
-    s->recv_streaming_allowed = 0;
-    s->streaming_engaged = 0;
-    s->peer_streaming_engaged = 0;
+    s->send_streaming_allowed = false;
+    s->recv_streaming_allowed = false;
+    s->streaming_engaged = false;
+    s->peer_streaming_engaged = false;
     s->consecutive_errors = 0;
     s->consecutive_successes = 0;
     s->packets_since_mode_change = 0;
@@ -826,7 +826,7 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
         rec.wire_len = (uint32_t)total_len;
         rec.payload_len = payload_len;
         rec.offset = offset;
-        rec.crc_ok = 1; // not meaningful on TX
+    rec.crc_ok = true; // not meaningful on TX
         uint32_t now = ticks_fn ? ticks_fn() : 0u;
         rec.timestamp_ms = now;
         rec.session_id = (const void *)s;
@@ -1048,7 +1048,7 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         rec.wire_len = VAL_WIRE_HEADER_SIZE + payload_len + VAL_WIRE_TRAILER_SIZE;
         rec.payload_len = payload_len;
         rec.offset = header.offset;
-        rec.crc_ok = 1; // we verified CRC above
+    rec.crc_ok = true; // we verified CRC above
         uint32_t now = ticks_fn ? ticks_fn() : 0u;
         rec.timestamp_ms = now;
         rec.session_id = (const void *)s;
@@ -1570,11 +1570,11 @@ val_status_t val_emergency_cancel(val_session_t *session)
     return last;
 }
 
-int val_check_for_cancel(val_session_t *session)
+bool val_check_for_cancel(val_session_t *session)
 {
     if (!session)
-        return 0;
-    return (session->last_error.code == VAL_ERR_ABORTED) ? 1 : 0;
+        return false;
+    return (session->last_error.code == VAL_ERR_ABORTED) ? true : false;
 }
 
 extern val_status_t val_internal_receive_files(val_session_t *session, const char *output_directory);
@@ -1773,19 +1773,19 @@ static val_status_t val__adopt_peer_hello(val_session_t *s, const val_handshake_
 
     // Streaming permissions
 #if VAL_ENABLE_STREAMING
-    uint8_t peer_can_stream = (peer_h->streaming_flags & VAL_STREAM_CAN_SEND) ? 1u : 0u;
-    uint8_t peer_accepts_stream = (peer_h->streaming_flags & VAL_STREAM_ACCEPT) ? 1u : 0u;
-    uint8_t local_allow = (s->cfg.adaptive_tx.allow_streaming ? 1u : 0u);
-    s->send_streaming_allowed = (uint8_t)(local_allow && peer_accepts_stream);
-    s->recv_streaming_allowed = (uint8_t)(local_allow && peer_can_stream);
+    bool peer_can_stream = (peer_h->streaming_flags & VAL_STREAM_CAN_SEND) ? true : false;
+    bool peer_accepts_stream = (peer_h->streaming_flags & VAL_STREAM_ACCEPT) ? true : false;
+    bool local_allow = (s->cfg.adaptive_tx.allow_streaming ? true : false);
+    s->send_streaming_allowed = (local_allow && peer_accepts_stream);
+    s->recv_streaming_allowed = (local_allow && peer_can_stream);
     VAL_LOG_INFOF(s,
                   "handshake: stream_flags=0x%02X local_allow=%u peer_can=%u peer_accept=%u send_allowed=%u recv_allowed=%u",
-                  (unsigned)peer_h->streaming_flags, (unsigned)local_allow,
-                  (unsigned)peer_can_stream, (unsigned)peer_accepts_stream,
-                  (unsigned)s->send_streaming_allowed, (unsigned)s->recv_streaming_allowed);
+                  (unsigned)peer_h->streaming_flags, (unsigned)(local_allow?1:0),
+                  (unsigned)(peer_can_stream?1:0), (unsigned)(peer_accepts_stream?1:0),
+                  (unsigned)(s->send_streaming_allowed?1:0), (unsigned)(s->recv_streaming_allowed?1:0));
 #else
-    s->send_streaming_allowed = 0;
-    s->recv_streaming_allowed = 0;
+    s->send_streaming_allowed = false;
+    s->recv_streaming_allowed = false;
 #endif
 
     // Initial mode: conservative selection using shared helper
@@ -1865,7 +1865,7 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     if (adopt != VAL_OK)
         return adopt;
     // Optionally adjust behavior based on requested ∧ peer.features later
-    s->handshake_done = 1;
+    s->handshake_done = true;
 #if VAL_ENABLE_METRICS
     s->metrics.handshakes++;
 #endif
@@ -1930,7 +1930,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     st = val_internal_send_packet(s, VAL_PKT_HELLO, hello_wire, VAL_WIRE_HANDSHAKE_SIZE, 0);
     if (st == VAL_OK)
     {
-        s->handshake_done = 1;
+    s->handshake_done = true;
 #if VAL_ENABLE_METRICS
         s->metrics.handshakes++;
 #endif
@@ -1984,7 +1984,7 @@ void val_internal_record_transmission_error(val_session_t *s)
 
     s->consecutive_errors++;
     s->consecutive_successes = 0; // reset success counter
-    s->streaming_engaged = 0; // drop back to non-streaming pacing on any error
+    s->streaming_engaged = false; // drop back to non-streaming pacing on any error
 
     // Check if we should degrade mode
     uint16_t threshold = s->cfg.adaptive_tx.degrade_error_threshold;
@@ -2083,7 +2083,7 @@ void val_internal_record_transmission_success(val_session_t *s)
             uint16_t stream_threshold = s->cfg.adaptive_tx.recovery_success_threshold ? s->cfg.adaptive_tx.recovery_success_threshold : 10;
             if (s->consecutive_successes >= stream_threshold)
             {
-                s->streaming_engaged = 1;
+                s->streaming_engaged = true;
                 // Notify peer via mode sync with streaming flag set
                 val_mode_sync_t ms2 = {0};
                 ms2.current_mode = (uint32_t)s->current_tx_mode;

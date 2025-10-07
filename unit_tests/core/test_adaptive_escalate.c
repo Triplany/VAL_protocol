@@ -31,13 +31,13 @@ static int run_escalate(void)
 
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_tx.adaptive_tx.allow_streaming = 1;
+    cfg_tx.adaptive_tx.allow_streaming = true;
     cfg_tx.adaptive_tx.degrade_error_threshold = 1;
     cfg_tx.adaptive_tx.recovery_success_threshold = 1;
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_rx.adaptive_tx.allow_streaming = 1;
+    cfg_rx.adaptive_tx.allow_streaming = true;
 
     val_session_t *tx=NULL, *rx=NULL;
     if (val_session_create(&cfg_tx, &tx, NULL) != VAL_OK || val_session_create(&cfg_rx, &rx, NULL) != VAL_OK) return 1;
@@ -48,10 +48,10 @@ static int run_escalate(void)
     ts_join_thread(th);
     if (s != VAL_OK || !ts_files_equal(in1, out1)) return 1;
 
-    val_tx_mode_t m = 0; int st = 0;
+    val_tx_mode_t m = 0; bool st = false;
     if (val_get_current_tx_mode(tx, &m) != VAL_OK || val_is_streaming_engaged(tx, &st) != VAL_OK) return 1;
     if (m < VAL_TX_WINDOW_16) { fprintf(stderr, "expected mode >=16 after clean run, got %u\n", (unsigned)m); return 1; }
-    if (st != 1) { fprintf(stderr, "expected streaming engaged after clean run, got %d\n", st); return 1; }
+    if (!st) { fprintf(stderr, "expected streaming engaged after clean run, got %d\n", (int)st); return 1; }
 
     val_session_destroy(tx); val_session_destroy(rx);
     free(in1); free(out1); test_duplex_free(&d);

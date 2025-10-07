@@ -6,6 +6,7 @@
 #include "val_wire.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
 #if defined(_WIN32)
@@ -107,7 +108,7 @@ struct val_session_s
     char output_directory[VAL_MAX_PATH + 1];
     uint32_t seq_counter;
     size_t effective_packet_size; // negotiated packet size after handshake
-    uint8_t handshake_done;       // handshake completed once per session
+    bool handshake_done;          // handshake completed once per session
     uint32_t peer_features;       // features advertised by peer during handshake
     val_timing_t timing;
     // last error info
@@ -119,12 +120,12 @@ struct val_session_s
     val_tx_mode_t min_negotiated_mode; // best performance (largest window) both sides support
     val_tx_mode_t max_negotiated_mode; // most reliable mode (stop-and-wait)
     // Streaming negotiation (directional)
-    uint8_t send_streaming_allowed; // we may stream when we are sender to peer
-    uint8_t recv_streaming_allowed; // we accept peer streaming to us
+    bool send_streaming_allowed;    // we may stream when we are sender to peer
+    bool recv_streaming_allowed;    // we accept peer streaming to us
     // Streaming runtime state: engaged when at fastest rung and sustained successes
-    uint8_t streaming_engaged;
+    bool streaming_engaged;
     // Peer runtime streaming state (best-effort, from MODE_SYNC)
-    uint8_t peer_streaming_engaged;
+    bool peer_streaming_engaged;
     // Performance counters
     uint32_t consecutive_errors;
     uint32_t consecutive_successes;

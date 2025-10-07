@@ -34,8 +34,9 @@ static int run_extreme_loss_case(const char *case_name)
     const size_t packet_size = 1024;
     const size_t depth = 32;
     test_duplex_t duplex; test_duplex_init(&duplex, packet_size, depth);
-    // Push loss well above 10% to make success extremely unlikely
-    duplex.faults.drop_frame_per_million = 200000; // +20%
+    // Make loss deterministic and overwhelming to guarantee failure with limited retries
+    ts_rand_seed_set(0xC0FFEEu);
+    duplex.faults.drop_frame_per_million = 1000000; // 100% drop
 
     uint8_t tx_send_buf[1024], tx_recv_buf[1024];
     uint8_t rx_send_buf[1024], rx_recv_buf[1024];
