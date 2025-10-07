@@ -724,13 +724,13 @@ int test_tp_send(void *ctx, const void *data, size_t len)
         transport_sim_record_packet_sent(len);
     }
 
-    // Use simulation when any knob is enabled; otherwise preserve legacy behavior
+    // Use simulation when any knob is enabled; otherwise use the direct path
     if (g_net.enable_partial_send || g_net.enable_reorder || g_net.enable_jitter)
     {
         net_sim_send(data, len, d);
         return (int)len;
     }
-    // Legacy path
+    // Direct path
     uint8_t *tmp = (uint8_t *)malloc(len);
     memcpy(tmp, data, len);
     maybe_corrupt(tmp, len, &d->faults);
@@ -764,7 +764,7 @@ int test_tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received, 
         if (received)
             *received = 0;
         // Return 0 to indicate timeout; core will treat got!=expected as VAL_ERR_TIMEOUT
-        ts_tp_tracef("LEGACY RECV d=%p TIMEOUT need=%zu", (void *)d, buffer_size);
+    ts_tp_tracef("DIRECT RECV d=%p TIMEOUT need=%zu", (void *)d, buffer_size);
         return 0;
     }
     if (received)
@@ -775,7 +775,7 @@ int test_tp_recv(void *ctx, void *buffer, size_t buffer_size, size_t *received, 
         transport_sim_record_packet_received(*received);
     }
 
-    ts_tp_tracef("LEGACY RECV d=%p DONE size=%zu", (void *)d, buffer_size);
+    ts_tp_tracef("DIRECT RECV d=%p DONE size=%zu", (void *)d, buffer_size);
     return 0;
 }
 
@@ -1102,10 +1102,10 @@ void ts_make_config(val_config_t *cfg, void *send_buf, void *recv_buf, size_t pa
     cfg->buffers.recv_buffer = recv_buf;
     cfg->buffers.packet_size = packet_size;
     cfg->resume.mode = mode;
-    // Map legacy verify parameter to new tail-only config
+    // Map the test verify parameter to tail-only config
     cfg->resume.tail_cap_bytes = verify;      // 0 = use default
     cfg->resume.min_verify_bytes = 0;         // tests can override
-    // Default mismatch policy matches prior TAIL_OR_ZERO semantics: restart on mismatch
+    // Default mismatch policy matches TAIL_OR_ZERO semantics: restart on mismatch
     cfg->resume.mismatch_skip = 0;            // tests can override to 1 to force skip on mismatch
     // Adaptive timeout bounds (tests run in-memory; keep low to speed up failures while allowing retries)
     cfg->timeouts.min_timeout_ms = 50;   // floor for RTO

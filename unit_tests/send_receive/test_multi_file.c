@@ -102,7 +102,7 @@ int main(void)
     }
 #endif
 
-/* Wire audit removed; rely on functional outcomes */
+/* Functional outcomes validate correctness for this test */
 
     val_session_destroy(tx);
     val_session_destroy(rx);

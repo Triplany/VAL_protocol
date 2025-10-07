@@ -112,7 +112,7 @@ int main(void)
     }
 #endif
 
-    // Wire audit removed; functional checks above are sufficient
+    // Functional checks above are sufficient; wire auditing is not part of these tests
 
     val_session_destroy(tx);
     val_session_destroy(rx);

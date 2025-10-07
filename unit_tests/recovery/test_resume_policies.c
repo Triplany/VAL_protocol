@@ -172,7 +172,7 @@ static int test_strict_resume_only_abort_on_mismatch(void)
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     val_config_t cfg_tx, cfg_rx;
     make_cfgs(&cfg_tx, &cfg_rx, &end_tx, &end_rx, sb_a, rb_a, sb_b, rb_b, packet);
-    // Emulate legacy CRC_FULL "skip on mismatch" by using TAIL with skip policy and large cap
+    // Emulate a full-file mismatch skip policy using TAIL with skip-on-mismatch enabled and a large cap
     cfg_rx.resume.mode = VAL_RESUME_TAIL;
     cfg_rx.resume.mismatch_skip = 1;
     cfg_rx.resume.tail_cap_bytes = (uint32_t)(256u * 1024u * 1024u);

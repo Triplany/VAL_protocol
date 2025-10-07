@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 // This test asserts that under streaming pacing, the receiver does not emit per-window DATA_ACKs:
-// it should send at most one ACK prior to streaming engagement (to trigger engagement) and one
+// it sends at most one ACK before streaming engagement (to trigger engagement) and one
 // final DATA_ACK at EOF. Heartbeats are idle-only and should not occur during an active transfer.
 static int run_streaming_ack_cadence(void)
 {
@@ -66,7 +66,7 @@ static int run_streaming_ack_cadence(void)
     if (!ts_files_equal(inpath, outpath))
         return 1;
 
-    // Wire audit removed; functional file equality suffices here
+    // Functional file equality suffices here
 
     val_session_destroy(tx);
     val_session_destroy(rx);

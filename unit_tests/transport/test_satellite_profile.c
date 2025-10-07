@@ -272,10 +272,9 @@ static int test_satellite_timeout_adaptation(void)
     }
 }
 
-// Removed: test_satellite_weather_event - tested extreme >5% loss which should fail gracefully
-// This scenario is now covered in the stress test suite
+// Satellite weather event scenario (extreme >5% loss) is covered in the stress test suite.
 
-static int test_satellite_weather_event_removed(void)
+static int test_satellite_weather_event_info(void)
 {
     printf("\n=== Test: Satellite Weather Event - SKIPPED ===\n");
     printf("This test has been moved to the stress test suite.\n");

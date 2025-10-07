@@ -143,7 +143,7 @@ static int run_mode_and_check(val_tx_mode_t mode, unsigned expected_cap)
         free(rx_rbuf);
         return 1;
     }
-    // Proactively remove any stale outputs from prior runs of the same mode
+    // Remove any stale outputs from the same mode to ensure a clean run
     {
         // Construct out file path to remove; receiver writes the same filename as input by default
     char outpath[1024];

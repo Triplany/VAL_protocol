@@ -42,7 +42,7 @@ static int run_reescalate(void)
     val_session_t *tx=NULL, *rx=NULL;
     if (val_session_create(&cfg_tx, &tx, NULL) != VAL_OK || val_session_create(&cfg_rx, &rx, NULL) != VAL_OK) return 1;
 
-    // Start with a prior degraded state simulated by lowering current mode via quick dirty run with small drops
+    // Begin from a degraded state by lowering the current mode with a short run that injects small drops
     end_tx.faults.drop_frame_per_million = 20000; // induce initial errors to set lower mode and disengage
     {
         // tiny seed run

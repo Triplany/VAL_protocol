@@ -68,7 +68,7 @@ set_property(TEST ut_streaming_allowed PROPERTY LABELS "quick")
 add_ctest_exe(ut_streaming_ack_cadence core/test_streaming_ack_cadence.c)
 set_property(TEST ut_streaming_ack_cadence PROPERTY LABELS "quick")
 
-# Wire audit removed; no corresponding test
+# Wire auditing is not part of the unit test surface; no corresponding test
 
 # Wire serialization roundtrip tests
 add_ctest_exe(ut_wire_roundtrip core/test_wire_roundtrip.c)
