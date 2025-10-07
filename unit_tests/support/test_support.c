@@ -887,7 +887,12 @@ size_t ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void 
     size_t allowed = bytes;
     if (g_fs.mode != TS_FS_FAIL_NONE)
     {
-        long pos = ftell(f->fp);
+        int64_t pos;
+#if defined(_WIN32)
+        pos = _ftelli64(f->fp);
+#else
+        pos = ftello64(f->fp);
+#endif
         if (pos < 0)
             pos = 0;
         uint64_t sofar = (uint64_t)pos;
@@ -915,26 +920,24 @@ size_t ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void 
     return (size ? ((size_t)put / size) : 0);
 #endif
 }
-int ts_fseek(void *ctx, void *file, long offset, int whence)
+int ts_fseek(void *ctx, void *file, int64_t offset, int whence)
 {
     (void)ctx;
     ts_file_t *f = (ts_file_t *)file;
 #if defined(_WIN32)
-    return fseek(f->fp, offset, whence);
+    return _fseeki64(f->fp, offset, whence);
 #else
-    return lseek(f->fd, offset, whence) < 0 ? -1 : 0;
+    return lseek64(f->fd, offset, whence) < 0 ? -1 : 0;
 #endif
 }
-long ts_ftell(void *ctx, void *file)
+int64_t ts_ftell(void *ctx, void *file)
 {
     (void)ctx;
     ts_file_t *f = (ts_file_t *)file;
 #if defined(_WIN32)
-    long p = ftell(f->fp);
-    return p;
+    return _ftelli64(f->fp);
 #else
-    off_t p = lseek(f->fd, 0, SEEK_CUR);
-    return (long)p;
+    return lseek64(f->fd, 0, SEEK_CUR);
 #endif
 }
 int ts_fclose(void *ctx, void *file)
@@ -1306,7 +1309,12 @@ uint64_t ts_file_size(const char *path)
         fclose(f);
         return 0;
     }
-    long pos = ftell(f);
+    int64_t pos;
+#if defined(_WIN32)
+    pos = _ftelli64(f);
+#else
+    pos = ftello64(f);
+#endif
     fclose(f);
     return pos < 0 ? 0 : (uint64_t)pos;
 }

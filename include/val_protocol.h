@@ -152,6 +152,11 @@ extern "C"
         const void *session_id;           // opaque pointer for correlation (do not dereference)
     } val_packet_record_t;
 
+    // CRC32 override (must implement IEEE 802.3 polynomial, no final XOR).
+    // seed: initial value (typically 0xFFFFFFFF), buf: data to hash, len: data length
+    // Returns: CRC32 value with final XOR applied (0xFFFFFFFF)
+    typedef uint32_t (*crc32_func_t)(uint32_t seed, const void *buf, size_t len);
+
     // Optional memory allocator used by VAL for dynamic session/tracking allocation.
     // If not provided (alloc == NULL), VAL falls back to standard calloc/free.
     typedef struct
@@ -253,21 +258,15 @@ extern "C"
             size_t (*fread)(void *ctx, void *buffer, size_t size, size_t count, void *file);
             // fwrite-like: returns number of elements successfully written (0..count)
             size_t (*fwrite)(void *ctx, const void *buffer, size_t size, size_t count, void *file);
-            int (*fseek)(void *ctx, void *file, long offset, int whence);
-            long (*ftell)(void *ctx, void *file);
+            int (*fseek)(void *ctx, void *file, int64_t offset, int whence);
+            int64_t (*ftell)(void *ctx, void *file);
             int (*fclose)(void *ctx, void *file);
             void *fs_context;
         } filesystem;
 
-        // Optional CRC32 provider (e.g., hardware-accelerated). If any pointer is NULL, built-in software is used.
-        struct
-        {
-            uint32_t (*crc32)(void *ctx, const void *data, size_t length); // one-shot
-            uint32_t (*crc32_init)(void *ctx);                             // returns initial state
-            uint32_t (*crc32_update)(void *ctx, uint32_t state, const void *data, size_t length);
-            uint32_t (*crc32_final)(void *ctx, uint32_t state); // returns final CRC32
-            void *crc_context;                                  // user context passed to hooks
-        } crc;
+        // Optional CRC32 provider (e.g., hardware-accelerated). If NULL, built-in software is used.
+        // Must implement IEEE 802.3 polynomial with proper seed handling and final XOR.
+        crc32_func_t crc32_provider;
 
         struct
         {

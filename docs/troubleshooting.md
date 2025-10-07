@@ -204,7 +204,7 @@ cfg.debug.min_level = VAL_LOG_DEBUG;  // Or VAL_LOG_TRACE
    // Verify filesystem callbacks work correctly
    void *f = cfg.filesystem.fopen(ctx, "test.txt", "rb");
    cfg.filesystem.fseek(ctx, f, 0, SEEK_END);
-   long size = cfg.filesystem.ftell(ctx, f);
+   int64_t size = cfg.filesystem.ftell(ctx, f);
    printf("File size: %ld\n", size);
    cfg.filesystem.fclose(ctx, f);
    ```
@@ -229,14 +229,14 @@ cfg.debug.min_level = VAL_LOG_DEBUG;  // Or VAL_LOG_TRACE
 
 3. **CRC Provider Mismatch**
    ```c
-   // If providing custom CRC, must match IEEE 802.3:
+   // If providing custom CRC via crc32_provider, must match IEEE 802.3:
    // Polynomial: 0xEDB88320 (reflected)
-   // Initial: 0xFFFFFFFF
-   // Final XOR: 0xFFFFFFFF
+   // Seed handling: Use provided seed value
+   // Final XOR: 0xFFFFFFFF applied internally
    
    // Test against known value:
    const char *test = "123456789";
-   uint32_t crc = val_crc32(test, strlen(test));
+   uint32_t crc = your_crc32_func(0xFFFFFFFF, test, strlen(test));
    assert(crc == 0xCBF43926);  // Expected CRC-32
    ```
 

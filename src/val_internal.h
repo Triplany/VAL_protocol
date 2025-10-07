@@ -721,11 +721,8 @@ uint32_t val_crc32_init_state(void);
 uint32_t val_crc32_update_state(uint32_t state, const void *data, size_t length);
 uint32_t val_crc32_finalize_state(uint32_t state);
 
-// Session-aware CRC adapters (prefer user provider if present)
+// Session-aware CRC adapter (prefer user provider if present)
 uint32_t val_internal_crc32(val_session_t *s, const void *data, size_t length);
-uint32_t val_internal_crc32_init(val_session_t *s);
-uint32_t val_internal_crc32_update(val_session_t *s, uint32_t state, const void *data, size_t length);
-uint32_t val_internal_crc32_final(val_session_t *s, uint32_t state);
 
 // Compute CRC32 over a file region using the session's configured filesystem and recv buffer.
 // Reads [start_offset, start_offset+length) from the given open file handle in chunk sizes based

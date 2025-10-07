@@ -152,7 +152,7 @@ static size_t mock_fwrite(void *ctx, const void *buffer, size_t size, size_t cou
     return count;
 }
 
-static int mock_fseek(void *ctx, void *file, long offset, int whence)
+static int mock_fseek(void *ctx, void *file, int64_t offset, int whence)
 {
     (void)ctx;
     (void)file;
@@ -161,11 +161,11 @@ static int mock_fseek(void *ctx, void *file, long offset, int whence)
     return 0;
 }
 
-static long mock_ftell(void *ctx, void *file)
+static int64_t mock_ftell(void *ctx, void *file)
 {
     (void)ctx;
     (void)file;
-    return 0;
+    return 1024; // Mock size
 }
 
 static int mock_fclose(void *ctx, void *file)

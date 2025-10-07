@@ -279,17 +279,17 @@ Streaming doesn't rewind on timeout - just keeps pushing forward.
 
 **Why Streaming is Dramatically Faster**
 
-| Configuration | Throughput | RAM Usage | Notes |
+| Configuration | RAM Usage | Notes |
 |---------------|------------|-----------|-------|
-| WINDOW_64, 4KB packets | ~2-5 MB/s | ~256 KB | Maximum performance & adaptation |
-| WINDOW_64 + streaming | ~2-6 MB/s | ~256 KB | Slight improvement |
-| WINDOW_4, 4KB packets | ~200-500 KB/s | ~16 KB | Significant RAM savings |
-| WINDOW_4 + streaming | ~1-3 MB/s | ~16 KB | Best RAM/performance balance |
-| WINDOW_2 + streaming | ~500 KB - 2 MB/s | ~8 KB | Minimal RAM, limited adaptation |
+| WINDOW_64 + streaming  | ~256 KB | Slight improvement |
+| WINDOW_64, 4KB packets || ~256 KB | Maximum performance & adaptation |
+| WINDOW_4, 4KB packets  | ~16 KB | Significant RAM savings |
+| WINDOW_4 + streaming  | ~16 KB | Best RAM/performance balance |
+| WINDOW_2 + streaming  | ~8 KB | Minimal RAM, limited adaptation |
 
 **Performance Depends on Window Size:**
-- **Large windows (WINDOW_32/64)**: Streaming provides modest improvement (~10-20%)
-- **Small windows (WINDOW_2/4)**: Streaming provides dramatic improvement (2-5x)
+- **Large windows (WINDOW_32/64)**: Streaming provides modest improvement (aprox ~10-20%)
+- **Small windows (WINDOW_2/4)**: Streaming provides dramatic improvement (aprox 2-5x)
 - **Window mode**: Blocks waiting for ACKs, underutilizes good links
 - **Streaming mode**: Continuous send, ACKs as heartbeats only
 
@@ -688,27 +688,25 @@ void on_progress(const val_progress_info_t *info) {
 ```c
 CRC_HandleTypeDef hcrc;
 
-uint32_t hw_crc32(void *ctx, const void *data, size_t len) {
-    CRC_HandleTypeDef *hcrc = (CRC_HandleTypeDef*)ctx;
-    
-    // STM32 CRC peripheral uses IEEE 802.3 polynomial by default
-    __HAL_CRC_DR_RESET(hcrc);
+uint32_t stm32_crc32(uint32_t seed, const void *data, size_t len) {
+    // Reset and set initial value
+    __HAL_CRC_DR_RESET(&hcrc);
+    HAL_CRC_Accumulate(&hcrc, &seed, 1);
     
     // Process in 32-bit words
-    uint32_t result = HAL_CRC_Calculate(hcrc, (uint32_t*)data, len / 4);
+    uint32_t result = HAL_CRC_Calculate(&hcrc, (uint32_t*)data, len / 4);
     
     // Handle remaining bytes if len not multiple of 4
     if (len % 4) {
         uint32_t tail = 0;
         memcpy(&tail, (const uint8_t*)data + (len & ~3), len % 4);
-        result = HAL_CRC_Accumulate(hcrc, &tail, 1);
+        result = HAL_CRC_Accumulate(&hcrc, &tail, 1);
     }
     
     return result;
 }
 
-cfg.crc.crc32 = hw_crc32;
-cfg.crc.crc_context = &hcrc;
+cfg.crc32_provider = stm32_crc32;
 ```
 
 **Performance:** ~10x faster than software CRC on typical MCU
@@ -720,11 +718,11 @@ cfg.crc.crc_context = &hcrc;
 ```c
 #include "esp32/rom/crc.h"
 
-uint32_t esp32_crc32(void *ctx, const void *data, size_t len) {
-    return crc32_le(0xFFFFFFFF, data, len) ^ 0xFFFFFFFF;
+uint32_t esp32_crc32(uint32_t seed, const void *data, size_t len) {
+    return crc32_le(seed, data, len) ^ 0xFFFFFFFF;
 }
 
-cfg.crc.crc32 = esp32_crc32;
+cfg.crc32_provider = esp32_crc32;
 ```
 
 ---

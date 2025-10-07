@@ -33,8 +33,8 @@ static val_session_t *make_session_with_bounds(uint32_t min_ms, uint32_t max_ms,
     cfg.filesystem.fopen = (void *(*)(void *, const char *, const char *))0x1;
     cfg.filesystem.fread = (size_t (*)(void *, void *, size_t, size_t, void *))0x1;
     cfg.filesystem.fwrite = (size_t (*)(void *, const void *, size_t, size_t, void *))0x1;
-    cfg.filesystem.fseek = (int (*)(void *, void *, long, int))0x1;
-    cfg.filesystem.ftell = (long (*)(void *, void *))0x1;
+    cfg.filesystem.fseek = (int (*)(void *, void *, int64_t, int))0x1;
+    cfg.filesystem.ftell = (int64_t (*)(void *, void *))0x1;
     cfg.filesystem.fclose = (int (*)(void *, void *))0x1;
     cfg.transport.send = (int (*)(void *, const void *, size_t))0x1;
     cfg.transport.recv = (int (*)(void *, void *, size_t, size_t *, uint32_t))0x1;

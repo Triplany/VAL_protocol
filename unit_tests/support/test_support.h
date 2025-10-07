@@ -86,8 +86,8 @@ extern "C"
     void *ts_fopen(void *ctx, const char *path, const char *mode);
     size_t ts_fread(void *ctx, void *buffer, size_t size, size_t count, void *file);
     size_t ts_fwrite(void *ctx, const void *buffer, size_t size, size_t count, void *file);
-    int ts_fseek(void *ctx, void *file, long offset, int whence);
-    long ts_ftell(void *ctx, void *file);
+    int ts_fseek(void *ctx, void *file, int64_t offset, int whence);
+    int64_t ts_ftell(void *ctx, void *file);
     int ts_fclose(void *ctx, void *file);
 
     // Filesystem fault injection (disabled by default)

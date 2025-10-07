@@ -48,7 +48,7 @@ cfg.filesystem.fclose = my_fclose;
 **3. System Layer Abstraction**
 ```c
 cfg.system.get_ticks_ms = my_clock;  // Monotonic clock
-cfg.crc.crc32 = my_crc;              // Hardware CRC acceleration
+cfg.crc32_provider = my_crc;         // Hardware CRC acceleration
 cfg.system.malloc = my_alloc;        // Custom allocators
 ```
 **Enables:** Hardware acceleration, deterministic timing, zero-allocation operation
@@ -328,8 +328,14 @@ int usb_recv(void *ctx, void *buffer, size_t size,
 cfg.filesystem.fopen = (void*(*)(void*, const char*, const char*))fopen;
 cfg.filesystem.fread = (size_t(*)(void*, void*, size_t, size_t, void*))fread;
 cfg.filesystem.fwrite = (size_t(*)(void*, const void*, size_t, size_t, void*))fwrite;
-cfg.filesystem.fseek = (int(*)(void*, void*, long, int))fseek;
-cfg.filesystem.ftell = (long(*)(void*, void*))ftell;
+// Platform-specific 64-bit wrappers required:
+#ifdef _WIN32
+cfg.filesystem.fseek = my_fseek64;  // wraps _fseeki64
+cfg.filesystem.ftell = my_ftell64;  // wraps _ftelli64
+#else
+cfg.filesystem.fseek = my_fseek64;  // wraps fseeko
+cfg.filesystem.ftell = my_ftell64;  // wraps ftello
+#endif
 cfg.filesystem.fclose = (int(*)(void*, void*))fclose;
 cfg.filesystem.fs_context = NULL;
 ```
@@ -433,23 +439,25 @@ void stm32_delay_ms(uint32_t ms) {
 
 **CRC Hardware Acceleration (STM32 with hardware CRC):**
 ```c
-uint32_t stm32_crc32(void *ctx, const void *data, size_t length) {
-    CRC_HandleTypeDef *hcrc = (CRC_HandleTypeDef*)ctx;
-    
-    // Reset CRC peripheral
-    __HAL_CRC_DR_RESET(hcrc);
+uint32_t stm32_crc32(uint32_t seed, const void *data, size_t length) {
+    // Reset CRC peripheral and set seed
+    __HAL_CRC_DR_RESET(&hcrc_instance);
+    HAL_CRC_Accumulate(&hcrc_instance, &seed, 1);
     
     // Calculate CRC
-    uint32_t crc = HAL_CRC_Calculate(hcrc, (uint32_t*)data, length / 4);
+    uint32_t crc = HAL_CRC_Calculate(&hcrc_instance, (uint32_t*)data, length / 4);
     
     // Handle remainder bytes if any
-    // ... (implementation depends on HW CRC configuration)
+    if (length % 4) {
+        uint32_t tail = 0;
+        memcpy(&tail, (const uint8_t*)data + (length & ~3), length % 4);
+        crc = HAL_CRC_Accumulate(&hcrc_instance, &tail, 1);
+    }
     
     return crc;
 }
 
-cfg.crc.crc32 = stm32_crc32;
-cfg.crc.crc_context = &hcrc_instance;
+cfg.crc32_provider = stm32_crc32;
 ```
 
 ### ESP32 (ESP-IDF)

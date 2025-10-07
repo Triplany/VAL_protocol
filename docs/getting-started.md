@@ -128,8 +128,8 @@ int main(void) {
     cfg.filesystem.fopen = (void*(*)(void*, const char*, const char*))fopen;
     cfg.filesystem.fread = (size_t(*)(void*, void*, size_t, size_t, void*))fread;
     cfg.filesystem.fwrite = (size_t(*)(void*, const void*, size_t, size_t, void*))fwrite;
-    cfg.filesystem.fseek = (int(*)(void*, void*, long, int))fseek;
-    cfg.filesystem.ftell = (long(*)(void*, void*))ftell;
+    cfg.filesystem.fseek = my_fseek64;  // 64-bit wrapper function
+    cfg.filesystem.ftell = my_ftell64;  // 64-bit wrapper function
     cfg.filesystem.fclose = (int(*)(void*, void*))fclose;
     
     // Clock

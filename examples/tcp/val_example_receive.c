@@ -276,15 +276,23 @@ static size_t fs_fwrite(void *ctx, const void *buffer, size_t size, size_t count
     (void)ctx;
     return fwrite(buffer, size, count, (FILE *)file);
 }
-static int fs_fseek(void *ctx, void *file, long offset, int whence)
+static int fs_fseek(void *ctx, void *file, int64_t offset, int whence)
 {
     (void)ctx;
-    return fseek((FILE *)file, offset, whence);
+#ifdef _WIN32
+    return _fseeki64((FILE *)file, offset, whence);
+#else
+    return fseeko((FILE *)file, (off_t)offset, whence);
+#endif
 }
-static long fs_ftell(void *ctx, void *file)
+static int64_t fs_ftell(void *ctx, void *file)
 {
     (void)ctx;
-    return ftell((FILE *)file);
+#ifdef _WIN32
+    return _ftelli64((FILE *)file);
+#else
+    return (int64_t)ftello((FILE *)file);
+#endif
 }
 static int fs_fclose(void *ctx, void *file)
 {

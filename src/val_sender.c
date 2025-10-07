@@ -22,7 +22,7 @@ static val_status_t get_file_size_and_name(val_session_t *s, const char *filepat
         val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_PERMISSION);
         return VAL_ERR_IO;
     }
-    long sz = s->config->filesystem.ftell(s->config->filesystem.fs_context, f);
+    int64_t sz = s->config->filesystem.ftell(s->config->filesystem.fs_context, f);
     if (sz < 0)
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
@@ -184,7 +184,7 @@ static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next
     // Use tracked cursor to avoid redundant ftell/fseek; only seek if needed
     if (io_ctx->file_cursor != *next_to_send)
     {
-        (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, io_ctx->file_handle, (long)(*next_to_send), SEEK_SET);
+        (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, io_ctx->file_handle, (int64_t)(*next_to_send), SEEK_SET);
         io_ctx->file_cursor = *next_to_send;
     }
 
@@ -239,9 +239,9 @@ static int handle_nak_retransmit(val_session_t *s, void *file_handle, uint64_t f
     s->timing.in_retransmit = 1;
 
     long target_l = (long)(*last_acked);
-    long curpos = s->config->filesystem.ftell(s->config->filesystem.fs_context, file_handle);
+    int64_t curpos = s->config->filesystem.ftell(s->config->filesystem.fs_context, file_handle);
     if (curpos < 0 || (uint64_t)curpos != *last_acked)
-        (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, file_handle, target_l, SEEK_SET);
+        (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, file_handle, (int64_t)target_l, SEEK_SET);
 
     *inflight = 0;
     *next_to_send = *last_acked;
@@ -503,9 +503,9 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
         s->timing.in_retransmit = 1;
 
         long rewind_target = (long)(*ack_ctx->window_start);
-        long curpos_timeout = s->config->filesystem.ftell(s->config->filesystem.fs_context, ack_ctx->file_handle);
+        int64_t curpos_timeout = s->config->filesystem.ftell(s->config->filesystem.fs_context, ack_ctx->file_handle);
         if (curpos_timeout < 0 || (uint64_t)curpos_timeout != *ack_ctx->window_start)
-            (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, ack_ctx->file_handle, rewind_target, SEEK_SET);
+            (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, ack_ctx->file_handle, (int64_t)rewind_target, SEEK_SET);
         if (ack_ctx->file_cursor_ptr)
             *ack_ctx->file_cursor_ptr = *ack_ctx->window_start;
         *ack_ctx->last_acked = *ack_ctx->window_start;
@@ -700,7 +700,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
     void *f = s->config->filesystem.fopen(s->config->filesystem.fs_context, filepath, "rb");
     if (!f)
         return VAL_ERR_IO;
-    if (resume_off && s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (long)resume_off, SEEK_SET) != 0)
+    if (resume_off && s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (int64_t)resume_off, SEEK_SET) != 0)
     {
         s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
         return VAL_ERR_IO;

@@ -401,10 +401,10 @@ uint32_t stm32_get_ticks_ms(void) {
 }
 
 // Optional: Hardware CRC acceleration
-uint32_t stm32_crc32(void *ctx, const void *data, size_t len) {
-    CRC_HandleTypeDef *hcrc = (CRC_HandleTypeDef*)ctx;
-    __HAL_CRC_DR_RESET(hcrc);
-    return HAL_CRC_Calculate(hcrc, (uint32_t*)data, len / 4);
+uint32_t stm32_crc32(uint32_t seed, const void *data, size_t len) {
+    __HAL_CRC_DR_RESET(&hcrc_instance);
+    HAL_CRC_Accumulate(&hcrc_instance, &seed, 1);
+    return HAL_CRC_Calculate(&hcrc_instance, (uint32_t*)data, len / 4);
 }
 
 void receiver_task(void) {

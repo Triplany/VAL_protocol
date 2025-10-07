@@ -215,20 +215,14 @@ typedef struct {
     size_t (*fread)(void *ctx, void *buf, size_t sz, size_t cnt, void *file);
     size_t (*fwrite)(void *ctx, const void *buf, size_t sz, size_t cnt, void *file);
         int (*fseek)(void *ctx, void *file, long off, int whence);
-        long (*ftell)(void *ctx, void *file);
+        int64_t (*ftell)(void *ctx, void *file);
         int (*fclose)(void *ctx, void *file);
         void *fs_context;
     } filesystem;
     
     // CRC provider (optional - uses built-in if NULL)
-    struct {
-        uint32_t (*crc32)(void *ctx, const void *data, size_t len);
-        uint32_t (*crc32_init)(void *ctx);
-        uint32_t (*crc32_update)(void *ctx, uint32_t state,
-                                 const void *data, size_t len);
-        uint32_t (*crc32_final)(void *ctx, uint32_t state);
-        void *crc_context;
-    } crc;
+    // Single-function interface for hardware acceleration
+    crc32_func_t crc32_provider;  // uint32_t (*)(uint32_t seed, const void *buf, size_t len)
     
     // System callbacks (REQUIRED)
     struct {

@@ -431,39 +431,18 @@ void val_config_set_validator(val_config_t *config, val_metadata_validator_t val
 // Session-aware CRC adapters
 uint32_t val_internal_crc32(val_session_t *s, const void *data, size_t length)
 {
-    if (s && s->config && s->config->crc.crc32)
+    if (s && s->config && s->config->crc32_provider)
     {
-        return s->config->crc.crc32(s->config->crc.crc_context, data, length);
+        return s->config->crc32_provider(0xFFFFFFFFu, data, length);
     }
     return val_crc32(data, length);
 }
 
-uint32_t val_internal_crc32_init(val_session_t *s)
-{
-    if (s && s->config && s->config->crc.crc32_init)
-    {
-        return s->config->crc.crc32_init(s->config->crc.crc_context);
-    }
-    return val_crc32_init_state();
-}
 
-uint32_t val_internal_crc32_update(val_session_t *s, uint32_t state, const void *data, size_t length)
-{
-    if (s && s->config && s->config->crc.crc32_update)
-    {
-        return s->config->crc.crc32_update(s->config->crc.crc_context, state, data, length);
-    }
-    return val_crc32_update_state(state, data, length);
-}
 
-uint32_t val_internal_crc32_final(val_session_t *s, uint32_t state)
-{
-    if (s && s->config && s->config->crc.crc32_final)
-    {
-        return s->config->crc.crc32_final(s->config->crc.crc_context, state);
-    }
-    return val_crc32_finalize_state(state);
-}
+
+
+
 
 val_status_t val_internal_crc32_region(val_session_t *s, void *file_handle, uint64_t start_offset,
                                        uint64_t length, uint32_t *out_crc)
@@ -480,7 +459,19 @@ val_status_t val_internal_crc32_region(val_session_t *s, void *file_handle, uint
     // Seek to start
     if (s->config->filesystem.fseek(s->config->filesystem.fs_context, file_handle, (long)start_offset, SEEK_SET) != 0)
         return VAL_ERR_IO;
-    uint32_t state = val_internal_crc32_init(s);
+    
+    // Use hardware CRC if available and data fits in buffer for single-shot operation
+    if (s->config->crc32_provider && length <= step) {
+        size_t rr = s->config->filesystem.fread(s->config->filesystem.fs_context,
+                                                s->config->buffers.recv_buffer, 1, (size_t)length, file_handle);
+        if (rr != (size_t)length)
+            return VAL_ERR_IO;
+        *out_crc = s->config->crc32_provider(0xFFFFFFFFu, s->config->buffers.recv_buffer, (size_t)length);
+        return VAL_OK;
+    }
+    
+    // Fallback to incremental CRC for large files or when no hardware provider
+    uint32_t state = val_crc32_init_state();
     uint64_t left = length;
     while (left > 0)
     {
@@ -489,10 +480,10 @@ val_status_t val_internal_crc32_region(val_session_t *s, void *file_handle, uint
                                                 s->config->buffers.recv_buffer, 1, take, file_handle);
         if (rr != take)
             return VAL_ERR_IO;
-        state = val_internal_crc32_update(s, state, s->config->buffers.recv_buffer, take);
+        state = val_crc32_update_state(state, s->config->buffers.recv_buffer, take);
         left -= take;
     }
-    *out_crc = val_internal_crc32_final(s, state);
+    *out_crc = val_crc32_finalize_state(state);
     return VAL_OK;
 }
 // --- Adaptive timeout helpers (RFC 6298-inspired, integer math) ---

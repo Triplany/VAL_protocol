@@ -161,7 +161,7 @@ static val_resume_action_t determine_resume_action(val_session_t *session, const
     }
 
     session->config->filesystem.fseek(session->config->filesystem.fs_context, file, 0, SEEK_END);
-    long existing_size_l = session->config->filesystem.ftell(session->config->filesystem.fs_context, file);
+    int64_t existing_size_l = session->config->filesystem.ftell(session->config->filesystem.fs_context, file);
     if (existing_size_l < 0)
     {
         session->config->filesystem.fclose(session->config->filesystem.fs_context, file);
@@ -518,7 +518,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
         VAL_LOG_DEBUGF(s, "data: starting receive loop (written=%llu,total=%llu)", (unsigned long long)written,
                        (unsigned long long)total);
         // Compute CRC across only the newly received bytes; no re-CRC of existing bytes.
-        uint32_t crc_state = val_internal_crc32_init(s);
+        uint32_t crc_state = val_crc32_init_state();
     // ACK coalescing state (per-file)
         uint32_t pkts_since_ack = 0;
     // Streaming heartbeat state (per-file): send sparse ACKs only when idle
@@ -624,7 +624,7 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                             val_internal_set_error_detailed(s, VAL_ERR_IO, VAL_ERROR_DETAIL_DISK_FULL);
                             return VAL_ERR_IO;
                         }
-                        crc_state = val_internal_crc32_update(s, crc_state, tmp, len);
+                        crc_state = val_crc32_update_state(crc_state, tmp, len);
                     }
                     // If this completes the file exactly, force an ACK immediately regardless of stride
                     uint8_t completes_file = (written + len >= total) ? 1u : 0u;
