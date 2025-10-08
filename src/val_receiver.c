@@ -719,6 +719,14 @@ val_status_t val_internal_receive_files(val_session_t *s, const char *output_dir
                 if (in_order && written >= total)
                     force_ack = 1;
                 int streaming = (s->recv_streaming_allowed && s->peer_streaming_engaged) ? 1 : 0;
+                // Log streaming state for first packet and every 5000 packets for debugging
+                static uint32_t debug_pkt_count = 0;
+                debug_pkt_count++;
+                if (debug_pkt_count == 1 || debug_pkt_count % 5000 == 0) {
+                    VAL_LOG_INFOF(s, "ACK policy (#%u): streaming=%d (allowed=%d engaged=%d), pkts_since_ack=%u ack_stride=%u",
+                                  debug_pkt_count, streaming, s->recv_streaming_allowed, s->peer_streaming_engaged,
+                                  pkts_since_ack, (unsigned)ack_stride);
+                }
                 // ACK policy when streaming:
                 // - Still ACK at least once per peer window (ack_stride) to keep sender's pipeline moving.
                 // - Also force an ACK at EOF.

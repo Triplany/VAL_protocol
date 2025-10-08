@@ -903,6 +903,15 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 }
             }
 
+            // Streaming: if we've sent all remaining data, skip ACK wait and proceed directly to DONE.
+            // Receiver will send EOF ACK when it receives DONE. No window ACKs needed in streaming mode.
+            if (s->streaming_engaged && next_to_send >= size)
+            {
+                // Update last_acked to break outer loop
+                last_acked = size;
+                break;
+            }
+
             const uint64_t target_ack = next_to_send;
             uint32_t t0 = s->config->system.get_ticks_ms();
             uint32_t wait_deadline = s->config->system.get_ticks_ms() + ack_timeout_ms;

@@ -1,0 +1,5 @@
+# Ensure Git treats C/CMake files correctly
+*.c text eol=lf
+*.h text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
