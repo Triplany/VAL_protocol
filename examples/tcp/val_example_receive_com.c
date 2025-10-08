@@ -23,6 +23,11 @@
 #include <pthread.h>
 #endif
 
+#if defined(_WIN32)
+/* Provide a usleep() shim on Windows where it's not available. Argument is microseconds. */
+static void usleep(unsigned usec) { Sleep((usec + 999) / 1000); }
+#endif
+
 // --- Simple timing functions ---
 static uint32_t get_ticks_ms(void) {
 #if defined(_WIN32)
@@ -135,7 +140,8 @@ static size_t rx_stats_start(rx_summary_t *sum, const char *filename, uint64_t b
 {
 	if (!sum || !filename) return 0;
 	size_t idx = sum->stats_count++;
-	sum->stats = (typeof(sum->stats))realloc(sum->stats, sizeof(*sum->stats) * sum->stats_count);
+	/* portable: avoid GCC typeof() extension used previously */
+	sum->stats = realloc(sum->stats, sizeof(*sum->stats) * sum->stats_count);
 	sum->stats[idx].name = strdup(filename);
 	sum->stats[idx].start_ms = get_ticks_ms();
 	sum->stats[idx].elapsed_ms = 0;
