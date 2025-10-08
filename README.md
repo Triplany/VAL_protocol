@@ -146,8 +146,8 @@ cmake --build build\windows-debug --config Debug -j
 
 Two executables live under `examples/tcp/` with optional flags for MTU and resume mode.
 
-- Sender usage: `val_example_send.exe [--mtu N] [--resume MODE] [--tail-bytes N] [--log-level L] [--log-file PATH] <host> <port> <file1> [file2 ...]`
-- Receiver usage: `val_example_receive.exe [--mtu N] [--resume MODE] [--tail-bytes N] [--log-level L] [--log-file PATH] <port> <outdir>`
+ - Sender usage: `val_example_send_tcp.exe [--mtu N] [--resume MODE] [--tail-bytes N] [--log-level L] [--log-file PATH] <host> <port> <file1> [file2 ...]`
+ - Receiver usage: `val_example_receive_tcp.exe [--mtu N] [--resume MODE] [--tail-bytes N] [--log-level L] [--log-file PATH] <port> <outdir>`
 
 Resume mode names (case-insensitive) map to `val_resume_mode_t`:
 
@@ -163,11 +163,11 @@ cmake --build build\windows-release --config Release -j
 Run (PowerShell):
 
 ```powershell
-# Receiver (port 9000, output to D:\\out, MTU 8192, resume tail with 16 KiB cap)
-.\build\windows-release\bin\val_example_receive.exe --mtu 8192 --resume tail --tail-bytes 16384 9000 D:\\out
+# Receiver (port 9000, output to D:\out, MTU 8192, resume tail with 16 KiB cap)
+.\build\windows-release\bin\val_example_receive_tcp.exe --mtu 8192 --resume tail --tail-bytes 16384 9000 D:\\out
 
 # Sender (connect to localhost, same resume settings)
-.\build\windows-release\bin\val_example_send.exe --mtu 8192 --resume tail --tail-bytes 16384 127.0.0.1 9000 D:\\files\a.bin D:\\files\b.bin
+.\build\windows-release\bin\val_example_send_tcp.exe --mtu 8192 --resume tail --tail-bytes 16384 127.0.0.1 9000 D:\\files\a.bin D:\\files\b.bin
 ```
 
 On Linux/WSL, use the provided `linux-*` presets in `CMakePresets.json` and run the corresponding binaries.

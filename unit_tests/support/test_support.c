@@ -335,19 +335,40 @@ int ts_find_example_bins(char *rx_out, size_t rx_out_size, char *tx_out, size_t 
     char art[2048];
     if (!ts_get_artifacts_root(art, sizeof(art)))
         return 0;
-    char exe_dir[2048];
-    ts_dirname(art, exe_dir, sizeof(exe_dir));           // <build>/<preset>/unit_tests
-    char preset_root[2048];
-    ts_dirname(exe_dir, preset_root, sizeof(preset_root)); // <build>/<preset>
+        char exe_dir[2048];
+        ts_dirname(art, exe_dir, sizeof(exe_dir)); // directory containing the test exe (e.g., .../bin/unit_tests)
 
-    char rx[4096], tx[4096];
-#if defined(_WIN32)
-    snprintf(rx, sizeof(rx), "%s\\bin\\val_example_receive.exe", preset_root);
-    snprintf(tx, sizeof(tx), "%s\\bin\\val_example_send.exe", preset_root);
-#else
-    snprintf(rx, sizeof(rx), "%s/bin/val_example_receive", preset_root);
-    snprintf(tx, sizeof(tx), "%s/bin/val_example_send", preset_root);
-#endif
+        // Simple rule: the examples live one directory above the test exe directory.
+        // For example, when exe_dir is <build>/<preset>/bin/unit_tests, parent is <build>/<preset>/bin
+        char parent_dir[2048];
+        ts_dirname(exe_dir, parent_dir, sizeof(parent_dir));
+
+        char rx[4096], tx[4096];
+    #if defined(_WIN32)
+        snprintf(rx, sizeof(rx), "%s\\val_example_receive_tcp.exe", parent_dir);
+        snprintf(tx, sizeof(tx), "%s\\val_example_send_tcp.exe", parent_dir);
+    #else
+        snprintf(rx, sizeof(rx), "%s/val_example_receive_tcp", parent_dir);
+        snprintf(tx, sizeof(tx), "%s/val_example_send_tcp", parent_dir);
+    #endif
+
+        // Optional debug: print computed parent_dir and candidate paths and whether they exist
+        {
+            int dbg = 0;
+    #if defined(_WIN32)
+            char bufdbg[8];
+            DWORD nd = GetEnvironmentVariableA("TS_FIND_BINS_DEBUG", bufdbg, (DWORD)sizeof(bufdbg));
+            dbg = (nd > 0 && bufdbg[0] == '1') ? 1 : 0;
+    #else
+            const char *v = getenv("TS_FIND_BINS_DEBUG");
+            dbg = (v && v[0] == '1') ? 1 : 0;
+    #endif
+            if (dbg)
+            {
+                fprintf(stderr, "ts_find_example_bins: parent_dir='%s'\n  rx='%s' exists=%d\n  tx='%s' exists=%d\n",
+                        parent_dir, rx, file_exists(rx), tx, file_exists(tx));
+            }
+        }
     if (file_exists(rx) && file_exists(tx))
     {
         ts_str_copy(rx_out, rx_out_size, rx);
@@ -355,20 +376,41 @@ int ts_find_example_bins(char *rx_out, size_t rx_out_size, char *tx_out, size_t 
         return 1;
     }
 
+    // Optional debug output controlled by TS_FIND_BINS_DEBUG env var.
+    // Set TS_FIND_BINS_DEBUG=1 when running tests to see which candidates are tried.
+    {
+        int dbg = 0;
+#if defined(_WIN32)
+        char bufdbg[8];
+        DWORD nd = GetEnvironmentVariableA("TS_FIND_BINS_DEBUG", bufdbg, (DWORD)sizeof(bufdbg));
+        dbg = (nd > 0 && bufdbg[0] == '1') ? 1 : 0;
+#else
+        const char *v = getenv("TS_FIND_BINS_DEBUG");
+        dbg = (v && v[0] == '1') ? 1 : 0;
+#endif
+        if (dbg)
+        {
+            fprintf(stderr, "ts_find_example_bins: tried primary candidates:\n  %s\n  %s\n", rx, tx);
+        }
+    }
+
     // Fallbacks for atypical layouts
     char build_root[2048];
-    ts_dirname(preset_root, build_root, sizeof(build_root)); // <build>
+    // Derive the build/preset root from the parent_dir we computed above.
+    // parent_dir is expected to be <build>/<preset>/bin, so dirname(parent_dir)
+    // yields <build>/<preset> which matches the historical "preset_root" intent.
+    ts_dirname(parent_dir, build_root, sizeof(build_root)); // <build/preset>
     char dbg_rx[4096], dbg_tx[4096], root_rx[4096], root_tx[4096];
 #if defined(_WIN32)
-    snprintf(dbg_rx, sizeof(dbg_rx), "%s\\Debug\\val_example_receive.exe", build_root);
-    snprintf(dbg_tx, sizeof(dbg_tx), "%s\\Debug\\val_example_send.exe", build_root);
-    snprintf(root_rx, sizeof(root_rx), "%s\\val_example_receive.exe", build_root);
-    snprintf(root_tx, sizeof(root_tx), "%s\\val_example_send.exe", build_root);
+    snprintf(dbg_rx, sizeof(dbg_rx), "%s\\Debug\\val_example_receive_tcp.exe", build_root);
+    snprintf(dbg_tx, sizeof(dbg_tx), "%s\\Debug\\val_example_send_tcp.exe", build_root);
+    snprintf(root_rx, sizeof(root_rx), "%s\\val_example_receive_tcp.exe", build_root);
+    snprintf(root_tx, sizeof(root_tx), "%s\\val_example_send_tcp.exe", build_root);
 #else
-    snprintf(dbg_rx, sizeof(dbg_rx), "%s/Debug/val_example_receive", build_root);
-    snprintf(dbg_tx, sizeof(dbg_tx), "%s/Debug/val_example_send", build_root);
-    snprintf(root_rx, sizeof(root_rx), "%s/val_example_receive", build_root);
-    snprintf(root_tx, sizeof(root_tx), "%s/val_example_send", build_root);
+    snprintf(dbg_rx, sizeof(dbg_rx), "%s/Debug/val_example_receive_tcp", build_root);
+    snprintf(dbg_tx, sizeof(dbg_tx), "%s/Debug/val_example_send_tcp", build_root);
+    snprintf(root_rx, sizeof(root_rx), "%s/val_example_receive_tcp", build_root);
+    snprintf(root_tx, sizeof(root_tx), "%s/val_example_send_tcp", build_root);
 #endif
     const char *crx = NULL, *ctx = NULL;
     if (file_exists(dbg_rx) && file_exists(dbg_tx))
@@ -384,6 +426,23 @@ int ts_find_example_bins(char *rx_out, size_t rx_out_size, char *tx_out, size_t 
         ts_str_copy(rx_out, rx_out_size, crx);
         ts_str_copy(tx_out, tx_out_size, ctx);
         return 1;
+    }
+
+    {
+        int dbg = 0;
+#if defined(_WIN32)
+        char bufdbg[8];
+        DWORD nd = GetEnvironmentVariableA("TS_FIND_BINS_DEBUG", bufdbg, (DWORD)sizeof(bufdbg));
+        dbg = (nd > 0 && bufdbg[0] == '1') ? 1 : 0;
+#else
+        const char *v = getenv("TS_FIND_BINS_DEBUG");
+        dbg = (v && v[0] == '1') ? 1 : 0;
+#endif
+        if (dbg)
+        {
+            fprintf(stderr, "ts_find_example_bins: tried fallback candidates:\n  %s\n  %s\n  %s\n  %s\n",
+                    dbg_rx, dbg_tx, root_rx, root_tx);
+        }
     }
     return 0;
 }

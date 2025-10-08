@@ -219,7 +219,7 @@ The repository includes complete TCP examples with all features enabled.
 
 ```bash
 # Windows
-.\build\windows-debug\bin\Debug\val_example_receive.exe 9000 .\received
+.\build\windows-debug\bin\Debug\val_example_receive_tcp.exe 9000 .\received
 
 # Linux
 ./build/linux-debug/bin/val_example_receive 9000 ./received
@@ -229,7 +229,7 @@ The repository includes complete TCP examples with all features enabled.
 
 ```bash
 # Windows
-.\build\windows-debug\bin\Debug\val_example_send.exe 127.0.0.1 9000 file1.bin file2.txt
+.\build\windows-debug\bin\Debug\val_example_send_tcp.exe 127.0.0.1 9000 file1.bin file2.txt
 
 # Linux
 ./build/linux-debug/bin/val_example_send 127.0.0.1 9000 file1.bin file2.txt

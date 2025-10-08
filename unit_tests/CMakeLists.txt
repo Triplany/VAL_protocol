@@ -2,12 +2,26 @@ cmake_minimum_required(VERSION 3.15)
 
 # Always build unit test executables and register them with CTest.
 
+# Place unit test executables into the shared bin/unit_tests folder so they
+# don't clutter the top-level bin directory where examples live.
+set(VAL_UT_OUTPUT_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unit_tests)
+file(MAKE_DIRECTORY ${VAL_UT_OUTPUT_DIR})
+
 function(add_ctest_exe name src)
     # Include common test support and transport simulation helpers in all unit tests
     add_executable(${name} ${src} support/test_support.c support/transport_profiles.c)
+    # Ensure unit tests emit into the bin/unit_tests output directory
+    set_target_properties(${name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${VAL_UT_OUTPUT_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG ${VAL_UT_OUTPUT_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE ${VAL_UT_OUTPUT_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${VAL_UT_OUTPUT_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${VAL_UT_OUTPUT_DIR}
+    )
     # Allow unit tests to include public and selected internal headers for white-box testing
     target_include_directories(${name} PRIVATE support include ${CMAKE_CURRENT_LIST_DIR}/../src ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(${name} PRIVATE val_protocol)
+    # Register test using the generated target file to ensure CTest uses the actual path
     add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
 endfunction()
 
@@ -122,6 +136,13 @@ endif()
 # with deterministic behavior for reproducible testing
 function(add_transport_profile_test name src)
     add_executable(${name} ${src} support/test_support.c support/transport_profiles.c)
+    set_target_properties(${name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${VAL_UT_OUTPUT_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG ${VAL_UT_OUTPUT_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE ${VAL_UT_OUTPUT_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${VAL_UT_OUTPUT_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${VAL_UT_OUTPUT_DIR}
+    )
     target_include_directories(${name} PRIVATE support include ${CMAKE_CURRENT_LIST_DIR}/../src ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(${name} PRIVATE val_protocol)
     add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)

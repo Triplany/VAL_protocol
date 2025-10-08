@@ -82,36 +82,36 @@ add_library(example_tcp_common STATIC
     examples/tcp/common/tcp_util.c)
 target_include_directories(example_tcp_common PUBLIC examples/tcp/common)
 
-add_executable(val_example_send examples/tcp/val_example_send.c)
-target_include_directories(val_example_send PRIVATE examples/tcp/common include)
-target_link_libraries(val_example_send PRIVATE val_protocol example_tcp_common)
+add_executable(val_example_send_tcp examples/tcp/val_example_send_tcp.c)
+target_include_directories(val_example_send_tcp PRIVATE examples/tcp/common include)
+target_link_libraries(val_example_send_tcp PRIVATE val_protocol example_tcp_common)
 if(VAL_ENABLE_ERROR_STRINGS)
-    target_link_libraries(val_example_send PRIVATE val_error_strings)
+    target_link_libraries(val_example_send_tcp PRIVATE val_error_strings)
 endif()
 # Always compile the examples with maximum VAL_LOG_LEVEL so core logs are not compiled out
-target_compile_definitions(val_example_send PRIVATE VAL_LOG_LEVEL=5)
+target_compile_definitions(val_example_send_tcp PRIVATE VAL_LOG_LEVEL=5)
 # Build examples lean even in Debug: optimize and define NDEBUG to avoid full debug noise
 if (MSVC)
-    target_compile_options(val_example_send PRIVATE $<$<NOT:$<CONFIG:Debug>>:/O2>)
+    target_compile_options(val_example_send_tcp PRIVATE $<$<NOT:$<CONFIG:Debug>>:/O2>)
 else()
-    target_compile_options(val_example_send PRIVATE $<$<NOT:$<CONFIG:Debug>>:-O2>)
+    target_compile_options(val_example_send_tcp PRIVATE $<$<NOT:$<CONFIG:Debug>>:-O2>)
 endif()
-target_compile_definitions(val_example_send PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_compile_definitions(val_example_send_tcp PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
 
-add_executable(val_example_receive examples/tcp/val_example_receive.c)
-target_include_directories(val_example_receive PRIVATE examples/tcp/common include)
-target_link_libraries(val_example_receive PRIVATE val_protocol example_tcp_common)
+add_executable(val_example_receive_tcp examples/tcp/val_example_receive_tcp.c)
+target_include_directories(val_example_receive_tcp PRIVATE examples/tcp/common include)
+target_link_libraries(val_example_receive_tcp PRIVATE val_protocol example_tcp_common)
 if(VAL_ENABLE_ERROR_STRINGS)
-    target_link_libraries(val_example_receive PRIVATE val_error_strings)
+    target_link_libraries(val_example_receive_tcp PRIVATE val_error_strings)
 endif()
 # Always compile the examples with maximum VAL_LOG_LEVEL so core logs are not compiled out
-target_compile_definitions(val_example_receive PRIVATE VAL_LOG_LEVEL=5)
+target_compile_definitions(val_example_receive_tcp PRIVATE VAL_LOG_LEVEL=5)
 if (MSVC)
-    target_compile_options(val_example_receive PRIVATE $<$<NOT:$<CONFIG:Debug>>:/O2>)
+    target_compile_options(val_example_receive_tcp PRIVATE $<$<NOT:$<CONFIG:Debug>>:/O2>)
 else()
-    target_compile_options(val_example_receive PRIVATE $<$<NOT:$<CONFIG:Debug>>:-O2>)
+    target_compile_options(val_example_receive_tcp PRIVATE $<$<NOT:$<CONFIG:Debug>>:-O2>)
 endif()
-target_compile_definitions(val_example_receive PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_compile_definitions(val_example_receive_tcp PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
 
 # COM/Serial examples (PTY on Linux, COM ports on Windows)
 add_executable(val_example_send_com examples/tcp/val_example_send_com.c)
@@ -147,27 +147,7 @@ if (WIN32)
 endif()
 
 # ---------------- Unit Tests ----------------
+# Unit tests are configured in the unit_tests subdirectory which places
+# their executables under ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unit_tests.
 enable_testing()
-
-add_library(test_support OBJECT
-    unit_tests/support/test_support.c
-    unit_tests/support/transport_profiles.c)
-target_include_directories(test_support PUBLIC unit_tests/support include)
-
-function(add_val_ut name src)
-    add_executable(${name} ${src} $<TARGET_OBJECTS:test_support>)
-    target_include_directories(${name} PRIVATE unit_tests/support include)
-    target_link_libraries(${name} PRIVATE val_protocol)
-    if(VAL_ENABLE_ERROR_STRINGS)
-        target_link_libraries(${name} PRIVATE val_error_strings)
-    endif()
-    add_test(NAME ${name} COMMAND ${name})
-endfunction()
-
-add_val_ut(ut_send_single unit_tests/send_receive/test_single_file.c)
-add_val_ut(ut_send_multi unit_tests/send_receive/test_multi_file.c)
-add_val_ut(ut_resume unit_tests/recovery/test_resume.c)
-add_val_ut(ut_corruption unit_tests/recovery/test_corruption.c)
-
-# Include the unit tests directory; all tests are plain executables registered with CTest
 add_subdirectory(unit_tests)
