@@ -47,40 +47,9 @@ set_property(TEST ut_metadata_validation PROPERTY LABELS "quick")
 add_ctest_exe(ut_adaptive_timeouts core/test_adaptive_timeouts.c)
 set_property(TEST ut_adaptive_timeouts PROPERTY LABELS "quick")
 
-# Adaptive transmission behavior
-add_ctest_exe(ut_adaptive_transmission core/test_adaptive_transmission.c)
-set_property(TEST ut_adaptive_transmission PROPERTY LABELS "heavy")
+## Legacy adaptive/streaming tests removed in 0.7
 
-# Split adaptive streaming transitions into focused tests
-add_ctest_exe(ut_adaptive_escalate core/test_adaptive_escalate.c)
-set_property(TEST ut_adaptive_escalate PROPERTY LABELS "quick")
-add_ctest_exe(ut_adaptive_deescalate core/test_adaptive_deescalate.c)
-set_property(TEST ut_adaptive_deescalate PROPERTY LABELS "quick")
-add_ctest_exe(ut_adaptive_reescalate core/test_adaptive_reescalate.c)
-set_property(TEST ut_adaptive_reescalate PROPERTY LABELS "quick")
-
-# Adaptive: escalate to streaming, degrade to windowed, and recover back
-# Remove the combined escalation test in favor of the split ones
-
-# Adaptive transmission demo (lightweight, quick)
-add_ctest_exe(ut_adaptive_demo core/test_adaptive_demo.c)
-set_property(TEST ut_adaptive_demo PROPERTY LABELS "quick")
-
-# Initial mode negotiation behavior
-add_ctest_exe(ut_initial_mode_negotiation core/test_initial_mode_negotiation.c)
-set_property(TEST ut_initial_mode_negotiation PROPERTY LABELS "quick")
-
-# Streaming negotiation/veto behavior
-add_ctest_exe(ut_streaming_veto core/test_streaming_veto.c)
-set_property(TEST ut_streaming_veto PROPERTY LABELS "quick")
-
-# Positive streaming negotiation (both sides allow streaming)
-add_ctest_exe(ut_streaming_allowed core/test_streaming_allowed.c)
-set_property(TEST ut_streaming_allowed PROPERTY LABELS "quick")
-
-# Streaming ACK cadence (integrity check; no internal audit dependency)
-add_ctest_exe(ut_streaming_ack_cadence core/test_streaming_ack_cadence.c)
-set_property(TEST ut_streaming_ack_cadence PROPERTY LABELS "quick")
+# Streaming overlay removed: related tests removed
 
 # Wire auditing is not part of the unit test surface; no corresponding test
 
@@ -100,8 +69,6 @@ set_property(TEST ut_clock_requirement PROPERTY LABELS "quick")
 # Transport fragmentation and reordering/jitter behavior
 add_ctest_exe(ut_transport_fragmentation core/test_transport_fragmentation.c)
 set_property(TEST ut_transport_fragmentation PROPERTY LABELS "quick")
-add_ctest_exe(ut_transport_reorder_jitter core/test_transport_reorder_jitter.c)
-set_property(TEST ut_transport_reorder_jitter PROPERTY LABELS "quick")
 
 # Label heavier suites to allow selective runs
 set_property(TEST ut_sr_check PROPERTY LABELS "heavy")

@@ -10,11 +10,9 @@ This documentation was created with AI assistance and may contain errors. Please
 **VAL's Abstraction Layer** provides complete separation between protocol and implementation:
 
 - **Transport Callbacks** (`send`, `recv`): Work with ANY byte stream - TCP, UART, USB, SPI, encrypted channels
-- **Filesystem Callbacks** (`fopen`, `fread`, `fwrite`, etc.): Use ANY byte source - files, RAM, flash, network buffers, streaming compression
+- **Filesystem Callbacks** (`fopen`, `fread`, `fwrite`, etc.): Use ANY byte source - files, RAM, flash, network buffers, compression
 - **System Callbacks** (`get_ticks_ms`, `malloc`, `crc32`): Enable hardware CRC acceleration, custom allocators, platform clocks
 - **Result**: Implement encryption, compression, custom protocols, in-memory transfers without touching core protocol
-
-**Streaming Mode**: Automatic 15-20x performance boost when network quality is good - sender continuously transmits using ACKs as heartbeats, not flow control.
 
 ## Table of Contents
 
@@ -23,21 +21,6 @@ This documentation was created with AI assistance and may contain errors. Please
 3. [Configuration](#configuration)
 4. [Callbacks](#callbacks)
 5. [Adaptive Transmission](#adaptive-transmission)
-6. [Error Handling](#error-handling)
-7. [Utilities](#utilities)
-8. [Diagnostics](#diagnostics)
-
----
-
-## Session Management
-
-### val_session_create
-
-**Signature:**
-```c
-val_status_t val_session_create(
-    const val_config_t *config,
-    val_session_t **out_session,
     uint32_t *out_detail
 );
 ```
@@ -53,8 +36,6 @@ Creates a new VAL protocol session with the specified configuration.
 **Returns:**
 - `VAL_OK` on success
 - `VAL_ERR_INVALID_ARG` if configuration is invalid
-- `VAL_ERR_NO_MEMORY` if allocation fails
-
 **Example:**
 ```c
 val_config_t cfg = {0};
@@ -65,23 +46,6 @@ uint32_t detail = 0;
 val_status_t status = val_session_create(&cfg, &session, &detail);
 if (status != VAL_OK) {
     fprintf(stderr, "Session creation failed: %d (detail: 0x%08X)\n",
-            status, detail);
-    return 1;
-}
-```
-
-**Notes:**
-- Session is NOT thread-safe; do not use from multiple threads without external synchronization
-- Configuration must include all required callbacks (transport, filesystem, clock)
-- Buffers must be at least `packet_size` bytes each
-
----
-
-### val_session_destroy
-
-**Signature:**
-```c
-void val_session_destroy(val_session_t *session);
 ```
 
 **Description:**  
@@ -261,8 +225,8 @@ typedef struct {
     // Resume configuration
     val_resume_config_t resume;
     
-    // Adaptive transmission configuration
-    val_adaptive_tx_config_t adaptive_tx;
+    // Flow control (bounded-window, single knob)
+    val_tx_flow_config_t tx_flow;
     
     // Callbacks (optional)
     struct {
@@ -364,61 +328,6 @@ Notes: Large files are verified using a tail window; adjust resume.tail_cap_byte
 
 ---
 
-### val_adaptive_tx_config_t
-
-**Definition:**
-```c
-typedef struct {
-    val_tx_mode_t max_performance_mode;     // Max window rung capability
-    val_tx_mode_t preferred_initial_mode;   // Starting window rung
-    uint8_t allow_streaming;                // 0=disable, 1=enable streaming pacing
-    uint8_t retransmit_cache_enabled;       // 0/1 (MCU: typically 0)
-    uint8_t reserved0;
-    uint16_t degrade_error_threshold;       // Errors before downgrade (default: 3)
-    uint16_t recovery_success_threshold;    // Successes before upgrade (default: 10)
-    uint16_t mode_sync_interval;            // Reserved (0)
-    val_memory_allocator_t allocator;       // Custom allocator (optional)
-} val_adaptive_tx_config_t;
-```
-
-**TX Modes (Window Rungs):**
-```c
-typedef enum {
-    VAL_TX_WINDOW_64 = 64,          // 64-packet window (fastest)
-    VAL_TX_WINDOW_32 = 32,
-    VAL_TX_WINDOW_16 = 16,          // Balanced default
-    VAL_TX_WINDOW_8  = 8,
-    VAL_TX_WINDOW_4  = 4,
-    VAL_TX_WINDOW_2  = 2,
-    VAL_TX_STOP_AND_WAIT = 1        // Most reliable
-} val_tx_mode_t;
-```
-
-**Configuration Examples:**
-
-**Embedded/MCU:**
-```c
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_4;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_2;
-cfg.adaptive_tx.allow_streaming = 0;
-cfg.adaptive_tx.degrade_error_threshold = 2;
-cfg.adaptive_tx.recovery_success_threshold = 20;
-```
-
-**High-Speed LAN:**
-```c
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_32;
-cfg.adaptive_tx.allow_streaming = 1;
-cfg.adaptive_tx.degrade_error_threshold = 5;
-cfg.adaptive_tx.recovery_success_threshold = 10;
-```
-
----
-
-## Callbacks
-
-### Progress Callback
 
 **Type:**
 ```c
@@ -566,119 +475,28 @@ void val_config_set_validator(val_config_t *config,
 
 ## Adaptive Transmission
 
-### val_get_current_tx_mode
+### val_get_cwnd_packets
 
 **Signature:**
 ```c
-val_status_t val_get_current_tx_mode(
-    val_session_t *session,
-    val_tx_mode_t *out_mode
-);
+val_status_t val_get_cwnd_packets(val_session_t *session, uint32_t *out_cwnd);
 ```
 
 **Description:**  
-Gets the current adaptive transmission window rung.
-
-**Returns:**
-- `VAL_OK` on success
-- `VAL_ERR_INVALID_ARG` if parameters are NULL
-
-**Example:**
-```c
-val_tx_mode_t mode;
-if (val_get_current_tx_mode(session, &mode) == VAL_OK) {
-    printf("Current TX mode: %u-packet window\n", (unsigned)mode);
-}
-```
+Gets the current congestion window (cwnd) in packets.
 
 ---
 
-### val_is_streaming_engaged
+### val_get_peer_tx_cap_packets
 
 **Signature:**
 ```c
-val_status_t val_is_streaming_engaged(
-    val_session_t *session,
-    int *out_streaming_engaged
-);
+val_status_t val_get_peer_tx_cap_packets(val_session_t *session, uint32_t *out_cap);
 ```
 
 **Description:**  
-Query whether streaming pacing is currently active.
+Gets the peer's advertised TX capability (packets) from handshake.
 
-**Returns:**
-- `VAL_OK` on success, writes 0 (not engaged) or 1 (engaged) to `*out_streaming_engaged`
-- `VAL_ERR_INVALID_ARG` if parameters are NULL
-
-**Example:**
-```c
-int streaming = 0;
-if (val_is_streaming_engaged(session, &streaming) == VAL_OK) {
-    printf("Streaming: %s\n", streaming ? "YES" : "NO");
-}
-```
-
----
-
-### val_get_streaming_allowed
-
-**Signature:**
-```c
-val_status_t val_get_streaming_allowed(
-    val_session_t *session,
-    int *out_send_allowed,
-    int *out_recv_allowed
-);
-```
-
-**Description:**  
-Query negotiated streaming permissions.
-
-**Parameters:**
-- `out_send_allowed`: Receives 1 if we may stream when sending, 0 otherwise
-- `out_recv_allowed`: Receives 1 if we accept peer streaming, 0 otherwise
-
-**Example:**
-```c
-int send_ok = 0, recv_ok = 0;
-if (val_get_streaming_allowed(session, &send_ok, &recv_ok) == VAL_OK) {
-    printf("Streaming: send=%s recv=%s\n",
-           send_ok ? "OK" : "NO",
-           recv_ok ? "OK" : "NO");
-}
-```
-
----
-
-### val_get_peer_tx_mode
-
-**Signature:**
-```c
-val_status_t val_get_peer_tx_mode(
-    val_session_t *session,
-    val_tx_mode_t *out_mode
-);
-```
-
-**Description:**  
-Gets peer's last-known TX mode (best-effort from handshake/mode-sync).
-
----
-
-### val_is_peer_streaming_engaged
-
-**Signature:**
-```c
-val_status_t val_is_peer_streaming_engaged(
-    val_session_t *session,
-    int *out_peer_streaming_engaged
-);
-```
-
-**Description:**  
-Query whether peer has engaged streaming (best-effort observation).
-
----
 
 ### val_get_effective_packet_size
 
@@ -869,7 +687,9 @@ typedef struct {
     uint64_t bytes_recv;
     uint64_t send_by_type[32];      // Per-type counters
     uint64_t recv_by_type[32];
-    uint32_t timeouts;
+    uint32_t timeouts;       // total = soft + hard
+    uint32_t timeouts_soft;  // interim slice/backoff timeouts
+    uint32_t timeouts_hard;  // terminal operation timeouts
     uint32_t retransmits;
     uint32_t crc_errors;
     uint32_t handshakes;
@@ -930,7 +750,6 @@ typedef enum {
     VAL_ERR_FEATURE_NEGOTIATION = -10,
     VAL_ERR_ABORTED = -11,
     VAL_ERR_MODE_NEGOTIATION_FAILED = -12,
-    VAL_ERR_MODE_SYNC_FAILED = -13,
     VAL_ERR_UNSUPPORTED_TX_MODE = -14,
     VAL_ERR_PERFORMANCE = -15               // Connection quality too poor
 } val_status_t;

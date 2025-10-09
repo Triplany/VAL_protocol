@@ -37,9 +37,9 @@ static int mock_recv(void *ctx, void *buffer, size_t buffer_size, size_t *receiv
         payload.version_major = VAL_VERSION_MAJOR;
     payload.version_minor = VAL_VERSION_MINOR;
         payload.packet_size = 1024;
-        payload.max_performance_mode = VAL_TX_WINDOW_8; // Peer supports up to 8-packet window
-        payload.preferred_initial_mode = VAL_TX_WINDOW_4;
-        payload.mode_sync_interval = 100;
+    payload.tx_max_window_packets = 8; // Peer supports up to 8-packet window
+    payload.rx_max_window_packets = 8;
+    payload.ack_stride_packets = 0; // default: once per window
 
         memset(&header, 0, sizeof(header));
         header.type = VAL_PKT_HELLO;
@@ -209,13 +209,11 @@ static void test_adaptive_negotiation(void)
     config.buffers.recv_buffer = recv_buf;
     config.buffers.packet_size = 1024;
 
-    // Set up adaptive transmission - local supports streaming
+    // Set up adaptive transmission
     config.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     config.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_16;
-    config.adaptive_tx.allow_streaming = 1;
     config.adaptive_tx.degrade_error_threshold = 2;
     config.adaptive_tx.recovery_success_threshold = 5;
-    config.adaptive_tx.mode_sync_interval = 50;
 
     // Create session
     val_session_t *session = NULL;
@@ -241,47 +239,45 @@ static void test_adaptive_negotiation(void)
     }
 
     printf("Handshake completed successfully\n");
-    printf("Negotiated min mode: %d\n", session->min_negotiated_mode);
-    printf("Negotiated max mode: %d\n", session->max_negotiated_mode);
-    printf("Current TX mode: %d\n", session->current_tx_mode);
-    printf("Peer TX mode: %d\n", session->peer_tx_mode);
+    printf("Negotiated window: %u\n", (unsigned)session->negotiated_window_packets);
+    printf("Current window: %u\n", (unsigned)session->current_window_packets);
 
-    // Expected: min_negotiated_mode should be WINDOW_8 (conservative shared rung)
-    if (session->min_negotiated_mode == VAL_TX_WINDOW_8)
+    // Expected: negotiated_window should be 8 (conservative shared rung)
+    if (session->negotiated_window_packets == 8)
         printf("PASS: Negotiated mode correctly set to WINDOW_8\n");
     else
-        printf("FAIL: Expected WINDOW_8 (%d), got %d\n", VAL_TX_WINDOW_8, session->min_negotiated_mode);
+    printf("FAIL: Expected window 8, got %u\n", (unsigned)session->negotiated_window_packets);
 
     // Test adaptive degradation
     printf("\n=== Testing Adaptive Mode Degradation ===\n");
-    printf("Initial mode: %d\n", session->current_tx_mode);
+    printf("Initial window: %u\n", (unsigned)session->current_window_packets);
 
     // Induce errors to trigger degradation
     printf("Inducing transmission errors...\n");
     val_internal_record_transmission_error(session);
-    printf("After 1 error - mode: %d, consecutive_errors: %d\n", session->current_tx_mode, session->consecutive_errors);
+    printf("After 1 error - window: %u, consecutive_errors: %u\n", (unsigned)session->current_window_packets, (unsigned)session->consecutive_errors);
 
     val_internal_record_transmission_error(session);
-    printf("After 2 errors - mode: %d, consecutive_errors: %d\n", session->current_tx_mode, session->consecutive_errors);
+    printf("After 2 errors - window: %u, consecutive_errors: %u\n", (unsigned)session->current_window_packets, (unsigned)session->consecutive_errors);
 
-    if (val_tx_mode_window(session->current_tx_mode) < val_tx_mode_window(session->min_negotiated_mode))
+    if (session->current_window_packets <= session->negotiated_window_packets)
         printf("PASS: Mode degraded after error threshold\n");
     else
         printf("NOTE: Mode at lowest negotiated level, cannot degrade further\n");
 
     // Test recovery
     printf("\n=== Testing Adaptive Mode Recovery ===\n");
-    val_tx_mode_t degraded_mode = session->current_tx_mode;
+    uint16_t degraded_window = session->current_window_packets;
 
     printf("Recording successful transmissions...\n");
     for (int i = 0; i < 6; i++)
     {
         val_internal_record_transmission_success(session);
-    printf("After %d successes - mode: %d, consecutive_successes: %d\n", i + 1, session->current_tx_mode,
-               session->consecutive_successes);
+    printf("After %d successes - window: %u, consecutive_successes: %u\n", i + 1, (unsigned)session->current_window_packets,
+        (unsigned)session->consecutive_successes);
     }
 
-    if (val_tx_mode_window(session->current_tx_mode) > val_tx_mode_window(degraded_mode))
+    if (session->current_window_packets > degraded_window)
         printf("PASS: Mode upgraded after success threshold\n");
     else
         printf("NOTE: Mode unchanged - may already be at optimal level\n");

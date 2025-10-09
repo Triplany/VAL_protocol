@@ -16,8 +16,6 @@ extern "C" {
 #define VAL_WIRE_META_SIZE ((VAL_MAX_FILENAME + 1u) + (VAL_MAX_PATH + 1u) + 8u)
 #define VAL_WIRE_RESUME_RESP_SIZE 24u
 #define VAL_WIRE_ERROR_PAYLOAD_SIZE 8u
-#define VAL_WIRE_MODE_SYNC_SIZE 20u
-#define VAL_WIRE_MODE_SYNC_ACK_SIZE 12u
 #define VAL_WIRE_TRAILER_SIZE 4u
 
 typedef struct
@@ -41,20 +39,21 @@ typedef struct
     uint32_t features;
     uint32_t required;
     uint32_t requested;
-    uint8_t max_performance_mode;
-    uint8_t preferred_initial_mode;
-    uint16_t mode_sync_interval;
-    uint8_t streaming_flags; // bit0: sender can stream, bit1: accepts peer streaming
-    uint8_t reserved_streaming[3];
+    // Repurposed flow-control capability exchange (keeps wire size the same)
+    // tx_max_window_packets: maximum in-flight packets this sender can support
+    // rx_max_window_packets: maximum in-flight packets this receiver can accept
+    // ack_stride_packets: receiver's preferred ACK cadence (0 = once per window)
+    uint16_t tx_max_window_packets;
+    uint16_t rx_max_window_packets;
+    uint8_t ack_stride_packets;
+    uint8_t reserved_capabilities[3];
     uint16_t supported_features16;
     uint16_t required_features16;
     uint16_t requested_features16;
     uint32_t reserved2;
 } val_handshake_t;
 
-// Streaming flag bits (handshake.streaming_flags)
-#define VAL_STREAM_CAN_SEND  (1u << 0)
-#define VAL_STREAM_ACCEPT    (1u << 1)
+// Note: legacy streaming flags removed from handshake; flow control is bounded-window only.
 
 typedef struct
 {
@@ -69,22 +68,6 @@ typedef struct
     uint32_t verify_crc;
     uint64_t verify_length;
 } val_resume_resp_t;
-
-typedef struct
-{
-    uint32_t current_mode;
-    uint32_t sequence;
-    uint32_t consecutive_errors;
-    uint32_t consecutive_successes;
-    uint32_t flags;
-} val_mode_sync_t;
-
-typedef struct
-{
-    uint32_t ack_sequence;
-    uint32_t agreed_mode;
-    uint32_t receiver_errors;
-} val_mode_sync_ack_t;
 
 void val_serialize_header(const val_packet_header_t *hdr, uint8_t *wire_data);
 void val_deserialize_header(const uint8_t *wire_data, val_packet_header_t *hdr);
@@ -101,11 +84,7 @@ void val_deserialize_resume_resp(const uint8_t *wire_data, val_resume_resp_t *re
 void val_serialize_error_payload(const val_error_payload_t *payload, uint8_t *wire_data);
 void val_deserialize_error_payload(const uint8_t *wire_data, val_error_payload_t *payload);
 
-void val_serialize_mode_sync(const val_mode_sync_t *sync, uint8_t *wire_data);
-void val_deserialize_mode_sync(const uint8_t *wire_data, val_mode_sync_t *sync);
-
-void val_serialize_mode_sync_ack(const val_mode_sync_ack_t *ack, uint8_t *wire_data);
-void val_deserialize_mode_sync_ack(const uint8_t *wire_data, val_mode_sync_ack_t *ack);
+// No MODE_SYNC in bounded-window protocol
 
 
 #ifdef __cplusplus

@@ -1,5 +1,4 @@
 #include "val_internal.h"
-#include "val_scheduler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -135,7 +134,6 @@ typedef struct val_sender_ack_ctx_s
     uint64_t *last_acked;
     uint64_t *next_to_send;
     uint32_t *inflight;
-    val_tx_mode_t *mode_used;
     uint32_t *window_size;
     int *first_ack_grace_flag;
     uint32_t to_ack;
@@ -147,10 +145,6 @@ typedef struct val_sender_ack_ctx_s
     uint32_t wait_deadline;
     uint32_t t0;
     uint64_t *file_cursor_ptr; // keep sender's local cursor in sync on rewinds
-    // No-progress deadline (absolute ms since boot); 0 means disabled
-    uint32_t np_deadline_ms;
-    // Absolute transfer deadline (ms since boot); 0 means disabled
-    uint32_t abs_deadline_ms;
 } val_sender_ack_ctx_t;
 
 static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next_to_send, uint32_t *inflight);
@@ -306,7 +300,7 @@ static void val_emit_progress_sender(val_session_t *s, val_send_progress_ctx_t *
 static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *restart_window)
 {
     if (!ack_ctx || !ack_ctx->session || !restart_window || !ack_ctx->window_start || !ack_ctx->last_acked ||
-        !ack_ctx->next_to_send || !ack_ctx->inflight || !ack_ctx->mode_used || !ack_ctx->window_size)
+        !ack_ctx->next_to_send || !ack_ctx->inflight || !ack_ctx->window_size)
         return VAL_ERR_INVALID_ARG;
 
     val_session_t *s = ack_ctx->session;
@@ -321,50 +315,11 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
     {
         if (val_check_for_cancel(s))
             return VAL_ERR_ABORTED;
-
-        uint8_t streaming_mode = (uint8_t)val_tx_should_stream(s);
-        uint32_t poll_ms = val_tx_poll_ms(s, ack_ctx->to_ack);
-        // Respect no-progress deadline by capping this blocking wait
-        uint32_t wait_ms = streaming_mode ? poll_ms : ack_ctx->to_ack;
-        // Also respect an absolute transfer deadline if provided
-        if (ack_ctx->abs_deadline_ms && s->config->system.get_ticks_ms)
-        {
-            uint32_t now_abs = s->config->system.get_ticks_ms();
-            if (ack_ctx->abs_deadline_ms > now_abs)
-            {
-                uint32_t remaining = ack_ctx->abs_deadline_ms - now_abs;
-                if (remaining == 0)
-                    remaining = 1u;
-                if (wait_ms > remaining)
-                    wait_ms = remaining;
-            }
-            else
-            {
-                // Deadline already expired; fail fast
-                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                return VAL_ERR_TIMEOUT;
-            }
-        }
-        if (ack_ctx->np_deadline_ms && s->config->system.get_ticks_ms)
-        {
-            uint32_t now = s->config->system.get_ticks_ms();
-            if (ack_ctx->np_deadline_ms > now)
-            {
-                uint32_t remaining = ack_ctx->np_deadline_ms - now;
-                if (remaining == 0)
-                    remaining = 1u;
-                if (wait_ms > remaining)
-                    wait_ms = remaining;
-            }
-            else
-            {
-                // Deadline already expired; fail fast
-                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                return VAL_ERR_TIMEOUT;
-            }
-        }
-
-        val_status_t st = val_internal_recv_packet(s, &t, ctrl_buf, (uint32_t)sizeof(ctrl_buf), &len, &off, wait_ms);
+        // Wait up to the ACK timeout; no protocol-level absolute/no-progress caps
+        uint32_t wait_ms = ack_ctx->to_ack;
+        uint32_t now_wait = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
+        uint32_t deadline = now_wait + (wait_ms ? wait_ms : 1u);
+        val_status_t st = val_internal_recv_until_deadline(s, &t, ctrl_buf, (uint32_t)sizeof(ctrl_buf), &len, &off, deadline, 5u);
         if (st == VAL_OK)
         {
             if (t == VAL_PKT_CANCEL)
@@ -377,8 +332,8 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
                 {
                     if (ack_ctx->file_cursor_ptr)
                         *ack_ctx->file_cursor_ptr = *ack_ctx->last_acked;
-                    *ack_ctx->mode_used = val_tx_mode_sanitize(s->current_tx_mode);
-                    *ack_ctx->window_size = val_tx_mode_window(*ack_ctx->mode_used);
+                    // Update window size from session's current setting
+                    *ack_ctx->window_size = s->current_window_packets ? s->current_window_packets : 1u;
                     if (*ack_ctx->window_size == 0u)
                         *ack_ctx->window_size = 1u;
                     *restart_window = 1;
@@ -431,17 +386,7 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
                 ack_ctx->tries = ack_ctx->tries_initial;
                 ack_ctx->backoff = ack_ctx->backoff_initial;
                 s->timing.in_retransmit = 0;
-                if (s->current_tx_mode != *ack_ctx->mode_used)
-                {
-                    *ack_ctx->mode_used = val_tx_mode_sanitize(s->current_tx_mode);
-                    *ack_ctx->window_size = val_tx_mode_window(*ack_ctx->mode_used);
-                    if (*ack_ctx->window_size == 0u)
-                        *ack_ctx->window_size = 1u;
-                    VAL_LOG_INFOF(s, "adaptive: switching sender window to %u", (unsigned)(*ack_ctx->window_size));
-                }
-
-                if (streaming_mode)
-                    return VAL_OK; // streaming: do not gate on window; keep sending
+                // In bounded-window mode, we always gate on window; no streaming fast-path
 
                 if (*ack_ctx->last_acked < ack_ctx->target_ack)
                     continue;
@@ -449,8 +394,7 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
                 return VAL_OK;
             }
 
-            if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
-                continue;
+            // No MODE_SYNC traffic in bounded-window protocol
 
             if (t == VAL_PKT_ERROR)
                 return VAL_ERR_PROTOCOL;
@@ -458,25 +402,7 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
             continue;
         }
 
-    if (streaming_mode && (st == VAL_ERR_TIMEOUT || st == VAL_ERR_CRC))
-        {
-            // In streaming, treat timeout/CRC as a transmission error to disengage streaming and allow de-escalation,
-            // but do not rewind the window; keep sending.
-            val_internal_record_transmission_error(s);
-            if (st == VAL_ERR_TIMEOUT)
-                val_metrics_inc_timeout(s);
-            else if (st == VAL_ERR_CRC)
-                val_metrics_inc_crcerr(s);
-            // Apply any mode change immediately to sender-side window bookkeeping and request a window restart
-            *ack_ctx->mode_used = val_tx_mode_sanitize(s->current_tx_mode);
-            *ack_ctx->window_size = val_tx_mode_window(*ack_ctx->mode_used);
-            if (*ack_ctx->window_size == 0u)
-                *ack_ctx->window_size = 1u;
-            *restart_window = 1;
-            return VAL_OK;
-        }
-
-    if ((st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC))
+        if ((st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC))
         {
             if (st == VAL_ERR_TIMEOUT)
                 VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
@@ -484,50 +410,52 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
                 VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
             return st;
         }
-    // Timeout/CRC path: if we've exhausted retries, return timeout
+        // Timeout/CRC path: if we've exhausted retries, return timeout/CRC; otherwise, trigger a bounded-window restart
         if (ack_ctx->tries == 0)
         {
             if (st == VAL_ERR_TIMEOUT)
+            {
                 VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
+                // Terminal ACK wait timeout
+                val_metrics_inc_timeout_hard(s);
+            }
             else if (st == VAL_ERR_CRC)
                 VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
             return st;
         }
-
-        // In streaming mode, avoid rewinding window on timeout; continue sending
-        if (!streaming_mode)
-    {
+        // Interim TIMEOUT/CRC: backoff one try and request a retransmit by restarting the current window
+        VAL_HEALTH_RECORD_RETRY(s);
+        if (st == VAL_ERR_TIMEOUT)
+            val_metrics_inc_timeout_soft(s);
+        else if (st == VAL_ERR_CRC)
+            val_metrics_inc_crcerr(s);
+        // Mark retransmit path and rewind sender state to last_acked
         val_internal_record_transmission_error(s);
         val_metrics_inc_retrans(s);
-        val_metrics_inc_timeout(s);
         s->timing.in_retransmit = 1;
-
-        long rewind_target = (long)(*ack_ctx->window_start);
-        int64_t curpos_timeout = s->config->filesystem.ftell(s->config->filesystem.fs_context, ack_ctx->file_handle);
-        if (curpos_timeout < 0 || (uint64_t)curpos_timeout != *ack_ctx->window_start)
-            (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, ack_ctx->file_handle, (int64_t)rewind_target, SEEK_SET);
+        // Ensure underlying file position is rewound to last_acked so resend reads correct bytes
+        if (ack_ctx->file_handle && s->config && s->config->filesystem.ftell && s->config->filesystem.fseek)
+        {
+            int64_t pos = s->config->filesystem.ftell(s->config->filesystem.fs_context, ack_ctx->file_handle);
+            if (pos < 0 || (uint64_t)pos != *ack_ctx->last_acked)
+            {
+                (void)s->config->filesystem.fseek(s->config->filesystem.fs_context, ack_ctx->file_handle,
+                                                  (int64_t)(*ack_ctx->last_acked), SEEK_SET);
+            }
+        }
         if (ack_ctx->file_cursor_ptr)
-            *ack_ctx->file_cursor_ptr = *ack_ctx->window_start;
-        *ack_ctx->last_acked = *ack_ctx->window_start;
-        *ack_ctx->next_to_send = *ack_ctx->window_start;
+            *ack_ctx->file_cursor_ptr = *ack_ctx->last_acked;
         *ack_ctx->inflight = 0;
-    }
-    // Wire audit removed
-        *restart_window = 1;
-
-        // Track retry for health monitoring
-        VAL_HEALTH_RECORD_RETRY(s);
-        
-            if (ack_ctx->backoff && s->config->system.delay_ms)
-            s->config->system.delay_ms(ack_ctx->backoff);
-        if (ack_ctx->backoff)
-            ack_ctx->backoff <<= 1;
-        if (ack_ctx->tries)
-            --ack_ctx->tries;
-        *ack_ctx->mode_used = val_tx_mode_sanitize(s->current_tx_mode);
-        *ack_ctx->window_size = val_tx_mode_window(*ack_ctx->mode_used);
+        *ack_ctx->next_to_send = *ack_ctx->last_acked;
+        // Update window size from session (may have been adapted)
+        *ack_ctx->window_size = s->current_window_packets ? s->current_window_packets : 1u;
         if (*ack_ctx->window_size == 0u)
             *ack_ctx->window_size = 1u;
+        // One try consumed; reset backoff boundedly and request restart
+        if (ack_ctx->tries)
+            --ack_ctx->tries;
+        ack_ctx->backoff = 0;
+        *restart_window = 1;
         return VAL_OK;
     }
 }
@@ -546,12 +474,6 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
     uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
     val_status_t st = VAL_OK;
-    // Establish an absolute deadline for resume negotiation as well, matching outer total cap
-    uint32_t abs_start_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
-    uint32_t max_to_abs = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : 1000u;
-    uint32_t total_cap_ms = max_to_abs * 3u;
-    if (total_cap_ms < 12000u) total_cap_ms = 12000u;
-    if (total_cap_ms > 24000u) total_cap_ms = 24000u;
     for (;;)
     {
         VAL_HEALTH_RECORD_OPERATION(s);
@@ -562,24 +484,7 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
     uint8_t buf[128];
     uint32_t len = 0;
     uint64_t off = 0;
-    // Respect absolute deadline by capping this wait
-    uint32_t wait_ms = to;
-        if (abs_start_ms && s->config->system.get_ticks_ms)
-        {
-            uint32_t now_abs = s->config->system.get_ticks_ms();
-            if (now_abs >= abs_start_ms)
-            {
-                uint32_t elapsed = now_abs - abs_start_ms;
-                if (elapsed >= total_cap_ms)
-                {
-                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_META);
-                    return VAL_ERR_TIMEOUT;
-                }
-                uint32_t remaining = total_cap_ms - elapsed;
-                if (remaining == 0) remaining = 1u;
-                if (wait_ms > remaining) wait_ms = remaining;
-            }
-        }
+        uint32_t wait_ms = to;
         // Use centralized RESUME_RESP wait helper which ignores benign traffic and resends on timeout
         st = val_internal_wait_resume_resp(s, wait_ms, tries, backoff, buf, (uint32_t)sizeof(buf), &len, &off);
         if (st == VAL_OK)
@@ -653,10 +558,9 @@ static val_status_t request_resume_and_get_response(val_session_t *s, const char
 // Adaptive controller entrypoint - routes to appropriate sender based on negotiated mode
 static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepath, const char *sender_path, void *progress_ctx)
 {
-    val_tx_mode_t mode_used = val_tx_mode_sanitize(s->current_tx_mode);
-    uint32_t win = val_tx_mode_window(mode_used);
-    if (win == 0u)
-        win = 1u;
+    // Start with current bounded window; fallback to negotiated or 1
+    int mode_used_dummy = 0; // legacy placeholder removed
+    uint32_t win = s->current_window_packets ? s->current_window_packets : (s->negotiated_window_packets ? s->negotiated_window_packets : 1u);
     // Use a simplified Go-Back-N cumulative ACK approach
     // Gather meta
     uint64_t size = 0;
@@ -749,26 +653,6 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         return VAL_ERR_INVALID_ARG;
     }
     val_sender_io_ctx_t io_ctx = {s, f, payload_area, max_payload, size, resume_off};
-
-    // Absolute transfer cap: fail fast before external test watchdogs regardless of intermittent progress.
-    uint32_t abs_start_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
-    // Base this cap on configured max_timeout; clamp to [8000, 20000] ms.
-    uint32_t max_to_abs = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : 1000u;
-    uint32_t total_cap_ms = max_to_abs * 3u;
-    if (total_cap_ms < 12000u) total_cap_ms = 12000u;
-    // Keep the absolute cap comfortably below the test harness watchdog (30s) so we fail gracefully first.
-    if (total_cap_ms > 24000u) total_cap_ms = 24000u;
-
-    // No-progress safety cap: if we make zero forward progress for too long, abort gracefully.
-    // Rationale: Under extreme loss, repeated timeouts can accumulate to the test watchdog (30s).
-    // We cap the no-progress interval to stay clearly below it, yet high enough to ignore transient stalls.
-    uint32_t np_start_ms = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
-    // Base the cap on configured max_timeout and scale moderately; clamp to [3000, 12000] ms.
-    uint32_t max_to = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : 1000u;
-    uint32_t no_progress_cap_ms = max_to * 3u; // ~3x one RTO window
-    if (no_progress_cap_ms < 5000u) no_progress_cap_ms = 5000u;
-    if (no_progress_cap_ms > total_cap_ms)
-        no_progress_cap_ms = total_cap_ms;
     while (last_acked < size)
     {
         if (val_check_for_cancel(s))
@@ -778,36 +662,6 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_ABORTED);
             VAL_LOG_WARN(s, "data(win): local cancel detected at loop top");
             return VAL_ERR_ABORTED;
-        }
-
-        // Abort if total time exceeds cap (regardless of sporadic small progress)
-        if (s->config->system.get_ticks_ms)
-        {
-            uint32_t now_abs = s->config->system.get_ticks_ms();
-            if (abs_start_ms && now_abs >= abs_start_ms && (now_abs - abs_start_ms) > total_cap_ms)
-            {
-                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                if (s->config->callbacks.on_file_complete)
-                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_TIMEOUT);
-                VAL_LOG_WARNF(s, "data(win): absolute watchdog tripped after %u ms", (unsigned)(now_abs - abs_start_ms));
-                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                return VAL_ERR_TIMEOUT;
-            }
-        }
-
-        // Abort if we've made no forward progress for too long (extreme loss scenario safeguard)
-        if (s->config->system.get_ticks_ms)
-        {
-            uint32_t now_np = s->config->system.get_ticks_ms();
-            if (np_start_ms && now_np >= np_start_ms && (now_np - np_start_ms) > no_progress_cap_ms)
-            {
-                s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                if (s->config->callbacks.on_file_complete)
-                    s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_TIMEOUT);
-                VAL_LOG_WARNF(s, "data(win): no-progress watchdog tripped after %u ms", (unsigned)(now_np - np_start_ms));
-                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                return VAL_ERR_TIMEOUT;
-            }
         }
         
         // Check connection health (graceful failure on extreme conditions)
@@ -862,30 +716,8 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         for (;;)
         {
             // Absolute and no-progress watchdogs inside inner loop as well
-            if (s->config->system.get_ticks_ms)
-            {
-                uint32_t now_np = s->config->system.get_ticks_ms();
-                if (abs_start_ms && now_np >= abs_start_ms && (now_np - abs_start_ms) > total_cap_ms)
-                {
-                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                    if (s->config->callbacks.on_file_complete)
-                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_TIMEOUT);
-                    VAL_LOG_WARNF(s, "data(win): absolute watchdog (inner) tripped after %u ms", (unsigned)(now_np - abs_start_ms));
-                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                    return VAL_ERR_TIMEOUT;
-                }
-                if (np_start_ms && now_np >= np_start_ms && (now_np - np_start_ms) > no_progress_cap_ms)
-                {
-                    s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
-                    if (s->config->callbacks.on_file_complete)
-                        s->config->callbacks.on_file_complete(filename, reported_path ? reported_path : "", VAL_ERR_TIMEOUT);
-                    VAL_LOG_WARNF(s, "data(win): no-progress watchdog (inner) tripped after %u ms", (unsigned)(now_np - np_start_ms));
-                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                    return VAL_ERR_TIMEOUT;
-                }
-            }
-            // Fill window
-            while ((s->streaming_engaged ? 1u : inflight) < (s->streaming_engaged ? UINT32_MAX : win) && next_to_send < size)
+            // Fill window bounded by current window size
+            while (inflight < win && next_to_send < size)
             {
                 if (val_check_for_cancel(s))
                 {
@@ -903,14 +735,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 }
             }
 
-            // Streaming: if we've sent all remaining data, skip ACK wait and proceed directly to DONE.
-            // Receiver will send EOF ACK when it receives DONE. No window ACKs needed in streaming mode.
-            if (s->streaming_engaged && next_to_send >= size)
-            {
-                // Update last_acked to break outer loop
-                last_acked = size;
-                break;
-            }
+            // No streaming fast-path; always proceed to ACK wait
 
             const uint64_t target_ack = next_to_send;
             uint32_t t0 = s->config->system.get_ticks_ms();
@@ -929,7 +754,6 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 .last_acked = &last_acked,
                 .next_to_send = &next_to_send,
                 .inflight = &inflight,
-                .mode_used = &mode_used,
                 .window_size = &win,
                 .first_ack_grace_flag = &first_ack_grace,
                 .to_ack = ack_timeout_ms,
@@ -940,48 +764,11 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 .backoff_initial = (s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0),
                 .wait_deadline = wait_deadline,
                 .t0 = t0,
-                .file_cursor_ptr = &io_ctx.file_cursor,
-                .np_deadline_ms = 0u,
-                .abs_deadline_ms = 0u
+                .file_cursor_ptr = &io_ctx.file_cursor
             };
 
             int restart_window = 0;
             uint64_t prev_last_acked = last_acked;
-            // Compute absolute deadline for no-progress watchdog and pass to ack waiter
-            uint32_t np_deadline = 0u;
-            if (s->config->system.get_ticks_ms)
-            {
-                uint32_t now = s->config->system.get_ticks_ms();
-                // Guard against overflow: if adding would wrap, clamp to max uint32
-                uint32_t cap = no_progress_cap_ms;
-                if (np_start_ms && now >= np_start_ms)
-                {
-                    uint32_t elapsed = now - np_start_ms;
-                    if (elapsed >= cap)
-                        np_deadline = now; // already exceeded; enforce immediate timeout inside waiter
-                    else
-                        np_deadline = now + (cap - elapsed);
-                }
-                else
-                {
-                    np_deadline = now + cap;
-                }
-            }
-            ack_ctx.np_deadline_ms = np_deadline;
-            // Compute absolute transfer deadline based on outer absolute cap
-            if (abs_start_ms && s->config->system.get_ticks_ms)
-            {
-                uint32_t now_abs = s->config->system.get_ticks_ms();
-                if (now_abs >= abs_start_ms && (now_abs - abs_start_ms) >= total_cap_ms)
-                {
-                    ack_ctx.abs_deadline_ms = now_abs; // already exceeded
-                }
-                else
-                {
-                    // Safe add: if wrap occurs, let wait loop handle by immediate expiry once crossed
-                    ack_ctx.abs_deadline_ms = abs_start_ms + total_cap_ms;
-                }
-            }
 
             val_status_t ack_status = wait_for_window_ack(&ack_ctx, &restart_window);
             if (ack_status != VAL_OK)
@@ -1000,8 +787,7 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
             }
 
             // Reset no-progress window on real forward progress
-            if (s->config->system.get_ticks_ms && last_acked > prev_last_acked)
-                np_start_ms = s->config->system.get_ticks_ms();
+            (void)prev_last_acked; // progress tracking retained via last_acked and callbacks
 
             // Persist remaining retries/backoff across restarts in this window
             tries_rem = ack_ctx.tries;
@@ -1009,14 +795,8 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
 
             if (restart_window)
             {
-                if (s->current_tx_mode != mode_used)
-                {
-                    mode_used = val_tx_mode_sanitize(s->current_tx_mode);
-                    win = val_tx_mode_window(mode_used);
-                    if (win == 0u)
-                        win = 1u;
-                    VAL_LOG_INFOF(s, "adaptive: restarting sender window at %u after error", (unsigned)win);
-                }
+                // Refresh win from session and continue
+                win = s->current_window_packets ? s->current_window_packets : 1u;
                 // Refill and continue waiting within this window using remaining tries
                 continue;
             }

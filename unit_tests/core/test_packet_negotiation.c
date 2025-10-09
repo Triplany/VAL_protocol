@@ -181,6 +181,20 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
         free(outpath);
         return 1;
     }
+    // Enforce clean metrics on nominal run
+#if VAL_ENABLE_METRICS
+    {
+        ts_metrics_expect_t exp = {0};
+        exp.allow_soft_timeouts = 0;
+        exp.expect_files_sent = 1;
+        exp.expect_files_recv = 1;
+        if (ts_assert_clean_metrics(tx, rx, &exp) != 0)
+        {
+            free(basedir); free(outdir); free(inpath); free(outpath);
+            return 1;
+        }
+    }
+#endif
     if (!files_equal(inpath, outpath))
     {
         fprintf(stderr, "file mismatch under pkt neg case %zu/%zu\n", (size_t)sender_pkt, (size_t)receiver_pkt);
@@ -290,6 +304,21 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
         free(outpath);
         return 1;
     }
+    // Enforce clean metrics on reverse nominal run
+#if VAL_ENABLE_METRICS
+    {
+        ts_metrics_expect_t exp = {0};
+        exp.allow_soft_timeouts = 0;
+        exp.expect_files_sent = 1;
+        exp.expect_files_recv = 1;
+        if (ts_assert_clean_metrics(tx2, rx2, &exp) != 0)
+        {
+            free(outdir2); free(inpath2); free(outpath2);
+            free(basedir); free(outdir); free(inpath); free(outpath);
+            return 1;
+        }
+    }
+#endif
     if (!files_equal(inpath2, outpath2))
     {
         fprintf(stderr, "reverse transfer mismatch\n");

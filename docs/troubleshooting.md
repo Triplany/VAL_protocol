@@ -1,5 +1,4 @@
 # VAL Protocol Troubleshooting Guide
-
 **⚠️ AI-ASSISTED DOCUMENTATION NOTICE**  
 This documentation was created with AI assistance and may contain errors.
 
@@ -36,13 +35,6 @@ This documentation was created with AI assistance and may contain errors.
    ```
 
 2. **Invalid Packet Size**
-   ```c
-   // Must be in range [512, 2*1024*1024]
-   cfg.buffers.packet_size = 4096;  // Valid
-   // cfg.buffers.packet_size = 256;   // TOO SMALL!
-   // cfg.buffers.packet_size = 100000; // TOO LARGE!
-   ```
-
 3. **NULL Buffers**
    ```c
    // Both buffers required
@@ -63,9 +55,7 @@ val_status_t status = val_session_create(&cfg, &session, &detail);
 if (status != VAL_OK) {
     if (detail & VAL_ERROR_DETAIL_CONNECTION) {
         fprintf(stderr, "Transport callbacks missing\n");
-    }
-    if (detail & VAL_ERROR_DETAIL_PERMISSION) {
-        fprintf(stderr, "Filesystem callbacks missing\n");
+
     }
     if (detail & VAL_ERROR_DETAIL_PACKET_SIZE) {
         fprintf(stderr, "Invalid packet size\n");
@@ -73,17 +63,11 @@ if (status != VAL_OK) {
 }
 ```
 
----
-
-### Handshake Timeouts
-
-**Symptom:** Transfer fails immediately with `VAL_ERR_TIMEOUT`
-
-**Causes & Solutions:**
-
 1. **Network Connectivity**
    - Verify network connection
    - Check firewall/NAT settings
+
+**A:** VAL uses AIMD-like adaptation with an RTT-informed timeout. Clean runs increase the congestion window (cwnd) gradually up to the negotiated cap; errors and timeouts reduce it.
    - Test with `ping` or `telnet`
 
 2. **Packet Size Mismatch**
@@ -153,9 +137,9 @@ cfg.debug.min_level = VAL_LOG_DEBUG;  // Or VAL_LOG_TRACE
 
 3. **Window Too Large for Link**
    ```c
-   // Reduce window size
-   cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_8;
-   cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_2;
+   // Reduce effective window
+   cfg.tx_flow.window_cap_packets = 8;
+   cfg.tx_flow.initial_cwnd_packets = 2;
    ```
 
 4. **Excessive Packet Loss**
@@ -165,8 +149,8 @@ cfg.debug.min_level = VAL_LOG_DEBUG;  // Or VAL_LOG_TRACE
    #if VAL_ENABLE_METRICS
    val_metrics_t m;
    val_get_metrics(session, &m);
-   printf("Timeouts: %u, Retransmits: %u, CRC errors: %u\n",
-          m.timeouts, m.retransmits, m.crc_errors);
+   printf("Timeouts: %u (soft=%u hard=%u), Retransmits: %u, CRC errors: %u\n",
+      m.timeouts, m.timeouts_soft, m.timeouts_hard, m.retransmits, m.crc_errors);
    #endif
    ```
 
@@ -394,8 +378,8 @@ val_get_metrics(session, &m);
 
 printf("Packets: sent=%llu recv=%llu\n", m.packets_sent, m.packets_recv);
 printf("Bytes: sent=%llu recv=%llu\n", m.bytes_sent, m.bytes_recv);
-printf("Errors: timeouts=%u retrans=%u crc=%u\n",
-       m.timeouts, m.retransmits, m.crc_errors);
+printf("Errors: timeouts=%u (soft=%u hard=%u) retrans=%u crc=%u\n",
+   m.timeouts, m.timeouts_soft, m.timeouts_hard, m.retransmits, m.crc_errors);
 printf("RTT samples: %u\n", m.rtt_samples);
 #endif
 ```
@@ -443,20 +427,15 @@ wireshark val_capture.pcap
 
 1. **Check Effective Window Size**
    ```c
-   val_tx_mode_t mode;
-   val_get_current_tx_mode(session, &mode);
-   printf("Current window: %u packets\n", (unsigned)mode);
-   
-   // If stuck at low window, check for errors
+   uint32_t cwnd = 0;
+   val_get_cwnd_packets(session, &cwnd);
+   printf("Current cwnd: %u packets\n", (unsigned)cwnd);
    ```
 
-2. **Monitor Streaming Engagement**
+2. **Constrain Growth**
    ```c
-   int streaming = 0;
-   val_is_streaming_engaged(session, &streaming);
-   printf("Streaming: %s\n", streaming ? "YES" : "NO");
-   
-   // Should engage at fastest rung on good links
+   cfg.tx_flow.window_cap_packets = 32;   // cap growth
+   cfg.tx_flow.recovery_success_threshold = 12; // slower increase
    ```
 
 3. **Check Transfer Rate**
@@ -473,14 +452,16 @@ wireshark val_capture.pcap
    cfg.buffers.packet_size = 32768;  // 32 KB
    ```
 
-2. **Increase Max Window**
+2. **Increase Window Cap**
    ```c
-   cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
+   cfg.tx_flow.window_cap_packets = 256;
+   cfg.tx_flow.initial_cwnd_packets = 8;
    ```
 
-3. **Enable Streaming**
+3. **Tune Timeouts**
    ```c
-   cfg.adaptive_tx.allow_streaming = 1;
+   cfg.timeouts.min_timeout_ms = 50;   // low-latency links
+   cfg.timeouts.max_timeout_ms = 2000;
    ```
 
 4. **Reduce Timeouts** (on low-latency links)
@@ -584,17 +565,6 @@ void on_progress(const val_progress_info_t *info) {
 }
 cfg.callbacks.on_progress = on_progress;
 ```
-
-### Q: What is streaming mode and why is it fast?
-
-**A:** Streaming mode is VAL's continuous transmission mode that removes ACK blocking:
-- **Removes window constraint**: Sender continuously transmits until NAK or EOF
-- **ACKs as heartbeats**: ACKs prove liveness, don't gate transmission
-- **Non-blocking**: Uses short polling (2-20ms) instead of full timeout waits
-- **Performance gain varies**: Modest with large windows (WINDOW_64), dramatic with small windows (WINDOW_2/4)
-- **Automatic**: Engages after sustained clean transmission at max window
-
-**Key Benefit:** Enables memory-constrained devices (WINDOW_2/4 + streaming) to achieve throughput comparable to WINDOW_64 with far less RAM.
 
 ### Q: Can I implement compression?
 

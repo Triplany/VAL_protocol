@@ -33,7 +33,7 @@ static int run_receiver(const char *rx_path, unsigned short port, const char *ou
 #if defined(_WIN32)
     char cmd[1600];
     snprintf(cmd, sizeof(cmd),
-             "cmd /C set VAL_LOG_LEVEL=5&& set VAL_LOG_FILE=\"%s\"&& \"%s\" --no-validation --log-level trace %u \"%s\"",
+             "cmd /C set VAL_LOG_LEVEL=5&& set VAL_LOG_FILE=\"%s\"&& \"%s\" --log-level trace %u \"%s\"",
              logfile ? logfile : "", rx_path, (unsigned)port, outdir);
     fprintf(stdout, "[IT] RX: %s\n", cmd);
     fflush(stdout);
@@ -58,7 +58,7 @@ static int run_receiver(const char *rx_path, unsigned short port, const char *ou
         if (logfile && *logfile)
             setenv("VAL_LOG_FILE", logfile, 1);
         setenv("VAL_LOG_LEVEL", "5", 1);
-        execl(rx_path, rx_path, "--no-validation", "--log-level", "trace", portstr, outdir, (char *)NULL);
+        execl(rx_path, rx_path, "--log-level", "trace", portstr, outdir, (char *)NULL);
         _exit(127);
     }
     *pid_out = pid;

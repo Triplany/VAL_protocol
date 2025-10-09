@@ -44,14 +44,11 @@ int main(void)
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
     ts_make_config(&cfg_tx, sb_a, rb_a, packet, &end_tx, VAL_RESUME_NEVER, 0);
     ts_make_config(&cfg_rx, sb_b, rb_b, packet, &end_rx, VAL_RESUME_NEVER, 0);
-    // Defaults from ts_make_config
-    // Favor a modest window to keep runtime well below watchdog even if defaults change
-    cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
-    cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_tx.adaptive_tx.allow_streaming = 1;
-    cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
-    cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_rx.adaptive_tx.allow_streaming = 1;
+    // Flow control: favor a modest window to keep runtime well below watchdog
+    cfg_tx.tx_flow.window_cap_packets = 64;    // upper bound for cwnd
+    cfg_tx.tx_flow.initial_cwnd_packets = 8;   // start with a smallish cwnd
+    cfg_rx.tx_flow.window_cap_packets = 64;
+    cfg_rx.tx_flow.initial_cwnd_packets = 8;
     cfg_tx.timeouts.min_timeout_ms = 100;
     cfg_tx.timeouts.max_timeout_ms = 5000;
     cfg_tx.retries.handshake_retries = 8;

@@ -38,7 +38,7 @@ cfg.transport.io_context = ctx;  // Your custom context
 ```c
 cfg.filesystem.fopen = my_fopen;   // Any byte source/sink
 cfg.filesystem.fread = my_fread;   // Files, RAM, flash, network buffers
-cfg.filesystem.fwrite = my_fwrite; // Streaming compression/decompression
+cfg.filesystem.fwrite = my_fwrite; // Optional compression/decompression
 cfg.filesystem.fseek = my_fseek;
 cfg.filesystem.ftell = my_ftell;
 cfg.filesystem.fclose = my_fclose;
@@ -62,9 +62,9 @@ val_protocol/
 │   ├── val_errors.h      # Error codes and detail masks
 │   └── val_error_strings.h # Optional string utilities (host-only)
 ├── src/                  # Implementation
-│   ├── val_core.c        # Session management, streaming mode, adaptive TX
-│   ├── val_sender.c      # Sender-side logic, continuous transmission
-│   ├── val_receiver.c    # Receiver-side logic, ACK coalescing
+│   ├── val_core.c        # Session management, bounded-window flow control
+│   ├── val_sender.c      # Sender-side logic (AIMD cwnd, adaptive timeout)
+│   ├── val_receiver.c    # Receiver-side logic (ACK coalescing)
 │   ├── val_error_strings.c # Optional error strings
 │   └── val_internal.h    # Internal structures
 └── examples/             # Example implementations
@@ -78,7 +78,7 @@ val_protocol/
 - CRC computation (software fallback)
 - String sanitization
 - Logging infrastructure
-- Adaptive timeout (RFC 6298)
+- Adaptive timeout (RFC 6298-like with Karn’s rule)
 - Low-level packet send/receive
 
 **val_sender.c**:
@@ -86,7 +86,7 @@ val_protocol/
 - File metadata transmission
 - Resume negotiation (sender side)
 - Windowed data transmission
-- Adaptive mode management
+- AIMD congestion control (bounded window)
 - Progress tracking
 
 **val_receiver.c**:
@@ -513,33 +513,43 @@ void esp32_delay_ms(uint32_t ms) {
 | Cellular/4G | 500 | 20000 |
 | Satellite | 1000 | 60000 |
 
-### Adaptive TX Tuning
+### Flow Control Tuning (v0.7)
 
-**High-Speed, Low-Loss Links (LAN):**
+Configure bounded-window flow in `cfg.tx_flow`:
+
+- `window_cap_packets`: Max in-flight packets this endpoint can track (negotiated during handshake).
+- `initial_cwnd_packets`: Optional initial congestion window (0 = auto).
+- `degrade_error_threshold`: Errors before halving cwnd (AIMD); 0 uses defaults.
+- `recovery_success_threshold`: Successful rounds before cwnd += 1; 0 uses defaults.
+- `retransmit_cache_enabled`: Keep a 1-packet cache to accelerate Go-Back-N recovery.
+
+Profiles:
+
+**High-Speed, Low-Loss (LAN):**
 ```c
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_32;
-cfg.adaptive_tx.allow_streaming = 1;
-cfg.adaptive_tx.degrade_error_threshold = 5;
-cfg.adaptive_tx.recovery_success_threshold = 10;
+cfg.tx_flow.window_cap_packets = 512;   // allow large window if RAM permits
+cfg.tx_flow.initial_cwnd_packets = 16;  // ramp quickly
+cfg.tx_flow.degrade_error_threshold = 5;
+cfg.tx_flow.recovery_success_threshold = 10;
+cfg.tx_flow.retransmit_cache_enabled = true;
 ```
 
-**Moderate Links (WiFi):**
+**Moderate (WiFi/WAN):**
 ```c
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_32;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-cfg.adaptive_tx.allow_streaming = 1;
-cfg.adaptive_tx.degrade_error_threshold = 3;
-cfg.adaptive_tx.recovery_success_threshold = 15;
+cfg.tx_flow.window_cap_packets = 64;
+cfg.tx_flow.initial_cwnd_packets = 4;
+cfg.tx_flow.degrade_error_threshold = 3;
+cfg.tx_flow.recovery_success_threshold = 12;
+cfg.tx_flow.retransmit_cache_enabled = true;
 ```
 
-**Constrained/Unreliable (Cellular, Embedded):**
+**Constrained/Embedded (UART/Cellular):**
 ```c
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_8;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_2;
-cfg.adaptive_tx.allow_streaming = 0;
-cfg.adaptive_tx.degrade_error_threshold = 2;
-cfg.adaptive_tx.recovery_success_threshold = 20;
+cfg.tx_flow.window_cap_packets = 4;     // small tracking footprint
+cfg.tx_flow.initial_cwnd_packets = 1;   // conservative start
+cfg.tx_flow.degrade_error_threshold = 2;
+cfg.tx_flow.recovery_success_threshold = 20;
+cfg.tx_flow.retransmit_cache_enabled = false; // optional to save RAM
 ```
 
 ---
@@ -553,12 +563,12 @@ cfg.adaptive_tx.recovery_success_threshold = 20;
 sizeof(val_session_t) ≈ 500 bytes (platform-dependent)
 ```
 
-**Tracking Slots (Adaptive TX):**
+**Tracking Slots (Bounded Window):**
 ```
-max_window_size * sizeof(val_inflight_packet_t)
-= max_window * 32 bytes
+window_cap_packets * sizeof(val_inflight_packet_t)
+= window_cap_packets * ~32 bytes (approx)
 
-Example: 64-packet window = 2 KB
+Example: 64-packet window ≈ 2 KB
 ```
 
 **Total Static Footprint:**
@@ -584,9 +594,9 @@ void my_free(void *ptr, void *context) {
     custom_free(ptr);
 }
 
-cfg.adaptive_tx.allocator.alloc = my_alloc;
-cfg.adaptive_tx.allocator.free = my_free;
-cfg.adaptive_tx.allocator.context = &my_heap;
+cfg.tx_flow.allocator.alloc = my_alloc;
+cfg.tx_flow.allocator.free = my_free;
+cfg.tx_flow.allocator.context = &my_heap;
 ```
 
 **Embedded Pool Allocator Example:**
@@ -612,9 +622,9 @@ void pool_free(void *ptr, void *context) {
 }
 
 static pool_allocator_t my_pool = {0};
-cfg.adaptive_tx.allocator.alloc = pool_alloc;
-cfg.adaptive_tx.allocator.free = pool_free;
-cfg.adaptive_tx.allocator.context = &my_pool;
+cfg.tx_flow.allocator.alloc = pool_alloc;
+cfg.tx_flow.allocator.free = pool_free;
+cfg.tx_flow.allocator.context = &my_pool;
 ```
 
 ---

@@ -217,6 +217,26 @@ static int run_mode_and_check(val_tx_mode_t mode, unsigned expected_cap)
         return 1;
     }
 
+#if VAL_ENABLE_METRICS
+    {
+        ts_metrics_expect_t exp = {0};
+        exp.allow_soft_timeouts = 0;
+        exp.expect_files_sent = -1;
+        exp.expect_files_recv = -1;
+        if (ts_assert_clean_metrics(tx, rx, &exp) != 0)
+        {
+            val_session_destroy(tx);
+            val_session_destroy(rx);
+            test_duplex_free(&d);
+            free(tx_sbuf);
+            free(tx_rbuf);
+            free(rx_sbuf);
+            free(rx_rbuf);
+            return 1;
+        }
+    }
+#endif
+
 #if VAL_ENABLE_WIRE_AUDIT
     // Verify on-wire hygiene and window behavior
     val_wire_audit_t a_tx = {0}, a_rx = {0};

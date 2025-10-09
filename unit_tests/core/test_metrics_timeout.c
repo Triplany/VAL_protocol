@@ -87,13 +87,12 @@ int main(void)
     ts_set_console_logger_with_level(&cfg_tx, VAL_LOG_TRACE);
     ts_set_console_logger_with_level(&cfg_rx, VAL_LOG_TRACE);
 
-    // Use stop-and-wait to make a single ACK drop cause a retransmission deterministically
-    cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
-    cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
-    cfg_tx.adaptive_tx.allow_streaming = 0;
-    cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
-    cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
-    cfg_rx.adaptive_tx.allow_streaming = 0;
+    // Use stop-and-wait behavior by constraining cwnd to 1
+    cfg_tx.tx_flow.window_cap_packets = 1;
+    cfg_tx.tx_flow.initial_cwnd_packets = 1;
+    cfg_rx.tx_flow.window_cap_packets = 1;
+    cfg_rx.tx_flow.initial_cwnd_packets = 1;
+    
     // Timeouts short to keep test fast
     cfg_tx.timeouts.min_timeout_ms = 50;
     cfg_tx.timeouts.max_timeout_ms = 200;

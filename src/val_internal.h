@@ -113,24 +113,16 @@ struct val_session_s
     val_timing_t timing;
     // last error info
     val_error_t last_error;
-    // --- Adaptive transmission state (Phase 1 scaffolding) ---
-    // Negotiated/active mode tracking
-    val_tx_mode_t current_tx_mode;     // current active window rung
-    val_tx_mode_t peer_tx_mode;        // peer's last known window rung
-    val_tx_mode_t min_negotiated_mode; // best performance (largest window) both sides support
-    val_tx_mode_t max_negotiated_mode; // most reliable mode (stop-and-wait)
-    // Streaming negotiation (directional)
-    bool send_streaming_allowed;    // we may stream when we are sender to peer
-    bool recv_streaming_allowed;    // we accept peer streaming to us
-    // Streaming runtime state: engaged when at fastest rung and sustained successes
-    bool streaming_engaged;
-    // Peer runtime streaming state (best-effort, from MODE_SYNC)
-    bool peer_streaming_engaged;
+    // --- Bounded-window flow control state ---
+    // Negotiated caps and dynamic window
+    uint16_t negotiated_window_packets; // min(local desired_tx, peer rx_max)
+    uint16_t current_window_packets;    // dynamic window used by sender (AIMD-tuned)
+    uint16_t peer_tx_window_packets;    // best-effort: peer's tx cap from HELLO (for observability)
+    uint16_t ack_stride_packets;        // receiver's preferred ACK cadence (0 => window)
     // Performance counters
     uint32_t consecutive_errors;
     uint32_t consecutive_successes;
     uint32_t packets_since_mode_change;
-    uint32_t packets_since_mode_sync;
     // Window/sequence tracking
     uint32_t packets_in_flight;
     uint32_t next_seq_to_send;
@@ -142,12 +134,9 @@ struct val_session_s
     void *current_file_handle;
     uint64_t current_file_position;
     uint64_t total_file_size;
-    // Mode sync state
-    uint32_t mode_sync_sequence;
-    uint32_t last_mode_sync_time;
-    // Streaming keepalive timestamps (ms since ticks)
-    uint32_t last_keepalive_send_time; // last time we sent a keepalive (receiver side)
-    uint32_t last_keepalive_recv_time; // last time we observed a keepalive from peer (sender side)
+    // Keepalive timestamps (ms since ticks) – optional
+    uint32_t last_keepalive_send_time;
+    uint32_t last_keepalive_recv_time;
     // Connection health monitoring (graceful failure on extreme conditions)
     struct
     {
@@ -179,106 +168,7 @@ typedef struct val_inflight_packet_s
     uint8_t state; // 0=SENT,1=ACKED,2=TIMEOUT
 } val_inflight_packet_t;
 
-// Transmission mode helpers
-static VAL_FORCE_INLINE int val_tx_mode_is_valid(val_tx_mode_t mode)
-{
-    switch (mode)
-    {
-    case VAL_TX_WINDOW_64:
-    case VAL_TX_WINDOW_32:
-    case VAL_TX_WINDOW_16:
-    case VAL_TX_WINDOW_8:
-    case VAL_TX_WINDOW_4:
-    case VAL_TX_WINDOW_2:
-    case VAL_TX_STOP_AND_WAIT:
-        return 1;
-    default:
-        return 0;
-    }
-}
-
-static VAL_FORCE_INLINE val_tx_mode_t val_tx_mode_sanitize(val_tx_mode_t mode)
-{
-    return val_tx_mode_is_valid(mode) ? mode : VAL_TX_STOP_AND_WAIT;
-}
-
-static VAL_FORCE_INLINE uint32_t val_tx_mode_window(val_tx_mode_t mode)
-{
-    switch (mode)
-    {
-    case VAL_TX_WINDOW_64:     return 64u;
-    case VAL_TX_WINDOW_32:     return 32u;
-    case VAL_TX_WINDOW_16:     return 16u;
-    case VAL_TX_WINDOW_8:      return 8u;
-    case VAL_TX_WINDOW_4:      return 4u;
-    case VAL_TX_WINDOW_2:      return 2u;
-    case VAL_TX_STOP_AND_WAIT: return 1u;
-    default:                   return 1u;
-    }
-}
-
-static VAL_FORCE_INLINE val_tx_mode_t val_tx_mode_from_window(uint32_t window)
-{
-    switch (window)
-    {
-    case 64u: return VAL_TX_WINDOW_64;
-    case 32u: return VAL_TX_WINDOW_32;
-    case 16u: return VAL_TX_WINDOW_16;
-    case 8u:  return VAL_TX_WINDOW_8;
-    case 4u:  return VAL_TX_WINDOW_4;
-    case 2u:  return VAL_TX_WINDOW_2;
-    case 1u:  return VAL_TX_STOP_AND_WAIT;
-    default:
-        if (window >= 64u)
-            return VAL_TX_WINDOW_64;
-        if (window >= 32u)
-            return VAL_TX_WINDOW_32;
-        if (window >= 16u)
-            return VAL_TX_WINDOW_16;
-        if (window >= 8u)
-            return VAL_TX_WINDOW_8;
-        if (window >= 4u)
-            return VAL_TX_WINDOW_4;
-        if (window >= 2u)
-            return VAL_TX_WINDOW_2;
-        return VAL_TX_STOP_AND_WAIT;
-    }
-}
-
-// --- Handshake negotiation helpers (shared) ---
-// Compute the negotiated transmission cap (largest common window rung) from local config and peer handshake.
-static VAL_FORCE_INLINE val_tx_mode_t val_negotiated_tx_cap(const val_config_t *local_cfg, const val_handshake_t *peer_hs)
-{
-    if (!local_cfg || !peer_hs)
-        return VAL_TX_STOP_AND_WAIT;
-    val_tx_mode_t local_max = val_tx_mode_sanitize(local_cfg->adaptive_tx.max_performance_mode);
-    val_tx_mode_t peer_max = val_tx_mode_sanitize((val_tx_mode_t)peer_hs->max_performance_mode);
-    uint32_t local_w = val_tx_mode_window(local_max);
-    uint32_t peer_w = val_tx_mode_window(peer_max);
-    uint32_t shared_w = (local_w < peer_w) ? local_w : peer_w;
-    return val_tx_mode_from_window(shared_w);
-}
-
-// Select a conservative initial mode based on each side's preference and the negotiated cap.
-// Logic: clamp both preferences to the cap, then choose the slower (smaller window) of the two.
-static VAL_FORCE_INLINE val_tx_mode_t val_select_initial_mode(val_tx_mode_t local_pref,
-                                                             val_tx_mode_t peer_pref,
-                                                             val_tx_mode_t shared_cap)
-{
-    val_tx_mode_t lp = val_tx_mode_sanitize(local_pref);
-    val_tx_mode_t pp = val_tx_mode_sanitize(peer_pref);
-    uint32_t cap_w = val_tx_mode_window(shared_cap);
-    // Clamp preferences to cap
-    if (val_tx_mode_window(lp) > cap_w)
-        lp = shared_cap;
-    if (val_tx_mode_window(pp) > cap_w)
-        pp = shared_cap;
-    // Choose the slower (smaller window) of the two
-    uint32_t init_w = (val_tx_mode_window(lp) < val_tx_mode_window(pp))
-                          ? val_tx_mode_window(lp)
-                          : val_tx_mode_window(pp);
-    return val_tx_mode_from_window(init_w);
-}
+// (Legacy transmission mode helpers removed in 0.7)
 
 // Mode synchronization payloads
 // Extended handshake payload with adaptive fields declared in val_wire.h
@@ -409,7 +299,6 @@ val_status_t val_internal_wait_verify_result(val_session_t *s,
                                              uint64_t *out_resume_offset);
 
 // Centralized RESUME_RESP wait with resend-on-timeout policy.
-// Ignores benign MODE_SYNC/ACK packets, aborts on CANCEL, and on timeout resends RESUME_REQ.
 // On success, writes the RESUME_RESP payload bytes into payload_out (up to payload_cap) and sets out_len/off.
 val_status_t val_internal_wait_resume_resp(val_session_t *s,
                                            uint32_t base_timeout_ms,
@@ -498,7 +387,28 @@ uint32_t val_internal_get_timeout(val_session_t *s, val_operation_type_t op);
 static VAL_FORCE_INLINE void val_metrics_inc_timeout(val_session_t *s)
 {
     if (s)
+    {
         s->metrics.timeouts++;
+        s->metrics.timeouts_soft++;
+    }
+}
+// Explicit soft timeout increment (interim slice/backoff events)
+static VAL_FORCE_INLINE void val_metrics_inc_timeout_soft(val_session_t *s)
+{
+    if (s)
+    {
+        s->metrics.timeouts++;
+        s->metrics.timeouts_soft++;
+    }
+}
+// Explicit hard timeout increment (terminal operation failure after retries)
+static VAL_FORCE_INLINE void val_metrics_inc_timeout_hard(val_session_t *s)
+{
+    if (s)
+    {
+        s->metrics.timeouts++;
+        s->metrics.timeouts_hard++;
+    }
 }
 static VAL_FORCE_INLINE void val_metrics_inc_retrans(val_session_t *s)
 {
@@ -550,6 +460,14 @@ static VAL_FORCE_INLINE void val_metrics_add_recv(val_session_t *s, size_t bytes
 }
 #else
 static VAL_FORCE_INLINE void val_metrics_inc_timeout(val_session_t *s)
+{
+    (void)s;
+}
+static VAL_FORCE_INLINE void val_metrics_inc_timeout_soft(val_session_t *s)
+{
+    (void)s;
+}
+static VAL_FORCE_INLINE void val_metrics_inc_timeout_hard(val_session_t *s)
 {
     (void)s;
 }
@@ -621,7 +539,7 @@ val_status_t val_internal_handle_file_resume(val_session_t *session, const char 
 // String utils
 size_t val_internal_strnlen(const char *s, size_t maxlen);
 
-// Handshake payload is defined later with extended fields for adaptive TX (val_handshake_t)
+// Handshake payload is defined in val_wire.h
 
 // Feature bits are defined publicly in val_protocol.h
 // VAL_BUILTIN_FEATURES should include ONLY negotiable/optional features compiled into this build.

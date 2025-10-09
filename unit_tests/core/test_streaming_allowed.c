@@ -58,14 +58,7 @@ static int run_allowed_case(void)
     if (!ts_files_equal(inpath, outpath))
         return 1;
 
-    bool tx_send_ok = false, tx_recv_ok = false, rx_send_ok = false, rx_recv_ok = false;
-    if (val_get_streaming_allowed(tx, &tx_send_ok, &tx_recv_ok) != VAL_OK)
-        return 1;
-    if (val_get_streaming_allowed(rx, &rx_send_ok, &rx_recv_ok) != VAL_OK)
-        return 1;
-    // Sender should be allowed to stream (since receiver accepts incoming)
-    if (!tx_send_ok || !rx_recv_ok)
-        return 1;
+    // Streaming overlay is removed in bounded-window mode; no additional assertions here.
 
     val_session_destroy(tx);
     val_session_destroy(rx);

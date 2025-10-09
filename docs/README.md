@@ -20,7 +20,7 @@ _For Valerie Lee - whose unwavering support over the years has allowed me to cha
 
 ## Overview
 
-VAL Protocol is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. The protocol features **continuous streaming mode** (15-20x faster than pure windowing), adaptive transmission that automatically adjusts to network quality, comprehensive resume capabilities with CRC verification, and a powerful abstraction layer that separates protocol from transport/filesystem/system - enabling custom encryption, compression, hardware acceleration, and use with any byte source.
+VAL Protocol is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. The protocol features a simple bounded-window flow control with adaptive tuning that automatically adjusts to network quality, comprehensive resume capabilities with CRC verification, and a powerful abstraction layer that separates protocol from transport/filesystem/system - enabling custom encryption, compression, hardware acceleration, and use with any byte source.
 
 ## Documentation Structure
 
@@ -67,7 +67,7 @@ This documentation is organized into the following sections:
 
 ## Key Features
 
-- **Streaming Mode**: Continuous transmission using ACKs as keepalive heartbeats rather than flow control - enables high throughput with small windows, particularly beneficial for RAM-constrained devices (WINDOW_2 + streaming can approach WINDOW_64 performance with far less memory)
+- Bounded-window flow control: simple 1..64 packet windows, negotiated at handshake and adapted at runtime
 - **Adaptive Transmission**: Dynamic window sizing (1-64 packets) that automatically escalates/de-escalates based on network quality and RTT measurements
 - **Powerful Abstraction Layer**: Complete separation of concerns - implement custom encryption, compression, in-memory transfers, hardware CRC acceleration, or use any byte source/sink (files, RAM, flash, network buffers)
 - **Resume Support**: Simplified, CRC-verified resume with tail-only verification (configurable cap) and skip-existing policy

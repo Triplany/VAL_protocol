@@ -23,6 +23,15 @@ extern "C"
         uint32_t burst_interval_ms;   // Time between burst events (0 = no bursts)
         uint32_t mtu_bytes;           // Maximum transmission unit (0 = no limit)
         uint32_t seed;                // RNG seed for determinism
+        // UART/USB-CDC realism (optional)
+        // If non-zero, use this many bits per payload byte to estimate serialization time (e.g., 10 for 8N1)
+        uint8_t framing_bits_per_byte;
+        // Typical USB FS CDC packet size (e.g., 64). If non-zero, short writes incur a flush delay.
+        uint16_t usb_cdc_packet_bytes;
+        // Added delay (ms) to simulate USB polling/flush when packets are short (< usb_cdc_packet_bytes)
+        uint16_t usb_cdc_flush_ms;
+        // Optional per-byte inter-character gap (microseconds). Added on top of serialization time.
+        uint32_t inter_byte_gap_us;
     } transport_profile_t;
 
     // Pre-defined transport profiles
@@ -31,6 +40,8 @@ extern "C"
     // Effective throughput: ~11.5 KB/s (115200 bps with 8N1 framing overhead)
     // Typical for embedded serial communications
     extern const transport_profile_t PROFILE_UART_115200;
+    // UART 9600 baud: Very low bandwidth; use tiny files in tests to keep runtime reasonable
+    extern const transport_profile_t PROFILE_UART_9600;
 
     // WiFi 2.4GHz - Good conditions: Medium bandwidth, moderate latency, occasional loss
     // Simulates good WiFi signal with occasional interference

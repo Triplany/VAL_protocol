@@ -31,10 +31,13 @@ static int test_handshake(void) {
     in.features = 0x11;
     in.required = 0x22;
     in.requested = 0x33;
-    in.max_performance_mode = VAL_TX_WINDOW_16;
-    in.preferred_initial_mode = VAL_TX_WINDOW_8;
-    in.mode_sync_interval = 100;
-    in.streaming_flags = 0x5A;
+    // New bounded-window capability exchange fields
+    in.tx_max_window_packets = 16; // sender capability
+    in.rx_max_window_packets = 48; // receiver capability
+    in.ack_stride_packets = 100;   // preferred ACK cadence
+    in.reserved_capabilities[0] = 0x5A; // exercise reserved bytes to ensure roundtrip
+    in.reserved_capabilities[1] = 0xC3;
+    in.reserved_capabilities[2] = 0x3C;
     in.supported_features16 = 0xAA55;
     in.required_features16 = 0x55AA;
     in.requested_features16 = 0x0F0F;
@@ -91,35 +94,6 @@ static int test_error_payload(void) {
     return (in.code == out.code && in.detail == out.detail) ? 0 : 1;
 }
 
-static int test_mode_sync(void) {
-    uint8_t buf[VAL_WIRE_MODE_SYNC_SIZE];
-    val_mode_sync_t in = {0};
-    in.current_mode = VAL_TX_WINDOW_8;
-    in.sequence = 77;
-    in.consecutive_errors = 2;
-    in.consecutive_successes = 10;
-    in.flags = 0x55AA55AAu;
-
-    val_serialize_mode_sync(&in, buf);
-    val_mode_sync_t out = {0};
-    val_deserialize_mode_sync(buf, &out);
-
-    return (memcmp(&in, &out, sizeof(in)) == 0) ? 0 : 1;
-}
-
-static int test_mode_sync_ack(void) {
-    uint8_t buf[VAL_WIRE_MODE_SYNC_ACK_SIZE];
-    val_mode_sync_ack_t in = {0};
-    in.ack_sequence = 99;
-    in.agreed_mode = VAL_TX_WINDOW_4;
-    in.receiver_errors = 3;
-
-    val_serialize_mode_sync_ack(&in, buf);
-    val_mode_sync_ack_t out = {0};
-    val_deserialize_mode_sync_ack(buf, &out);
-
-    return (memcmp(&in, &out, sizeof(in)) == 0) ? 0 : 1;
-}
 
 int main(void) {
     int fails = 0;
@@ -128,8 +102,7 @@ int main(void) {
     fails += test_meta();
     fails += test_resume_resp();
     fails += test_error_payload();
-    fails += test_mode_sync();
-    fails += test_mode_sync_ack();
+    // Legacy MODE_SYNC removed in the bounded-window protocol
 
     if (fails == 0) {
         printf("wire_roundtrip: PASS\n");

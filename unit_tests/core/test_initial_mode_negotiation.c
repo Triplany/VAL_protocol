@@ -90,20 +90,20 @@ static int test_conservative_initial_mode(void)
         goto cleanup;
     }
 
-    // Assert initial/active mode equals the slower preference (4)
-    val_tx_mode_t m = VAL_TX_STOP_AND_WAIT;
-    if (val_get_current_tx_mode(tx, &m) != VAL_OK)
+    // Assert initial/active cwnd equals the slower preference (4)
+    uint32_t cw = 0;
+    if (val_get_cwnd_packets(tx, &cw) != VAL_OK)
     {
-        printf("FAIL: could not query current mode\n");
+        printf("FAIL: could not query cwnd\n");
         goto cleanup;
     }
-    if (m != VAL_TX_WINDOW_4)
+    if (cw != 4u)
     {
-        printf("FAIL: expected initial/active mode 4 but got %d\n", (int)m);
+        printf("FAIL: expected initial/active cwnd 4 but got %u\n", (unsigned)cw);
         goto cleanup;
     }
 
-    printf("PASS: conservative initial mode selected correctly (4)\n");
+    printf("PASS: conservative initial cwnd selected correctly (4)\n");
 
     val_session_destroy(tx);
     val_session_destroy(rx);

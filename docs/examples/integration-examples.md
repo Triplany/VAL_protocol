@@ -583,8 +583,7 @@ void val_receiver_task(void *pvParameters) {
     cfg.system.get_ticks_ms = (uint32_t(*)(void))HAL_GetTick;
     
     // CRC: Hardware
-    cfg.crc.crc32 = stm32_crc32;
-    cfg.crc.crc_context = &hcrc;
+    cfg.crc32_provider = stm32_crc32;
     
     // Buffers (static allocation)
     static uint8_t send_buf[2048];
@@ -597,9 +596,9 @@ void val_receiver_task(void *pvParameters) {
     cfg.timeouts.min_timeout_ms = 500;
     cfg.timeouts.max_timeout_ms = 30000;
     
-    // Adaptive TX (small window)
-    cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_4;
-    cfg.adaptive_tx.allow_streaming = 0;
+    // Bounded-window (small cwnd)
+    cfg.tx_flow.window_cap_packets = 4;
+    cfg.tx_flow.initial_cwnd_packets = 1;
     
     // Resume
     cfg.resume.mode = VAL_RESUME_TAIL;

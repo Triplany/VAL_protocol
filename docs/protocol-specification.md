@@ -32,21 +32,20 @@ VAL Protocol is a blocking-I/O file transfer protocol designed for reliable file
 
 ### 1.3 Key Advantages
 
-**Streaming Mode Performance:**
-- Continuous transmission (15-20x faster than XMODEM/YMODEM)
-- ACKs as heartbeats, not flow control
-- High throughput even with small windows (ideal for embedded systems)
+**Adaptive Windowing:**
+- Bounded window (packet-count based) with AIMD-like adaptation
+- RTT-informed timeouts and backoff
 
 **Powerful Abstraction Layer:**
 - **Transport**: Any reliable byte stream (TCP, UART, RS-485, CAN, USB CDC, SPI)
-- **Filesystem**: Any byte source/sink (files, RAM, flash, network buffers, streaming)
+- **Filesystem**: Any byte source/sink (files, RAM, flash, memory buffers)
 - **System**: Custom clock, allocators, CRC (hardware acceleration support)
 - **Enables**: Encryption, compression, custom protocols, in-memory transfers
 
 ### 1.4 Non-Goals
 
 - **Unreliable Transports**: VAL requires ordered, reliable delivery (not suitable for UDP without reliability layer)
-- **Streaming Media**: Not optimized for real-time live data (designed for file transfer)
+ 
 - **Built-in Encryption**: Security must be provided by transport layer (TLS) or custom filesystem wrapper
 
 ### 1.5 Terminology
@@ -56,8 +55,7 @@ VAL Protocol is a blocking-I/O file transfer protocol designed for reliable file
 - **Session**: Single connection lifecycle with handshake and file transfers
 - **Batch**: Multiple files transferred in one session
 - **MTU**: Maximum Transmission Unit (packet size)
-- **Window**: Number of unacknowledged packets allowed in flight
-- **Rung**: Discrete window size level (1, 2, 4, 8, 16, 32, 64 packets)
+- **Window**: Number of unacknowledged packets allowed in flight (packets)
 
 ## 2. Protocol Architecture
 
@@ -209,10 +207,9 @@ typedef enum {
     VAL_PKT_ERROR       = 9,   // Error report
     VAL_PKT_EOT         = 10,  // End of transmission (batch)
     VAL_PKT_EOT_ACK     = 11,  // ACK for EOT
-    VAL_PKT_DONE_ACK    = 12,  // ACK for DONE
-    VAL_PKT_MODE_SYNC   = 13,  // Adaptive mode synchronization
-    VAL_PKT_MODE_SYNC_ACK = 14, // ACK for mode sync
-    VAL_PKT_DATA_NAK    = 15,  // Negative ACK (Go-Back-N)
+    VAL_PKT_DONE_ACK    = 12,   // ACK for DONE
+    // Values 13 and 14 are reserved in 0.7
+      VAL_PKT_DATA_NAK    = 15,  // Negative ACK (Go-Back-N)
     VAL_PKT_CANCEL      = 0x18 // Emergency cancel (ASCII CAN)
 } val_packet_type_t;
 ```
@@ -262,11 +259,11 @@ struct val_handshake_t {
     uint32_t features;                 // Supported optional features
     uint32_t required;                 // Required features from peer
     uint32_t requested;                // Requested features from peer
-    uint8_t  max_performance_mode;     // Max window rung (val_tx_mode_t)
-    uint8_t  preferred_initial_mode;   // Initial window rung
-    uint16_t mode_sync_interval;       // Reserved (0)
-    uint8_t  streaming_flags;          // Streaming capabilities
-    uint8_t  reserved_streaming[3];    // Reserved (0)
+    // Bounded-window capability exchange
+    uint16_t tx_max_window_packets;    // sender capability (max in-flight packets)
+    uint16_t rx_max_window_packets;    // receiver capability (max accepted in-flight packets)
+    uint8_t  ack_stride_packets;       // preferred ACK cadence (0/1 = ack each packet)
+    uint8_t  reserved_capabilities[3]; // Reserved (0)
     uint16_t supported_features16;     // Reserved (0)
     uint16_t required_features16;      // Reserved (0)
     uint16_t requested_features16;     // Reserved (0)
@@ -279,19 +276,14 @@ struct val_handshake_t {
 1. **Version Compatibility**: Both sides must have the same `version_major`
 2. **Packet Size**: Use minimum of both sides' `packet_size`
 3. **Features**: Intersection of supported features
-4. **TX Mode**: Use most conservative `max_performance_mode`
-5. **Streaming**: Allowed only if both sides agree
+4. **Window Cap**: Effective sender window cap = min(local `tx_max_window_packets`, peer `rx_max_window_packets`)
+5. **ACK Cadence**: Use peer `ack_stride_packets` as a hint (0/1 means ACK per packet)
 
 ### 4.3 Feature Negotiation
 
 **Feature Bits:**
 - Currently no optional features are defined; all core features are implicit and always available
 - Bits 0-31: Reserved for future use
-
-**Streaming Flags:**
-- Bit 0: Can stream when sending
-- Bit 1: Accept peer streaming
-- Bits 2-7: Reserved (0)
 
 ## 5. File Transfer Protocol
 
@@ -396,79 +388,33 @@ Sender                                  Receiver
 
 #### 5.3.2 Adaptive Window Sizing
 
-**Window Rungs (Discrete Levels):**
+The sender maintains a congestion window (cwnd) in packets, bounded by the negotiated window cap.
 
-| Mode | Value | Window Size | Description |
-|------|-------|-------------|-------------|
-| VAL_TX_STOP_AND_WAIT | 1 | 1 packet | Most reliable |
-| VAL_TX_WINDOW_2 | 2 | 2 packets | |
-| VAL_TX_WINDOW_4 | 4 | 4 packets | |
-| VAL_TX_WINDOW_8 | 8 | 8 packets | |
-| VAL_TX_WINDOW_16 | 16 | 16 packets | Balanced |
-| VAL_TX_WINDOW_32 | 32 | 32 packets | |
-| VAL_TX_WINDOW_64 | 64 | 64 packets | Maximum performance |
-
-**Adaptation Algorithm:**
+Additive-increase, multiplicative-decrease (AIMD):
 
 ```
-consecutive_errors++
-if consecutive_errors >= degrade_threshold:
-    degrade to next lower rung
+on error:
+  consecutive_errors++
+  consecutive_successes = 0
+  if consecutive_errors >= degrade_threshold:
+    cwnd = max(1, cwnd/2)
     consecutive_errors = 0
-    consecutive_successes = 0
 
-on successful ACK:
-    consecutive_successes++
-    consecutive_errors = 0
-    if consecutive_successes >= recovery_threshold:
-        upgrade to next higher rung
-        consecutive_successes = 0
+on ACK that advances high-water:
+  consecutive_successes++
+  consecutive_errors = 0
+  if consecutive_successes >= recovery_threshold:
+    cwnd = min(cwnd+1, negotiated_cap)
+    consecutive_successes = 1
 ```
 
-Default thresholds:
-- `degrade_error_threshold`: 3 errors
-- `recovery_success_threshold`: 10 successes
+Default thresholds (unless overridden in configuration):
+- `degrade_error_threshold`: 3
+- `recovery_success_threshold`: 10
 
-#### 5.3.3 Streaming Mode - Continuous Transmission
+#### 5.3.3 Streaming Mode
 
-**Streaming is VAL's high-performance mode** that transforms the protocol from windowed to continuous transmission.
-
-**Key Behavior Changes When Streaming Engaged:**
-
-1. **Window Constraint Removed**: Sender ignores window size and sends continuously until NAK or EOF
-2. **ACKs Become Heartbeats**: ACKs no longer gate transmission - they only prove receiver liveness
-3. **Non-Blocking Operation**: Sender uses short polling (SRTT/4, clamped 2-20ms) instead of full timeout waits
-4. **No Timeout Rewind**: Timeouts don't trigger window rewind - sender keeps pushing forward
-5. **NAK-Triggered Recovery**: Only NAKs (corruption/out-of-order) cause retransmission
-6. **Coalesced ACKs**: Receiver sends ACKs once per window + periodic heartbeats (~3 seconds)
-
-**Activation Requirements:**
-- Both sides advertise streaming capability in HELLO
-- Sender reaches maximum negotiated window mode
-- Sustained clean transmission (10+ consecutive successes)
-- Protocol sends MODE_SYNC with streaming flag set
-
-**Disengagement Triggers:**
-- Any NAK received (corruption detected)
-- Transmission error or timeout exceeds threshold
-- Automatic fallback to conservative windowed mode
-
-**Performance Impact:**
-
-**Window Size vs Streaming Trade-offs:**
-- **WINDOW_64 (pure windowing)**: High throughput, requires most RAM
-- **WINDOW_64 + streaming**: Slightly faster, same RAM
-- **WINDOW_4 + streaming**: Moderate throughput, far less RAM than WINDOW_64
-- **WINDOW_2 + streaming**: Good throughput, minimal RAM (ideal for MCUs)
-- **Streaming advantage increases** as window size decreases
-
-**Memory vs Performance:**
-- Larger windows require more RAM but enable better escalation/de-escalation
-- **Recommended minimum: WINDOW_4** (allows effective adaptation to errors)
-- WINDOW_2/SINGLE + streaming: saves RAM but limits error adaptation
-- WINDOW_64: maximum performance and adaptation range, highest RAM usage
-
-**Implementation:** Streaming is not a separate mode - it's a behavioral overlay that changes how the sender manages window constraints and ACK handling at the highest performance rung.
+Removed in version 0.7. The protocol operates purely in a bounded-window model with cwnd-based adaptation.
 
 #### 5.3.4 Error Recovery (Go-Back-N)
 
@@ -687,11 +633,10 @@ Offset  Size  Field              Value (hex)
 36      4     features           01 00 00 00
 40      4     required           00 00 00 00
 44      4     requested          01 00 00 00
-48      1     max_perf_mode      40  (VAL_TX_WINDOW_64)
-49      1     pref_init_mode     10  (VAL_TX_WINDOW_16)
-50      2     mode_sync_interval 00 00
-52      1     streaming_flags    03  (send=1, recv=1)
-53      3     reserved_streaming 00 00 00
+48      2     tx_max_window_pkts WW WW
+50      2     rx_max_window_pkts WW WW
+52      1     ack_stride_pkts    01  (ACK each packet)
+53      3     reserved_caps      00 00 00
 56      2     supported_feat16   00 00
 58      2     required_feat16    00 00
 60      2     requested_feat16   00 00
@@ -755,20 +700,19 @@ Offset  Size  Field              Value (hex)
 ### 10.3 Conformance Levels
 
 **Level 1 (Minimal):**
-- Stop-and-wait transmission only
+- Stop-and-wait transmission only (cwnd=1)
 - RESUME_NEVER mode
 - Fixed timeouts (no RTT adaptation)
 - No logging
 
 **Level 2 (Standard):**
-- Window-based transmission (up to 16 packets)
+- Window-based transmission (moderate caps)
 - All resume modes
 - Adaptive timeouts (RFC 6298)
 - Basic logging
 
 **Level 3 (Full):**
-- All window rungs (1-64 packets)
-- Streaming pacing overlay
+- Large window caps with cwnd-based adaptation
 - Metrics and diagnostics
 - Full logging support
 
@@ -781,7 +725,7 @@ The following fields are reserved for future protocol versions:
 - `wire_version` in header (currently 0)
 - `reserved2` in header
 - `supported_features16`, `required_features16`, `requested_features16` in handshake
-- `mode_sync_interval` in handshake
+ 
 
 ### 11.2 Potential Features
 
@@ -815,9 +759,8 @@ The following fields are reserved for future protocol versions:
 | EOT | 10 | S→R | None | End of batch |
 | EOT_ACK | 11 | R→S | None | ACK for EOT |
 | DONE_ACK | 12 | R→S | None | ACK for DONE |
-| MODE_SYNC | 13 | S→R | val_mode_sync_t | Mode synchronization |
-| MODE_SYNC_ACK | 14 | R→S | val_mode_sync_ack_t | Mode sync ACK |
-| DATA_NAK | 15 | R→S | offset+reason | Negative ACK |
+
+| DATA_NAK | 13 | R→S | offset+reason | Negative ACK |
 | CANCEL | 0x18 | Both | None | Emergency abort |
 
 S→R: Sender to Receiver  

@@ -17,7 +17,29 @@ const transport_profile_t PROFILE_UART_115200 = {
     .burst_duration_ms = 0,
     .burst_interval_ms = 0,
     .mtu_bytes = 0,         // No MTU limit
-    .seed = 42
+    .seed = 42,
+    .framing_bits_per_byte = 10,  // 8N1
+    .usb_cdc_packet_bytes = 64,   // typical USB FS endpoint size
+    .usb_cdc_flush_ms = 1,        // host controller poll/flush granularity
+    .inter_byte_gap_us = 0
+};
+
+// UART 9600: ~1200 bytes/sec theoretical at 8N1
+const transport_profile_t PROFILE_UART_9600 = {
+    .name = "UART-9600",
+    .bandwidth_bps = 9600,
+    .base_latency_ms = 2,
+    .jitter_ms = 0,
+    .loss_rate = 0.0001f,
+    .burst_loss_rate = 0.0f,
+    .burst_duration_ms = 0,
+    .burst_interval_ms = 0,
+    .mtu_bytes = 0,
+    .seed = 4242,
+    .framing_bits_per_byte = 10,
+    .usb_cdc_packet_bytes = 64,
+    .usb_cdc_flush_ms = 2,
+    .inter_byte_gap_us = 0
 };
 
 // WiFi Good: 10 Mbps effective, moderate latency, occasional loss

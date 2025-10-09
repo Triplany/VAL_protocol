@@ -7,7 +7,7 @@
  * constrained embedded systems.
  * 
  * Features:
- * - Adaptive transmission with window-based flow control (1-64 packets)
+ * - Adaptive transmission with bounded window flow control (packet-count based)
  * - Simplified resume with tail-only CRC verification (NEVER/SKIP_EXISTING/TAIL)
  * - Embedded-friendly: zero dynamic allocations in steady state
  * - Transport agnostic: works over TCP, UART, USB, or any reliable byte stream
@@ -39,10 +39,7 @@ extern "C"
 #include <stdint.h>
 #include <stdbool.h>
 
-// Streaming overlay compile-time flag: default ON unless explicitly disabled by integrator
-#ifndef VAL_ENABLE_STREAMING
-#define VAL_ENABLE_STREAMING 1
-#endif
+// Streaming overlay has been removed in the bounded-window model.
 
 // Protocol constants
 #define VAL_MAGIC 0x56414C00u // "VAL\0"
@@ -70,10 +67,7 @@ extern "C"
         VAL_PKT_EOT = 10,        // end of transmission (batch)
         VAL_PKT_EOT_ACK = 11,    // ack for end of transmission
         VAL_PKT_DONE_ACK = 12,   // ack for end of file
-        // Adaptive mode sync heartbeat/control
-        VAL_PKT_MODE_SYNC = 13,
-        VAL_PKT_MODE_SYNC_ACK = 14,
-        VAL_PKT_DATA_NAK = 15,   // negative ack with next_expected_offset and reason bits
+        VAL_PKT_DATA_NAK = 13,   // negative ack with next_expected_offset and reason bits
     } val_packet_type_t;
 
     // Optional flags for DATA_ACK payload semantics (when payload is present)
@@ -198,36 +192,25 @@ extern "C"
         uint16_t reserved1;
     } val_resume_config_t;
 
-    // Adaptive transmission window rungs (fastest has the lowest numeric value)
-    typedef enum
-    {
-        VAL_TX_WINDOW_64 = 64,     // 64-packet window
-        VAL_TX_WINDOW_32 = 32,     // 32-packet window
-        VAL_TX_WINDOW_16 = 16,     // 16-packet window
-        VAL_TX_WINDOW_8  = 8,      // 8-packet window
-        VAL_TX_WINDOW_4  = 4,      // 4-packet window
-        VAL_TX_WINDOW_2  = 2,      // 2-packet window
-        VAL_TX_STOP_AND_WAIT = 1,  // 1 in flight (stop-and-wait)
-    } val_tx_mode_t;
+    // (Legacy ladder and streaming APIs fully removed in 0.7)
 
+    // Bounded-window, single-knob flow configuration (MCU-first)
     typedef struct
     {
-    // Window rungs (discrete). Streaming is a pacing overlay, not an enum value.
-        val_tx_mode_t max_performance_mode;   // Max window rung supported by this endpoint (cap)
-        val_tx_mode_t preferred_initial_mode; // Initial rung (clamped to cap). If out of range, defaults to cap
-        // Streaming policy: single switch governs both sending and accepting streaming.
-        // If 1, we will stream when sending and we allow the peer to stream to us.
-        // If 0, we will not stream when sending and we require the peer not to stream to us.
-        bool allow_streaming; // false = disallow streaming in either direction for this session; true = allow
-        // Optional +1 MTU retransmit cache for faster Go-Back-N recovery (MCU default: 0)
-        bool retransmit_cache_enabled; // false/true
+        // Max in-flight packets this endpoint desires and can track. Negotiated as min(local, peer_rx_cap).
+        // Set to 0 to use a conservative default (implementation-chosen).
+        uint16_t window_cap_packets;      // e.g., 1..65535 (recommend small caps on MCU)
+        // Optional initial cwnd. 0 means auto (implementation-chosen, typically 1..4).
+        uint16_t initial_cwnd_packets;    // clamped to negotiated cap; 0 = auto
+        // Optional +1 MTU retransmit cache for faster Go-Back-N recovery
+        bool retransmit_cache_enabled;
         uint8_t reserved0;
-        // Adaptive stepping thresholds
-        uint16_t degrade_error_threshold;    // Errors before degrading one rung
-        uint16_t recovery_success_threshold; // Successes before upgrading one rung
-        uint16_t mode_sync_interval;         // Packets between mode sync messages (reserved; optional)
-        val_memory_allocator_t allocator;    // Allocator for session and tracking structures
-    } val_adaptive_tx_config_t;
+        // AIMD stepping thresholds
+        uint16_t degrade_error_threshold;    // Errors before halving cwnd (0 uses default, e.g., 3)
+        uint16_t recovery_success_threshold; // Successes before cwnd+=1 (0 uses default, e.g., 10)
+        // Optional allocator for session/tracking structures
+        val_memory_allocator_t allocator;
+    } val_tx_flow_config_t;
 
     typedef struct
     {
@@ -316,8 +299,8 @@ extern "C"
         // Simple resume configuration
         val_resume_config_t resume;
 
-        // Adaptive transmission configuration (scaffolding; Phase 1)
-        val_adaptive_tx_config_t adaptive_tx;
+    // Flow-control configuration
+    val_tx_flow_config_t tx_flow;
 
         struct
         {
@@ -376,29 +359,13 @@ extern "C"
     void val_clean_path(const char *input, char *output, size_t output_size);
     uint32_t val_crc32(const void *data, size_t length);
 
-    // Adaptive TX helpers
-    // Get the sender's current adaptive transmission mode.
-    // Returns VAL_OK and writes to out_mode on success; VAL_ERR_INVALID_ARG on bad inputs.
-    val_status_t val_get_current_tx_mode(val_session_t *session, val_tx_mode_t *out_mode);
-
-    // Query whether streaming pacing is currently engaged for this session when we are the sender.
-    // Returns VAL_OK and writes 0/1 to out_streaming_engaged on success; VAL_ERR_INVALID_ARG on bad inputs.
-    // Note: Streaming is an overlay on top of the fastest window rung and may toggle based on runtime conditions
-    // (e.g., sustained successes at max rung engage streaming; any error disengages it).
-    val_status_t val_is_streaming_engaged(val_session_t *session, bool *out_streaming_engaged);
-
-    // Best-effort: Query whether the peer has engaged streaming pacing (observed via MODE_SYNC flags).
-    // Returns VAL_OK and writes 0/1 to out_peer_streaming_engaged on success; VAL_ERR_INVALID_ARG on bad inputs.
-    val_status_t val_is_peer_streaming_engaged(val_session_t *session, bool *out_peer_streaming_engaged);
-
-    // Get the peer's last-known adaptive transmission mode (as reported via handshake or mode sync).
-    // This reflects the other side's TX window rung. Returns VAL_OK and writes to out_mode on success.
-    val_status_t val_get_peer_tx_mode(val_session_t *session, val_tx_mode_t *out_mode);
-
-    // Query negotiated streaming permissions for this session.
-    // On success, writes 0/1 to out_send_allowed (we may stream when sending) and out_recv_allowed (we accept peer streaming).
-    // Returns VAL_ERR_INVALID_ARG on bad inputs.
-    val_status_t val_get_streaming_allowed(val_session_t *session, bool *out_send_allowed, bool *out_recv_allowed);
+    // Adaptive TX helpers (bounded window)
+    // Get the current congestion window (packets) used by the sender.
+    // Returns VAL_OK and writes to out_cwnd on success; VAL_ERR_INVALID_ARG on bad inputs.
+    val_status_t val_get_cwnd_packets(val_session_t *session, uint32_t *out_cwnd);
+    // Get the peer's advertised TX cap (packets) from handshake.
+    // Returns VAL_OK and writes to out_cap on success; VAL_ERR_INVALID_ARG on bad inputs.
+    val_status_t val_get_peer_tx_cap_packets(val_session_t *session, uint32_t *out_cap);
 
     // Get the effective negotiated packet size (MTU) for this session.
     // Returns VAL_OK and writes to out_packet_size on success; VAL_ERR_INVALID_ARG on bad inputs.
@@ -437,12 +404,15 @@ extern "C"
         uint64_t packets_recv;
         uint64_t bytes_sent;
         uint64_t bytes_recv;
-        // Per-packet-type counters (index by on-wire type byte; sized for safety)
-        // Includes core packet types (HELLO..MODE_SYNC_ACK) and CANCEL (0x18)
+    // Per-packet-type counters (index by on-wire type byte; sized for safety)
+    // Includes core packet types and CANCEL (0x18)
         uint64_t send_by_type[32];
         uint64_t recv_by_type[32];
         // Reliability/timing
+        // Total timeout events observed (soft + hard). Soft = interim (recoverable) waits; Hard = terminal (operation failed/exhausted).
         uint32_t timeouts;
+        uint32_t timeouts_soft; // slice/interim timeouts that did not end the operation
+        uint32_t timeouts_hard; // terminal timeouts that ended an operation after retries/deadline
         uint32_t retransmits;
         uint32_t crc_errors;
         // Handshake and session

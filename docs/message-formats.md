@@ -78,7 +78,7 @@ struct val_packet_header_t {
 
 **Direction**: Bidirectional (both sender and receiver send HELLO)
 
-**Payload**: `val_handshake_t` (52 bytes)
+**Payload**: `val_handshake_t` (44 bytes)
 
 ```c
 struct val_handshake_t {
@@ -90,11 +90,10 @@ struct val_handshake_t {
     uint32_t features;                 // Supported optional features
     uint32_t required;                 // Required features from peer
     uint32_t requested;                // Requested features from peer
-    uint8_t  max_performance_mode;     // Max TX mode (val_tx_mode_t)
-    uint8_t  preferred_initial_mode;   // Preferred initial TX mode
-    uint16_t mode_sync_interval;       // Reserved (0)
-    uint8_t  streaming_flags;          // Bit 0: can stream, Bit 1: accept streaming
-    uint8_t  reserved_streaming[3];    // Reserved (0)
+    uint16_t tx_max_window_packets;    // Sender capability (max in-flight packets)
+    uint16_t rx_max_window_packets;    // Receiver capability (max accepted in-flight packets)
+    uint8_t  ack_stride_packets;       // Preferred ACK cadence (0/1 = per packet)
+    uint8_t  reserved_capabilities[3]; // Reserved (0)
     uint16_t supported_features16;     // Reserved (0)
     uint16_t required_features16;      // Reserved (0)
     uint16_t requested_features16;     // Reserved (0)
@@ -106,8 +105,8 @@ struct val_handshake_t {
 - Both sides send HELLO with their capabilities
 - Effective packet_size = min(sender_size, receiver_size)
 - Effective features = intersection of supported features
-- Effective TX mode = most conservative of both max_performance_modes
-- Streaming allowed only if both sides agree (streaming_flags)
+- Effective sender cap = min(local tx_max_window_packets, peer rx_max_window_packets)
+- ACK cadence uses peer's ack_stride_packets as a hint
 
 **Wire Format Example**:
 ```
@@ -115,7 +114,7 @@ Header:
   type: 01
   wire_version: 00
   reserved2: 00 00
-  payload_len: 34 00 00 00  (52 in LE)
+  payload_len: 2C 00 00 00  (44 in LE)
   seq: 00 00 00 00
   offset: 00 00 00 00 00 00 00 00
   header_crc: XX XX XX XX
@@ -129,11 +128,10 @@ Payload (52 bytes):
   features: 00 00 00 00        (no optional features)
   required: 00 00 00 00
   requested: 00 00 00 00
-  max_performance_mode: 40     (64)
-  preferred_initial_mode: 10   (16)
-  mode_sync_interval: 00 00
-  streaming_flags: 03          (can stream, accept streaming)
-  reserved_streaming: 00 00 00
+  tx_max_window_packets: WW WW
+  rx_max_window_packets: WW WW
+  ack_stride_packets: 01
+  reserved_capabilities: 00 00 00
   supported_features16: 00 00
   required_features16: 00 00
   requested_features16: 00 00
@@ -202,21 +200,6 @@ struct val_resume_resp_t {
 ```
 
 **Resume Actions**:
-```c
-typedef enum {
-    VAL_RESUME_ACTION_START_ZERO   = 0,  // Start from beginning
-    VAL_RESUME_ACTION_START_OFFSET = 1,  // Resume from resume_offset
-    VAL_RESUME_ACTION_VERIFY_FIRST = 2,  // CRC verification required
-    VAL_RESUME_ACTION_SKIP_FILE    = 3,  // Skip this file entirely
-    VAL_RESUME_ACTION_ABORT_FILE   = 4,  // Abort transfer
-} val_resume_action_t;
-```
-
-**Action Details**:
-
-| Action | resume_offset | verify_crc | verify_length | Meaning |
-|--------|---------------|------------|------------|---------|
-| START_ZERO | 0 | 0 | 0 | Start fresh from beginning |
 | START_OFFSET | N | 0 | 0 | Resume from offset N (no verification) |
 | VERIFY_FIRST | N | CRC | LEN | Verify CRC of LEN bytes at offset N |
 | SKIP_FILE | 0 | 0 | 0 | Skip this file (already complete) |
@@ -393,43 +376,11 @@ struct val_error_payload_t {
 
 ---
 
-### MODE_SYNC (type=13)
-
-**Purpose**: Adaptive mode synchronization
-
-**Direction**: Sender → Receiver
-
-**Payload**: `val_mode_sync_t` (20 bytes)
-
-```c
-struct val_mode_sync_t {
-    uint32_t current_mode;         // Current val_tx_mode_t (LE)
-    uint32_t sequence;             // Sync sequence number (LE)
-    uint32_t consecutive_errors;   // Recent error count (LE)
-    uint32_t consecutive_successes;  // Recent success count (LE)
-    uint32_t flags;                // Bit 0: streaming_engaged (LE)
-};  // 20 bytes
-```
-
 **Purpose**: Inform receiver of sender's current adaptive state
 
 ---
 
-### MODE_SYNC_ACK (type=14)
-
-**Purpose**: Acknowledge mode sync
-
-**Direction**: Receiver → Sender
-
-**Payload**: `val_mode_sync_ack_t` (12 bytes)
-
-```c
-struct val_mode_sync_ack_t {
-    uint32_t ack_sequence;     // Sequence from MODE_SYNC (LE)
-    uint32_t agreed_mode;      // Agreed val_tx_mode_t (LE)
-    uint32_t receiver_errors;  // Receiver's error count (LE)
-};  // 12 bytes
-```
+<!-- Packet type 14 removed in v0.7 (previously reserved). -->
 
 ---
 
@@ -611,8 +562,8 @@ uint64_t val_letoh64(uint64_t v);
 | EOT | 0 | 0 | Header-only |
 | EOT_ACK | 0 | 0 | Header-only |
 | DONE_ACK | 0 | 0 | Header-only |
-| MODE_SYNC | 20 | 20 | 20 bytes |
-| MODE_SYNC_ACK | 12 | 12 | 12 bytes |
+
+
 | DATA_NAK | 12 | 12 | 12 bytes |
 | CANCEL | 0 | 0 | Header-only |
 

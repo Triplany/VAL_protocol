@@ -657,6 +657,7 @@ static void net_sim_send(const void *data, size_t len, test_duplex_t *d)
     const uint8_t *p = (const uint8_t *)data;
     size_t left = len;
     ts_reorder_entry_t *e = reorder_entry_for(d);
+    const transport_profile_t *prof = transport_sim_get_profile();
     while (left > 0)
     {
         size_t chunk = left;
@@ -673,7 +674,31 @@ static void net_sim_send(const void *data, size_t len, test_duplex_t *d)
                 hi = lo;
             chunk = rnd_between(lo, hi);
         }
-        maybe_delay();
+        // UART/USB-CDC pacing: simulate serialization time and flush behavior
+        if (prof && prof->bandwidth_bps)
+        {
+            // Compute bits considering framing (8N1 ~ 10 bits per byte)
+            uint64_t bits = (uint64_t)chunk * 8ull;
+            if (prof->framing_bits_per_byte)
+                bits = (uint64_t)chunk * (uint64_t)prof->framing_bits_per_byte;
+            uint32_t ms = (uint32_t)((bits * 1000ull) / (uint64_t)prof->bandwidth_bps);
+            if (prof->usb_cdc_packet_bytes && chunk < prof->usb_cdc_packet_bytes)
+                ms += prof->usb_cdc_flush_ms;
+            if (ms)
+                ts_delay(ms);
+            if (prof->inter_byte_gap_us)
+            {
+                // Coarse granularity: approximate gap per chunk
+                uint64_t total_us = (uint64_t)prof->inter_byte_gap_us * (uint64_t)chunk;
+                uint32_t add_ms = (uint32_t)(total_us / 1000ull);
+                if (add_ms)
+                    ts_delay(add_ms);
+            }
+        }
+        else
+        {
+            maybe_delay();
+        }
         int drop = (d->faults.drop_frame_per_million && (pcg32() % 1000000u < d->faults.drop_frame_per_million));
         int dup = (!drop && d->faults.dup_frame_per_million && (pcg32() % 1000000u < d->faults.dup_frame_per_million));
         if (!drop)
@@ -725,6 +750,7 @@ static void net_sim_send(const void *data, size_t len, test_duplex_t *d)
 
 static int net_sim_recv(void *buffer, size_t buffer_size, size_t *received, uint32_t timeout_ms, test_duplex_t *d)
 {
+    const transport_profile_t *prof = transport_sim_get_profile();
     if (buffer_size == 0)
     {
         if (received)
@@ -750,7 +776,22 @@ static int net_sim_recv(void *buffer, size_t buffer_size, size_t *received, uint
             want = rnd_between(lo, hi);
         }
         // For stream semantics, do not reorder bytes here; just allow jitter.
-        maybe_delay();
+        if (prof && prof->bandwidth_bps)
+        {
+            // Simulate device/driver pacing on reads as well (USB-CDC polling)
+            uint64_t bits = (uint64_t)want * 8ull;
+            if (prof->framing_bits_per_byte)
+                bits = (uint64_t)want * (uint64_t)prof->framing_bits_per_byte;
+            uint32_t ms = (uint32_t)((bits * 1000ull) / (uint64_t)prof->bandwidth_bps);
+            if (prof->usb_cdc_packet_bytes && want < prof->usb_cdc_packet_bytes)
+                ms += prof->usb_cdc_flush_ms;
+            if (ms)
+                ts_delay(ms);
+        }
+        else
+        {
+            maybe_delay();
+        }
         int ok = test_fifo_pop_exact(d->b2a, dst + total, want, step);
         if (!ok)
         {
@@ -1035,6 +1076,39 @@ uint32_t ts_ticks(void)
     // Fallback: coarse time()
     time_t now = time(NULL);
     return (uint32_t)((uint64_t)now * 1000ull);
+#endif
+}
+// High-resolution monotonic microsecond clock for tests
+uint64_t ts_ticks_us(void)
+{
+#if defined(_WIN32)
+    static LARGE_INTEGER s_freq = {0};
+    LARGE_INTEGER now;
+    if (s_freq.QuadPart == 0)
+    {
+        if (!QueryPerformanceFrequency(&s_freq))
+        {
+            // Fallback to millisecond clock if QPC not available
+            return (uint64_t)ts_ticks() * 1000ull;
+        }
+    }
+    if (!QueryPerformanceCounter(&now))
+    {
+        return (uint64_t)ts_ticks() * 1000ull;
+    }
+    // Convert to microseconds: (now * 1e6) / freq
+    return (uint64_t)((now.QuadPart * 1000000ull) / (uint64_t)s_freq.QuadPart);
+#else
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+    {
+        return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000ull);
+    }
+#endif
+    // Fallback: coarse time()
+    time_t now = time(NULL);
+    return (uint64_t)now * 1000000ull;
 #endif
 }
 void ts_delay(uint32_t ms)
@@ -1611,6 +1685,49 @@ void ts_receiver_warmup(const val_config_t *cfg, uint32_t ms)
     if (cfg && cfg->system.delay_ms)
         cfg->system.delay_ms(ms);
 }
+
+#if VAL_ENABLE_METRICS
+int ts_assert_clean_metrics(val_session_t *tx, val_session_t *rx, const ts_metrics_expect_t *exp)
+{
+    val_metrics_t mtx = {0}, mrx = {0};
+    if ((tx && val_get_metrics(tx, &mtx) != VAL_OK) || (rx && val_get_metrics(rx, &mrx) != VAL_OK))
+    {
+        fprintf(stderr, "val_get_metrics failed in ts_assert_clean_metrics\n");
+        return -1;
+    }
+    // Optional file count sanity
+    if (exp)
+    {
+        if (exp->expect_files_sent >= 0 && (int)mtx.files_sent != exp->expect_files_sent)
+        {
+            fprintf(stderr, "metrics files_sent mismatch: got=%u exp=%d\n", mtx.files_sent, exp->expect_files_sent);
+            return -2;
+        }
+        if (exp->expect_files_recv >= 0 && (int)mrx.files_recv != exp->expect_files_recv)
+        {
+            fprintf(stderr, "metrics files_recv mismatch: got=%u exp=%d\n", mrx.files_recv, exp->expect_files_recv);
+            return -3;
+        }
+    }
+    // Cleanliness checks
+    int soft_ok = exp && exp->allow_soft_timeouts;
+    if (mtx.retransmits != 0 || mrx.retransmits != 0 ||
+        mtx.timeouts_hard != 0 || mrx.timeouts_hard != 0 ||
+        mtx.crc_errors != 0 || mrx.crc_errors != 0)
+    {
+        fprintf(stderr, "unexpected reliability events: tx[h=%u r=%u c=%u s=%u] rx[h=%u r=%u c=%u s=%u]\n",
+                mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors, mtx.timeouts_soft,
+                mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors, mrx.timeouts_soft);
+        return -4;
+    }
+    if (!soft_ok && (mtx.timeouts_soft != 0 || mrx.timeouts_soft != 0))
+    {
+        fprintf(stderr, "unexpected soft timeouts: tx=%u rx=%u\n", mtx.timeouts_soft, mrx.timeouts_soft);
+        return -5;
+    }
+    return 0;
+}
+#endif
 
 // ---- Fake clock support ----
 static struct

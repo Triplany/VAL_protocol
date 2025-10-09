@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.0] - 2025-10-04
 
 ### Added
-- **Streaming Mode**: Continuous non-blocking transmission using ACKs as heartbeats (not flow control) - provides significant performance improvement, especially beneficial for memory-constrained devices (enables high throughput with small windows like WINDOW_2/4)
+Removed: Streaming pacing overlay. Protocol now uses a single bounded-window model with cwnd-based adaptation.
 - **Adaptive Transmission System**: Dynamic window-based flow control with discrete rungs (1, 2, 4, 8, 16, 32, 64 packets) that automatically adjusts based on network conditions
 - **Powerful Abstraction Layer**: Complete separation of protocol from transport/filesystem/system - enables custom encryption, compression, hardware CRC, in-memory transfers, any byte source
 - **Simplified Resume Modes**: NEVER, SKIP_EXISTING, TAIL (tail verification with configurable cap and unified mismatch policy)
@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Breaking**: Simplified resume configuration (single `val_resume_config_t` struct)
 - **Breaking**: Adaptive TX uses discrete window rungs instead of mixed modes
-- **Breaking**: Streaming is pacing behavior, not a separate transmission mode
+- **Breaking**: Removed streaming mode and mode ladder; replaced with bounded-window cwnd engine
 - **Breaking**: Transport `recv()` signature changed to support timeout indication
 - **Improved**: Resume verification now supports tail and full-prefix modes with configurable windows
 - **Improved**: Error detail masks reorganized with clear category segmentation
@@ -71,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Resume verification now correctly handles files larger than incoming size
 - CRC verification window capping for responsive embedded systems (2 MB tail default)
-- Mode synchronization handles directional streaming permissions correctly
+Removed: Mode synchronization and streaming permissions
 - Header CRC computation excludes reserved fields properly
 - Transport flush called after control packets for better reliability
 

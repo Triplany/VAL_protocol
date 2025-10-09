@@ -78,6 +78,22 @@ int main(void)
     const char *files[1] = {in};
     val_status_t st = val_send_files(tx, files, 1, NULL);
     ts_join_thread(th);
+    // Enforce clean metrics on nominal fragmented transport (no induced loss/jitter)
+#if VAL_ENABLE_METRICS
+    {
+        ts_metrics_expect_t exp = {0};
+        exp.allow_soft_timeouts = 1; // allow header polling soft timeouts
+        exp.expect_files_sent = -1;
+        exp.expect_files_recv = -1;
+        if (ts_assert_clean_metrics(tx, rx, &exp) != 0)
+        {
+            val_session_destroy(tx);
+            val_session_destroy(rx);
+            ts_net_sim_reset();
+            return 3;
+        }
+    }
+#endif
     val_session_destroy(tx);
     val_session_destroy(rx);
     ts_net_sim_reset();

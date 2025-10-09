@@ -21,7 +21,6 @@ endforeach()
 # Build options
 option(VAL_ENABLE_ERROR_STRINGS "Build optional error string utilities (host-only)" ON)
 option(VAL_ENABLE_METRICS "Enable compile-time protocol metrics counters and timing" OFF)
-option(VAL_ENABLE_STREAMING "Enable streaming overlay (heartbeat/MODE_SYNC/tight polls)" ON)
 
 # Platform-specific settings
 if(WIN32)
@@ -60,11 +59,7 @@ if(VAL_ENABLE_METRICS)
     target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_METRICS=1)
 endif()
 
-if(VAL_ENABLE_STREAMING)
-    target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_STREAMING=1)
-else()
-    target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_STREAMING=0)
-endif()
+# Streaming overlay removed in protocol v0.7 — no build-time switch remains
 
  
 

@@ -427,8 +427,7 @@ void receiver_task(void) {
     cfg.system.get_ticks_ms = stm32_get_ticks_ms;
     
     // CRC: Hardware accelerated
-    cfg.crc.crc32 = stm32_crc32;
-    cfg.crc.crc_context = &hcrc;
+    cfg.crc32_provider = stm32_crc32;
     
     // Small buffers for MCU (1 KB)
     static uint8_t send_buf[1024];
@@ -441,10 +440,9 @@ void receiver_task(void) {
     cfg.timeouts.min_timeout_ms = 500;
     cfg.timeouts.max_timeout_ms = 30000;
     
-    // Conservative adaptive TX (small window)
-    cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_4;
-    cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_2;
-    cfg.adaptive_tx.allow_streaming = 0;
+    // Conservative bounded-window (small cwnd)
+    cfg.tx_flow.window_cap_packets = 4;      // track up to 4 in-flight packets
+    cfg.tx_flow.initial_cwnd_packets = 1;    // start conservatively
     
     // Simple resume
     cfg.resume.mode = VAL_RESUME_TAIL;
@@ -473,7 +471,7 @@ void receiver_task(void) {
 
 ## See Also
 
-- [Advanced Features](advanced-features.md) - Adaptive TX, streaming, diagnostics
+- [Advanced Features](advanced-features.md) - Flow control, metrics, diagnostics
 - [Integration Examples](integration-examples.md) - Platform-specific implementations
 - [API Reference](../api-reference.md) - Complete API documentation
 - [Getting Started](../getting-started.md) - Full setup guide

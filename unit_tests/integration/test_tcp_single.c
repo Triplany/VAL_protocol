@@ -35,7 +35,7 @@ static int run_receiver(const char *rx_path, unsigned short port, const char *ou
 #if defined(_WIN32)
     char cmd[2000];
     // Disable validation and enable verbose logging directly to a file; also echo the command for CTest
-    snprintf(cmd, sizeof(cmd), "\"%s\" --no-validation --log-level trace --log-file \"%s\" %u \"%s\"", rx_path,
+    snprintf(cmd, sizeof(cmd), "\"%s\" --log-level trace --log-file \"%s\" %u \"%s\"", rx_path,
              logfile ? logfile : "", (unsigned)port, outdir);
     fprintf(stdout, "[IT] RX: %s\n", cmd);
     fflush(stdout);
@@ -62,7 +62,7 @@ static int run_receiver(const char *rx_path, unsigned short port, const char *ou
     {
         char portstr[16];
         snprintf(portstr, sizeof(portstr), "%u", (unsigned)port);
-        execl(rx_path, rx_path, "--no-validation", "--log-level", "trace", "--log-file", logfile ? logfile : "", portstr, outdir,
+      execl(rx_path, rx_path, "--log-level", "trace", "--log-file", logfile ? logfile : "", portstr, outdir,
               (char *)NULL);
         _exit(127);
     }

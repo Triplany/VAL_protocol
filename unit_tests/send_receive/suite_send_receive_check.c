@@ -95,6 +95,46 @@ static int test_single_file_check(void)
     const char *files[1] = {inpath};
     val_status_t st = val_send_files(tx, files, 1, NULL);
     ts_join_thread(th);
+    
+#if VAL_ENABLE_METRICS
+    {
+        val_metrics_t mtx = {0}, mrx = {0};
+        if (val_get_metrics(tx, &mtx) == VAL_OK && val_get_metrics(rx, &mrx) == VAL_OK)
+        {
+            if (mtx.files_sent != 1 || mrx.files_recv != 1)
+            {
+                fprintf(stderr, "metrics mismatch files: tx_sent=%u rx_recv=%u\n", mtx.files_sent, mrx.files_recv);
+                val_session_destroy(tx);
+                val_session_destroy(rx);
+                free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
+                return 1;
+            }
+            if (mtx.bytes_sent == 0 || mrx.bytes_recv == 0)
+            {
+                fprintf(stderr, "metrics bytes should be non-zero: tx_bytes=%llu rx_bytes=%llu\n",
+                        (unsigned long long)mtx.bytes_sent, (unsigned long long)mrx.bytes_recv);
+                val_session_destroy(tx);
+                val_session_destroy(rx);
+                free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
+                return 1;
+            }
+            // Under ideal, no-fault conditions we expect no timeouts, retransmits, or CRC errors
+            if (mtx.timeouts != 0 || mtx.timeouts_soft != 0 || mtx.timeouts_hard != 0 ||
+                mtx.retransmits != 0 || mtx.crc_errors != 0 ||
+                mrx.timeouts != 0 || mrx.timeouts_soft != 0 || mrx.timeouts_hard != 0 ||
+                mrx.retransmits != 0 || mrx.crc_errors != 0)
+            {
+                fprintf(stderr, "unexpected reliability events: tx[t=%u s=%u h=%u r=%u c=%u] rx[t=%u s=%u h=%u r=%u c=%u]\n",
+                        mtx.timeouts, mtx.timeouts_soft, mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors,
+                        mrx.timeouts, mrx.timeouts_soft, mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors);
+                val_session_destroy(tx);
+                val_session_destroy(rx);
+                free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
+                return 1;
+            }
+        }
+    }
+#endif
     if (st != VAL_OK)
     {
         fprintf(stderr, "val_send_files failed: %d\n", st);
@@ -201,6 +241,45 @@ static int test_multi_file_check(void)
     const char *files[2] = {in1, in2};
     val_status_t st = val_send_files(tx, files, 2, NULL);
     ts_join_thread(th);
+    
+#if VAL_ENABLE_METRICS
+    {
+        val_metrics_t mtx = {0}, mrx = {0};
+        if (val_get_metrics(tx, &mtx) == VAL_OK && val_get_metrics(rx, &mrx) == VAL_OK)
+        {
+            if (mtx.files_sent != 2 || mrx.files_recv != 2)
+            {
+                fprintf(stderr, "metrics mismatch files: tx_sent=%u rx_recv=%u\n", mtx.files_sent, mrx.files_recv);
+                val_session_destroy(tx);
+                val_session_destroy(rx);
+                free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
+                return 1;
+            }
+            if (mtx.bytes_sent == 0 || mrx.bytes_recv == 0)
+            {
+                fprintf(stderr, "metrics bytes should be non-zero: tx_bytes=%llu rx_bytes=%llu\n",
+                        (unsigned long long)mtx.bytes_sent, (unsigned long long)mrx.bytes_recv);
+                val_session_destroy(tx);
+                val_session_destroy(rx);
+                free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
+                return 1;
+            }
+            if (mtx.timeouts != 0 || mtx.timeouts_soft != 0 || mtx.timeouts_hard != 0 ||
+                mtx.retransmits != 0 || mtx.crc_errors != 0 ||
+                mrx.timeouts != 0 || mrx.timeouts_soft != 0 || mrx.timeouts_hard != 0 ||
+                mrx.retransmits != 0 || mrx.crc_errors != 0)
+            {
+                fprintf(stderr, "unexpected reliability events (multi): tx[t=%u s=%u h=%u r=%u c=%u] rx[t=%u s=%u h=%u r=%u c=%u]\n",
+                        mtx.timeouts, mtx.timeouts_soft, mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors,
+                        mrx.timeouts, mrx.timeouts_soft, mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors);
+                val_session_destroy(tx);
+                val_session_destroy(rx);
+                free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
+                return 1;
+            }
+        }
+    }
+#endif
     if (st != VAL_OK)
     {
         fprintf(stderr, "val_send_files failed: %d\n", st);

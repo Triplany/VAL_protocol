@@ -1,6 +1,3 @@
-# VAL Protocol Documentation
-# VAL Protocol Documentation
-
 📚 **[Complete Documentation](docs/README.md)** | [Getting Started](docs/getting-started.md) | [API Reference](docs/api-reference.md) | [Protocol Spec](docs/protocol-specification.md)
 
 - **Quick Start**: [Getting Started Guide](docs/getting-started.md)
@@ -24,7 +21,7 @@
 - **Pre-1.0 Policy**: Backward compatibility isn't guaranteed until v1.0
 - **Wire Format**: Fixed header + variable payload + trailer CRC; all multi-byte fields are little-endian
 - **Packet Header**: Includes reserved `wire_version` byte (always 0); receivers validate and reject non-zero for future compatibility
-- **Flow Control**: Cumulative DATA_ACKs, DONE_ACK, and two CRCs (header + trailer) for integritytile Adaptive Link Protocol
+- **Flow Control**: Bounded-window with cumulative DATA_ACKs, DONE_ACK, and two CRCs (header + trailer)
 
 **⚠️ EARLY DEVELOPMENT NOTICE**
 VAL Protocol v0.7 is ready for testing and evaluation but not production-ready. Backward compatibility is not guaranteed until v1.0.
@@ -39,12 +36,11 @@ _Dedicated to Valerie Lee - for all her support over the years allowing me to ch
 
 ## Overview
 
-VAL Protocol is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. A small, efficient protocol featuring fixed header + variable payload (bounded by a negotiated MTU) + trailer CRC. It supports adaptive transmission with continuous streaming mode, comprehensive resume modes, cumulative ACKs, and avoids dynamic allocations in steady state. Integrity is enforced by header and trailer CRCs; whole-file CRCs are not used on the wire.
+VAL Protocol is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. A small, efficient protocol featuring fixed header + variable payload (bounded by a negotiated MTU) + trailer CRC. It supports a bounded congestion window with AIMD, comprehensive resume modes, cumulative ACKs, and avoids dynamic allocations in steady state. Integrity is enforced by header and trailer CRCs; whole-file CRCs are not used on the wire.
 
 ### Key Features
 
-- **Streaming Mode**: Continuous non-blocking transmission using ACKs as heartbeats (not flow control) - provides major speedup over pure windowing, especially powerful for memory-constrained devices (e.g., WINDOW_2 + streaming vs WINDOW_64 saves RAM while maintaining high throughput)
-- **Adaptive Transmission**: Dynamic window sizing (1-64 packets) that automatically adjusts to network conditions - minimum WINDOW_4 recommended for effective escalation/de-escalation
+- **Bounded Windowing**: Congestion window negotiated at handshake (packet-count based) and adapted over time using success/error signals
 - **Powerful Abstraction Layer**: Complete separation of protocol from transport, filesystem, and system - enables custom encryption, compression, in-memory transfers, any byte source
 - **Resume Support**: Simplified, CRC-verified resume with tail-only verification (configurable cap; default small cap); also supports skip-existing
 - **Embedded-Friendly**: Zero dynamic allocations in steady state, configurable memory footprint, works on bare-metal
@@ -65,33 +61,22 @@ VAL Protocol is a robust, blocking-I/O file transfer protocol library written in
 - On-wire header (24 bytes):
   - type (1), wire_version (1, always 0), reserved2 (2), payload_len (4), seq (4), offset (8), header_crc (4)
 - Integrity: CRC-32 over header (bytes 0–19), and a trailer CRC over header+payload+padding
-- Handshake (HELLO): includes version, packet_size, max/preferred TX mode, and streaming_flags
-- Streaming flags (include/val_wire.h):
-  - VAL_STREAM_CAN_SEND (bit 0) — this endpoint can stream when sending
-  - VAL_STREAM_ACCEPT (bit 1) — this endpoint accepts a streaming peer
-  - Effective permissions are directional and visible via val_get_streaming_allowed()
+- Handshake (HELLO): includes version, packet_size, and window preferences/caps
 
 ## Features (from source)
 
 - Feature bits: see `include/val_protocol.h` and `val_get_builtin_features()`
-  - Currently no optional features are defined; all core features (windowing, streaming, resume) are implicit and always available.
+  - Currently no optional features are defined; all core features (bounded window, resume) are implicit and always available.
 - Resume configuration
   - Modes (see `val_resume_mode_t`): `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_TAIL`.
   - Tail mode uses a trailing verification window with a configurable cap (`resume.tail_cap_bytes`), clamped internally (up to 256 MiB). Optional `min_verify_bytes` avoids too-small windows. On mismatch, the policy is unified via `resume.mismatch_skip` (0 = restart from zero, 1 = skip the file).
   - Sizes/offsets on wire are 64‑bit LE.
-- Adaptive transmitter
-  - Window-only rungs: `VAL_TX_WINDOW_64/32/16/8/4/2` and `VAL_TX_STOP_AND_WAIT` (larger enum = larger window; STOP_AND_WAIT (1) is the slowest).
-  - Streaming is not a distinct mode; it’s sender pacing. If both sides agree, the sender uses RTT-derived micro-polling between ACK waits to keep the pipe full.
-  - Streaming negotiation happens in HELLO via compact `streaming_flags`:
-    - bit0: this endpoint can stream when sending
-    - bit1: this endpoint accepts an incoming peer that streams to it
-    - Effective permissions are directional and can be queried with `val_get_streaming_allowed()`.
-  - RTT-derived pacing: poll interval ≈ SRTT/4 clamped to 2–20 ms; falls back to a conservative value when no samples exist.
+- Flow control
+  - Single knob: `val_tx_flow_config_t` in `val_config_t` with `window_cap_packets`, `initial_cwnd_packets`, thresholds, and optional retransmit cache
   - Accessors:
-    - `val_get_current_tx_mode(session, &out_mode)` — current window rung
-    - `val_get_streaming_allowed(session, &send_ok, &recv_ok)` — negotiated permissions
-    - `val_is_streaming_engaged(session, &engaged)` — whether pacing is currently engaged on this side
-    - `val_get_peer_tx_mode(session, &out_mode)`, `val_is_peer_streaming_engaged(session, &engaged)` — best-effort peer state
+    - `val_get_cwnd_packets(session, &out_cwnd)` — current congestion window (packets)
+    - `val_get_peer_tx_cap_packets(session, &out_cap)` — peer-advertised TX cap (packets)
+    - `val_get_effective_packet_size(session, &out_packet_size)` — negotiated MTU
 - Diagnostics (optional, compile‑time)
   - Metrics: `VAL_ENABLE_METRICS` — packet/byte counters, timeouts, retransmits, CRC errors, etc.
   - Packet capture hook: configure `config.capture.on_packet` to observe TX/RX packets (type, sizes, offset)

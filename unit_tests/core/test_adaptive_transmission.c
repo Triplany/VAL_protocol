@@ -144,18 +144,15 @@ static int test_mode_negotiation_receiver_limits(void)
 
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_tx.adaptive_tx.allow_streaming = 1;
     cfg_tx.adaptive_tx.degrade_error_threshold = 3;
     cfg_tx.adaptive_tx.recovery_success_threshold = 5;
-    cfg_tx.adaptive_tx.mode_sync_interval = 25;
     cfg_tx.adaptive_tx.allocator.alloc = NULL;
     cfg_tx.adaptive_tx.allocator.free = NULL;
     cfg_tx.adaptive_tx.allocator.context = NULL;
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_4;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_4;
-    cfg_rx.adaptive_tx.allow_streaming = 1;
-    cfg_rx.adaptive_tx.mode_sync_interval = 25;
+    
     cfg_rx.adaptive_tx.allocator.alloc = NULL;
     cfg_rx.adaptive_tx.allocator.free = NULL;
     cfg_rx.adaptive_tx.allocator.context = NULL;
@@ -279,20 +276,17 @@ static int test_key_window_sizes(void)
         // Force specific mode
         cfg_tx.adaptive_tx.max_performance_mode = mode;
         cfg_tx.adaptive_tx.preferred_initial_mode = mode;
-    cfg_tx.adaptive_tx.allow_streaming = 1;
-    cfg_tx.adaptive_tx.allow_streaming = 1;
+    
         cfg_tx.adaptive_tx.degrade_error_threshold = 100;
         cfg_tx.adaptive_tx.recovery_success_threshold = 100;
-        cfg_tx.adaptive_tx.mode_sync_interval = 25;
+        
         cfg_tx.adaptive_tx.allocator.alloc = NULL;
         cfg_tx.adaptive_tx.allocator.free = NULL;
         cfg_tx.adaptive_tx.allocator.context = NULL;
 
         cfg_rx.adaptive_tx.max_performance_mode = mode;
         cfg_rx.adaptive_tx.preferred_initial_mode = mode;
-    cfg_rx.adaptive_tx.allow_streaming = 1;
-    cfg_rx.adaptive_tx.allow_streaming = 1;
-        cfg_rx.adaptive_tx.mode_sync_interval = 25;
+        
         cfg_rx.adaptive_tx.allocator.alloc = NULL;
         cfg_rx.adaptive_tx.allocator.free = NULL;
         cfg_rx.adaptive_tx.allocator.context = NULL;
@@ -411,17 +405,14 @@ static int test_adaptive_mode_transitions_small(void)
     // Make adaptation fast and visible; use WINDOW_64 as highest-performance rung
     cfg_tx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_tx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_tx.adaptive_tx.allow_streaming = 1;
-    cfg_tx.adaptive_tx.allow_streaming = 1;
+    
     cfg_tx.adaptive_tx.degrade_error_threshold = 1;    // on first trouble
     cfg_tx.adaptive_tx.recovery_success_threshold = 2; // quick recovery
-    cfg_tx.adaptive_tx.mode_sync_interval = 10;
+    
 
     cfg_rx.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
     cfg_rx.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_8;
-    cfg_rx.adaptive_tx.allow_streaming = 1;
-    cfg_rx.adaptive_tx.allow_streaming = 1;
-    cfg_rx.adaptive_tx.mode_sync_interval = 10;
+    
 
     val_session_t *tx = NULL, *rx = NULL;
     uint32_t dtx = 0, drx = 0;
@@ -444,13 +435,13 @@ static int test_adaptive_mode_transitions_small(void)
     if (verify_file_integrity(infile1, outfile1, "adaptive_phase1") != 0)
         goto cleanup;
 
-    val_tx_mode_t mode_after_loss = VAL_TX_STOP_AND_WAIT;
-    if (val_get_current_tx_mode(tx, &mode_after_loss) != VAL_OK)
+    uint32_t cw_after_loss = 0;
+    if (val_get_cwnd_packets(tx, &cw_after_loss) != VAL_OK)
     {
-        printf("FAIL: Could not read current TX mode after phase 1\n");
+        printf("FAIL: Could not read cwnd after phase 1\n");
         goto cleanup;
     }
-    printf("DEBUG: Mode after high-loss phase: %d (numeric equals window size; higher is higher performance)\n", (int)mode_after_loss);
+    printf("DEBUG: cwnd after high-loss phase: %u\n", (unsigned)cw_after_loss);
 
     // Phase 2: remove loss and send another tiny file; expect an upgrade relative to phase 1
     end_tx.faults.drop_frame_per_million = 0;
@@ -474,23 +465,23 @@ static int test_adaptive_mode_transitions_small(void)
     if (verify_file_integrity(infile2, outfile2, "adaptive_phase2") != 0)
         goto cleanup;
 
-    val_tx_mode_t mode_after_recovery = VAL_TX_STOP_AND_WAIT;
-    if (val_get_current_tx_mode(tx, &mode_after_recovery) != VAL_OK)
+    uint32_t cw_after_recovery = 0;
+    if (val_get_cwnd_packets(tx, &cw_after_recovery) != VAL_OK)
     {
-        printf("FAIL: Could not read current TX mode after phase 2\n");
+        printf("FAIL: Could not read cwnd after phase 2\n");
         goto cleanup;
     }
-    printf("DEBUG: Mode after recovery phase: %d\n", (int)mode_after_recovery);
+    printf("DEBUG: cwnd after recovery phase: %u\n", (unsigned)cw_after_recovery);
 
     // Expect that recovery moved us toward higher performance (numerically larger window enum)
-    if (!(mode_after_recovery >= mode_after_loss))
+    if (!(cw_after_recovery >= cw_after_loss))
     {
-        printf("FAIL: Expected upgrade after loss removal (mode %d -> %d)\n", (int)mode_after_loss, (int)mode_after_recovery);
+        printf("FAIL: Expected cwnd upgrade after loss removal (%u -> %u)\n", (unsigned)cw_after_loss, (unsigned)cw_after_recovery);
         goto cleanup;
     }
 
-    printf("PASS: Adaptive mode transitioned as expected (loss -> %d, recovery -> %d)\n", (int)mode_after_loss,
-           (int)mode_after_recovery);
+    printf("PASS: Adaptive cwnd transitioned as expected (loss -> %u, recovery -> %u)\n", (unsigned)cw_after_loss,
+           (unsigned)cw_after_recovery);
 
     val_session_destroy(tx);
     val_session_destroy(rx);

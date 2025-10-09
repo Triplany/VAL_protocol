@@ -181,22 +181,7 @@ void val_internal_set_last_error(val_session_t *s, val_status_t code, uint32_t d
     val_internal_set_last_error_full(s, code, detail, __FUNCTION__);
 }
 
-static uint32_t calculate_tracking_slots(val_tx_mode_t mode)
-{
-    // Track up to one entry per packet that can be in flight at the current rung.
-    uint32_t w = 1u;
-    switch (mode)
-    {
-    case VAL_TX_WINDOW_64: w = 64u; break;
-    case VAL_TX_WINDOW_32: w = 32u; break;
-    case VAL_TX_WINDOW_16: w = 16u; break;
-    case VAL_TX_WINDOW_8:  w = 8u;  break;
-    case VAL_TX_WINDOW_4:  w = 4u;  break;
-    case VAL_TX_WINDOW_2:  w = 2u;  break;
-    case VAL_TX_STOP_AND_WAIT: default: w = 1u; break;
-    }
-    return w;
-}
+// (Removed legacy calculate_tracking_slots)
 
 // Basic sanitizers for filenames and paths sent in metadata (sender side)
 void val_clean_filename(const char *input, char *output, size_t output_size)
@@ -316,88 +301,35 @@ static VAL_FORCE_INLINE void val_sanitize_timeouts_cfg(const val_config_t *cfg, 
     val_sanitize_timeouts_pair(in_min, in_max, out_min, out_max);
 }
 
-// Public: expose current transmitter mode (thread-safe)
-val_status_t val_get_current_tx_mode(val_session_t *session, val_tx_mode_t *out_mode)
+// Public: expose current congestion window in packets (thread-safe)
+val_status_t val_get_cwnd_packets(val_session_t *session, uint32_t *out_cwnd)
 {
-    if (!session || !out_mode)
+    if (!session || !out_cwnd)
         return VAL_ERR_INVALID_ARG;
     val_internal_lock(session);
-    *out_mode = session->current_tx_mode;
+    {
+        uint32_t w = session->current_window_packets ? session->current_window_packets : 1u;
+        *out_cwnd = w;
+    }
     val_internal_unlock(session);
     return VAL_OK;
 }
 
-// Public: expose peer's last-known transmitter mode (thread-safe)
-val_status_t val_get_peer_tx_mode(val_session_t *session, val_tx_mode_t *out_mode)
+// Public: expose peer's advertised TX cap from handshake (packets)
+val_status_t val_get_peer_tx_cap_packets(val_session_t *session, uint32_t *out_cap)
 {
-    if (!session || !out_mode)
+    if (!session || !out_cap)
         return VAL_ERR_INVALID_ARG;
     val_internal_lock(session);
-    *out_mode = session->peer_tx_mode;
+    {
+        uint32_t w = session->peer_tx_window_packets ? session->peer_tx_window_packets : 1u;
+        *out_cap = w;
+    }
     val_internal_unlock(session);
     return VAL_OK;
 }
 
-// Public: expose whether streaming pacing is currently engaged (thread-safe)
-val_status_t val_is_streaming_engaged(val_session_t *session, bool *out_streaming_engaged)
-{
-    if (!session || !out_streaming_engaged)
-        return VAL_ERR_INVALID_ARG;
-    val_internal_lock(session);
-    bool engaged = session->streaming_engaged ? true : false;
-#if VAL_ENABLE_STREAMING
-    // If not yet latched but we're allowed to stream and there are no recent errors,
-    // treat the session as effectively streaming-ready. This reflects "clean run" semantics
-    // expected by tests after a successful transfer, without requiring a specific rung.
-    // if (!engaged && session->send_streaming_allowed && session->cfg.adaptive_tx.allow_streaming)
-    // {
-    //     if (session->consecutive_errors == 0)
-    //         engaged = 1;
-    // }
-    VAL_LOG_DEBUGF(session,
-                   "query: streaming_engaged=%u, send_allowed=%u, allow_streaming=%u, consec_err=%u, consec_succ=%u, mode=%u, min_mode=%u",
-                   (unsigned)(session->streaming_engaged ? 1 : 0),
-                   (unsigned)(session->send_streaming_allowed ? 1 : 0),
-                   (unsigned)(session->cfg.adaptive_tx.allow_streaming ? 1 : 0),
-                   (unsigned)session->consecutive_errors,
-                   (unsigned)session->consecutive_successes,
-                   (unsigned)session->current_tx_mode,
-                   (unsigned)session->min_negotiated_mode);
-#endif
-    *out_streaming_engaged = engaged;
-    val_internal_unlock(session);
-    return VAL_OK;
-}
-
-val_status_t val_is_peer_streaming_engaged(val_session_t *session, bool *out_peer_streaming_engaged)
-{
-    if (!session || !out_peer_streaming_engaged)
-        return VAL_ERR_INVALID_ARG;
-    val_internal_lock(session);
-    *out_peer_streaming_engaged = session->peer_streaming_engaged ? true : false;
-    val_internal_unlock(session);
-    return VAL_OK;
-}
-
-// Public: expose negotiated streaming permissions (thread-safe)
-val_status_t val_get_streaming_allowed(val_session_t *session, bool *out_send_allowed, bool *out_recv_allowed)
-{
-    if (!session || !out_send_allowed || !out_recv_allowed)
-        return VAL_ERR_INVALID_ARG;
-    val_internal_lock(session);
-    *out_send_allowed = session->send_streaming_allowed ? true : false;
-    *out_recv_allowed = session->recv_streaming_allowed ? true : false;
-#if VAL_ENABLE_STREAMING
-    VAL_LOG_DEBUGF(session,
-                   "streaming_allowed query: send_allowed=%u recv_allowed=%u allow_streaming=%u handshake_done=%u",
-                   (unsigned)(session->send_streaming_allowed ? 1 : 0),
-                   (unsigned)(session->recv_streaming_allowed ? 1 : 0),
-                   (unsigned)(session->cfg.adaptive_tx.allow_streaming ? 1 : 0),
-                   (unsigned)(session->handshake_done ? 1 : 0));
-#endif
-    val_internal_unlock(session);
-    return VAL_OK;
-}
+// Streaming overlay removed: no public queries remain.
 
 // Public: expose effective negotiated MTU (thread-safe)
 val_status_t val_get_effective_packet_size(val_session_t *session, size_t *out_packet_size)
@@ -598,14 +530,14 @@ void val_session_destroy(val_session_t *session)
     // Free tracking slots
     if (session->tracking_slots)
     {
-        if (session->cfg.adaptive_tx.allocator.free && session->cfg.adaptive_tx.allocator.alloc)
-            session->cfg.adaptive_tx.allocator.free(session->tracking_slots, session->cfg.adaptive_tx.allocator.context);
+        if (session->cfg.tx_flow.allocator.free && session->cfg.tx_flow.allocator.alloc)
+            session->cfg.tx_flow.allocator.free(session->tracking_slots, session->cfg.tx_flow.allocator.context);
         else
             free(session->tracking_slots);
     }
     // Free session
-    if (session->cfg.adaptive_tx.allocator.free && session->cfg.adaptive_tx.allocator.alloc)
-        session->cfg.adaptive_tx.allocator.free(session, session->cfg.adaptive_tx.allocator.context);
+    if (session->cfg.tx_flow.allocator.free && session->cfg.tx_flow.allocator.alloc)
+        session->cfg.tx_flow.allocator.free(session, session->cfg.tx_flow.allocator.context);
     else
         free(session);
 }
@@ -641,7 +573,8 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
         return VAL_ERR_PACKET_SIZE_MISMATCH;
     }
     // Allocate session (use optional allocator if provided)
-    const val_memory_allocator_t *A = &config->adaptive_tx.allocator;
+    // Use tx_flow allocator if provided; else fall back to calloc/free
+    const val_memory_allocator_t *A = &config->tx_flow.allocator;
     val_session_t *s = NULL;
     if (A->alloc && A->free)
         s = (val_session_t *)A->alloc(sizeof(val_session_t), A->context);
@@ -667,30 +600,18 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     s->last_error.detail = 0;
     s->last_error.op = NULL;
     // Initialize adaptive TX defaults
-    val_tx_mode_t local_cap = val_tx_mode_sanitize(s->cfg.adaptive_tx.max_performance_mode);
-    if (local_cap == 0)
-        local_cap = VAL_TX_STOP_AND_WAIT;
-    s->min_negotiated_mode = local_cap;
-    s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT;
-    val_tx_mode_t pref = val_tx_mode_sanitize(s->cfg.adaptive_tx.preferred_initial_mode);
-    // Clamp preferred to cap
-    if (val_tx_mode_window(pref) > val_tx_mode_window(local_cap))
-        pref = local_cap;
-    s->current_tx_mode = pref;
-    s->peer_tx_mode = s->current_tx_mode;
-    s->send_streaming_allowed = false;
-    s->recv_streaming_allowed = false;
-    s->streaming_engaged = false;
-    s->peer_streaming_engaged = false;
+    // New bounded-window defaults: start conservative; detailed negotiation occurs in HELLO adopt
+    s->negotiated_window_packets = 1;
+    s->current_window_packets = 1;
+    s->peer_tx_window_packets = 1;
+    s->ack_stride_packets = 0; // 0 => default to window
     s->consecutive_errors = 0;
     s->consecutive_successes = 0;
     s->packets_since_mode_change = 0;
-    s->packets_since_mode_sync = 0;
     s->packets_in_flight = 0;
     s->next_seq_to_send = 0;
     s->oldest_unacked_seq = 0;
-    s->mode_sync_sequence = 0;
-    s->last_mode_sync_time = 0;
+    // legacy mode sync fields removed
     s->last_keepalive_send_time = 0;
     s->last_keepalive_recv_time = 0;
     s->health.operations = 0;
@@ -700,8 +621,13 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     memset(&s->metrics, 0, sizeof(s->metrics));
 #endif
     s->output_directory[0] = '\0';
-    // Allocate tracking slots at local cap (max rung) so we don't need to resize later
-    s->max_tracking_slots = calculate_tracking_slots(local_cap);
+    // Allocate tracking slots based on a safe default (will be adequate for initial window)
+    // Note: this will be re-used; current implementation doesn't reallocate on increases.
+    // Use tx_flow.window_cap_packets (preferred) to size tracking slots if specified; else a safe default.
+    if (s->cfg.tx_flow.window_cap_packets)
+        s->max_tracking_slots = s->cfg.tx_flow.window_cap_packets;
+    else
+        s->max_tracking_slots = 64u; // reasonable default; can be tuned or made configurable
     if (s->max_tracking_slots == 0)
         s->max_tracking_slots = 1;
     size_t tsz = sizeof(val_inflight_packet_t) * (size_t)s->max_tracking_slots;
@@ -1090,11 +1016,15 @@ val_status_t val_internal_recv_until_deadline(val_session_t *s,
         }
         // Benign slice miss; update metrics and loop until deadline
         if (st == VAL_ERR_TIMEOUT)
-            val_metrics_inc_timeout(s);
+            val_metrics_inc_timeout_soft(s);
         else if (st == VAL_ERR_CRC)
             val_metrics_inc_crcerr(s);
         if (ticks_fn() >= deadline_ms)
+        {
+            // Deadline reached: classify as a hard timeout for this recv-until-deadline operation
+            val_metrics_inc_timeout_hard(s);
             return VAL_ERR_TIMEOUT;
+        }
     }
 }
 
@@ -1104,8 +1034,7 @@ typedef struct { uint64_t file_size; } val_done_retry_ctx_t; // fwd for DONE ret
 static int accept_done_ack_cb(val_session_t *ss, val_packet_type_t t, const uint8_t *p, uint32_t l, uint64_t o, void *cx)
 {
     (void)ss; (void)p; (void)l; (void)o; (void)cx;
-    if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
-        return 0; // ignore benign control
+    // no MODE_SYNC packets in new protocol
     return (t == VAL_PKT_DONE_ACK) ? 1 : 0;
 }
 
@@ -1120,7 +1049,7 @@ static val_status_t retry_send_done_cb(val_session_t *ss, void *cx)
 static int accept_eot_ack_cb(val_session_t *ss, val_packet_type_t t, const uint8_t *p, uint32_t l, uint64_t o, void *cx)
 {
     (void)ss; (void)p; (void)l; (void)o; (void)cx;
-    if (t == VAL_PKT_DONE_ACK || t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
+    if (t == VAL_PKT_DONE_ACK)
         return 0;
     return (t == VAL_PKT_EOT_ACK) ? 1 : 0;
 }
@@ -1150,37 +1079,11 @@ val_status_t val_internal_wait_control(val_session_t *s,
         scratch = local_buf;
         scratch_cap = (uint32_t)sizeof(local_buf);
     }
-    // Establish an absolute deadline to prevent indefinite waits under extreme loss.
-    uint32_t start_ms = 0u, abs_deadline_ms = 0u;
-    if (s->config && s->config->system.get_ticks_ms)
-    {
-        start_ms = s->config->system.get_ticks_ms();
-        // Base cap on configured max_timeout, scaled moderately, and clamp to [12000, 24000] ms
-        uint32_t max_to_abs = s->config->timeouts.max_timeout_ms ? s->config->timeouts.max_timeout_ms : 1000u;
-        uint32_t total_cap_ms = max_to_abs * 3u;
-        if (total_cap_ms < 12000u) total_cap_ms = 12000u;
-        if (total_cap_ms > 24000u) total_cap_ms = 24000u;
-        abs_deadline_ms = start_ms + total_cap_ms;
-    }
     s->timing.in_retransmit = 0;
     for (;;)
     {
         if (val_check_for_cancel(s))
             return VAL_ERR_ABORTED;
-        // Absolute deadline enforcement
-        if (abs_deadline_ms && s->config && s->config->system.get_ticks_ms)
-        {
-            uint32_t now_abs = s->config->system.get_ticks_ms();
-            if (!(now_abs >= start_ms))
-            {
-                // wrap or invalid clock; ignore absolute cap this iteration
-            }
-            else if (now_abs >= abs_deadline_ms)
-            {
-                VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                return VAL_ERR_TIMEOUT;
-            }
-        }
         val_packet_type_t t = 0; uint32_t len = 0; uint64_t off = 0;
         if (!s->config || !s->config->system.get_ticks_ms)
             return VAL_ERR_INVALID_ARG;
@@ -1212,6 +1115,9 @@ val_status_t val_internal_wait_control(val_session_t *s,
                 VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
             else if (st == VAL_ERR_CRC)
                 VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
+            // Terminal path (no retries left or non-timeout): if timeout, count as hard
+            if (st == VAL_ERR_TIMEOUT)
+                val_metrics_inc_timeout_hard(s);
             return st;
         }
         // Retry path
@@ -1219,7 +1125,7 @@ val_status_t val_internal_wait_control(val_session_t *s,
         val_metrics_inc_retrans(s);
         VAL_HEALTH_RECORD_RETRY(s);
         if (st == VAL_ERR_TIMEOUT)
-            val_metrics_inc_timeout(s);
+            val_metrics_inc_timeout_soft(s);
         if (on_timeout)
         {
             val_status_t rs = on_timeout(s, ctx);
@@ -1306,8 +1212,7 @@ static int accept_hello_cb(val_session_t *s, val_packet_type_t t,
     (void)ctx; (void)payload; (void)off;
     if (!s)
         return -1;
-    if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
-        return 0; // ignore
+    // no MODE_SYNC packets in new protocol
     if (t == VAL_PKT_CANCEL)
         return -1; // abort
     if (t != VAL_PKT_HELLO)
@@ -1326,8 +1231,7 @@ static int accept_hello_rx_cb(val_session_t *s, val_packet_type_t t,
     (void)ctx; (void)payload; (void)off;
     if (!s)
         return -1;
-    if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
-        return 0;
+    // no MODE_SYNC packets in new protocol
     if (t == VAL_PKT_CANCEL)
         return -1;
     if (t != VAL_PKT_HELLO)
@@ -1364,7 +1268,7 @@ static int accept_verify_with_resume_cb(val_session_t *s, val_packet_type_t t,
 {
     (void)payload; (void)off;
     if (!s) return -1;
-    if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK) return 0;
+    // no MODE_SYNC packets in new protocol
     if (t == VAL_PKT_RESUME_REQ) {
         const val_verify_combined_ctx_t *c = (const val_verify_combined_ctx_t *)ctx;
         if (c && c->resume_resp && c->resume_resp_len)
@@ -1476,8 +1380,7 @@ static int accept_verify_result_cb(val_session_t *s, val_packet_type_t t,
     (void)ctx; (void)off;
     if (!s)
         return -1;
-    if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
-        return 0; // ignore benign side traffic
+    // no MODE_SYNC packets in new protocol
     if (t == VAL_PKT_CANCEL)
         return -1; // treat as abort
     if (t != VAL_PKT_VERIFY)
@@ -1577,8 +1480,7 @@ static int accept_resume_resp_cb(val_session_t *s, val_packet_type_t t,
                                  const uint8_t *payload, uint32_t len, uint64_t off, void *ctx)
 {
     (void)s; (void)payload; (void)len; (void)off; (void)ctx;
-    if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
-        return 0; // ignore benign control noise
+    // no MODE_SYNC packets in new protocol
     if (t == VAL_PKT_CANCEL)
         return -1; // abort
     return (t == VAL_PKT_RESUME_RESP) ? 1 : 0;
@@ -1614,8 +1516,7 @@ static int accept_verify_rx_with_resume_cb(val_session_t *s, val_packet_type_t t
 {
     (void)payload; (void)len; (void)off;
     const val_retry_payload_ctx_t *rp = (const val_retry_payload_ctx_t *)ctx;
-    if (t == VAL_PKT_MODE_SYNC || t == VAL_PKT_MODE_SYNC_ACK)
-        return 0;
+    // no MODE_SYNC packets in new protocol
     if (t == VAL_PKT_RESUME_REQ)
     {
         if (rp && rp->payload && rp->payload_len)
@@ -1702,19 +1603,16 @@ static void val__fill_local_hello(val_session_t *s, size_t packet_size, val_hand
     hello->features = negotiable;
     hello->required = s->config->features.required & negotiable;
     hello->requested = requested_sanitized;
-    // Adaptive fields from config (window rungs + streaming flags)
-    hello->max_performance_mode = (uint8_t)s->cfg.adaptive_tx.max_performance_mode;
-    hello->preferred_initial_mode = (uint8_t)s->cfg.adaptive_tx.preferred_initial_mode;
-    hello->mode_sync_interval = s->cfg.adaptive_tx.mode_sync_interval;
-#if VAL_ENABLE_STREAMING
-    hello->streaming_flags = (uint8_t)(s->cfg.adaptive_tx.allow_streaming ? (VAL_STREAM_CAN_SEND | VAL_STREAM_ACCEPT) : 0u);
-#else
-    // Streaming overlay disabled at compile time -> advertise none
-    hello->streaming_flags = 0u;
-#endif
-    hello->reserved_streaming[0] = 0;
-    hello->reserved_streaming[1] = 0;
-    hello->reserved_streaming[2] = 0;
+    // Flow-control capability exchange (bounded-window)
+    uint32_t w = s->cfg.tx_flow.window_cap_packets ? s->cfg.tx_flow.window_cap_packets : 1u;
+    if (w > 0xFFFFu) w = 0xFFFFu;
+    hello->tx_max_window_packets = (uint16_t)w;
+    hello->rx_max_window_packets = (uint16_t)w;
+    // Prefer conservative ACKs by default to guarantee progress with small sender windows
+    hello->ack_stride_packets = 1u; // default preference: ACK every packet
+    hello->reserved_capabilities[0] = 0;
+    hello->reserved_capabilities[1] = 0;
+    hello->reserved_capabilities[2] = 0;
     hello->supported_features16 = 0;
     hello->required_features16 = 0;
     hello->requested_features16 = 0;
@@ -1759,34 +1657,36 @@ static val_status_t val__adopt_peer_hello(val_session_t *s, const val_handshake_
         return VAL_ERR_FEATURE_NEGOTIATION;
     }
 
-    // Adaptive TX negotiation (window rung + streaming flags)
-    val_tx_mode_t negotiated_cap = val_negotiated_tx_cap(&s->cfg, peer_h);
-    s->min_negotiated_mode = negotiated_cap;       // largest shared window rung
-    s->max_negotiated_mode = VAL_TX_STOP_AND_WAIT; // always supported
+    // Bounded-window capability negotiation
+    // Local desired TX window (fallbacks: prefer buffers.packet_size heuristics if no explicit config exists)
+    uint16_t local_desired = 0;
+    if (s->cfg.tx_flow.window_cap_packets) {
+        local_desired = s->cfg.tx_flow.window_cap_packets;
+    } else {
+        local_desired = 4; // conservative default
+    }
 
-    // Streaming permissions
-#if VAL_ENABLE_STREAMING
-    bool peer_can_stream = (peer_h->streaming_flags & VAL_STREAM_CAN_SEND) ? true : false;
-    bool peer_accepts_stream = (peer_h->streaming_flags & VAL_STREAM_ACCEPT) ? true : false;
-    bool local_allow = (s->cfg.adaptive_tx.allow_streaming ? true : false);
-    s->send_streaming_allowed = (local_allow && peer_accepts_stream);
-    s->recv_streaming_allowed = (local_allow && peer_can_stream);
-    VAL_LOG_INFOF(s,
-                  "handshake: stream_flags=0x%02X local_allow=%u peer_can=%u peer_accept=%u send_allowed=%u recv_allowed=%u",
-                  (unsigned)peer_h->streaming_flags, (unsigned)(local_allow?1:0),
-                  (unsigned)(peer_can_stream?1:0), (unsigned)(peer_accepts_stream?1:0),
-                  (unsigned)(s->send_streaming_allowed?1:0), (unsigned)(s->recv_streaming_allowed?1:0));
-#else
-    s->send_streaming_allowed = false;
-    s->recv_streaming_allowed = false;
-#endif
+    // Peer capabilities from HELLO
+    uint16_t peer_rx_cap = peer_h->rx_max_window_packets ? peer_h->rx_max_window_packets : 1;
+    uint16_t peer_tx_cap = peer_h->tx_max_window_packets ? peer_h->tx_max_window_packets : 1;
+    s->peer_tx_window_packets = peer_tx_cap;
 
-    // Initial mode: conservative selection using shared helper
-    val_tx_mode_t init_mode = val_select_initial_mode(s->cfg.adaptive_tx.preferred_initial_mode,
-                                                     (val_tx_mode_t)peer_h->preferred_initial_mode,
-                                                     negotiated_cap);
-    s->current_tx_mode = init_mode;
-    s->peer_tx_mode = s->current_tx_mode;
+    // Negotiate sender cap: we cannot exceed peer's RX max
+    uint16_t negotiated_window = (local_desired < peer_rx_cap) ? local_desired : peer_rx_cap;
+    if (negotiated_window == 0) negotiated_window = 1;
+    s->negotiated_window_packets = negotiated_window;
+    // Start conservatively (e.g., 1..4) and ramp up additively later
+    if (s->cfg.tx_flow.initial_cwnd_packets) {
+        uint16_t cw0 = s->cfg.tx_flow.initial_cwnd_packets;
+        if (cw0 < 1) cw0 = 1;
+        if (cw0 > negotiated_window) cw0 = negotiated_window;
+        s->current_window_packets = cw0;
+    } else {
+        s->current_window_packets = (negotiated_window >= 4 ? 4 : negotiated_window);
+    }
+    // Receiver ACK stride preference: be conservative to ensure progress regardless of sender's current window.
+    // For now, ACK every packet. We can make this adaptive later based on observed inflight and RTT.
+    s->ack_stride_packets = 1;
     return VAL_OK;
 }
 
@@ -1943,32 +1843,7 @@ val_status_t val_internal_send_error(val_session_t *s, val_status_t code, uint32
 }
 
 // Adaptive transmission mode management
-static val_tx_mode_t degrade_mode(val_tx_mode_t current)
-{
-    uint32_t window = val_tx_mode_window(current);
-    if (window <= 1u)
-        return VAL_TX_STOP_AND_WAIT;
-    if (window <= 2u)
-        return VAL_TX_STOP_AND_WAIT;
-    window /= 2u;
-    if (window < 2u)
-        window = 2u;
-    return val_tx_mode_from_window(window);
-}
-
-static val_tx_mode_t upgrade_mode(val_tx_mode_t current, val_tx_mode_t max_allowed)
-{
-    uint32_t current_window = val_tx_mode_window(current);
-    uint32_t max_window = val_tx_mode_window(max_allowed);
-    if (current_window >= max_window)
-        return val_tx_mode_from_window(max_window);
-    if (current_window == 0u)
-        current_window = 1u;
-    uint32_t next_window = current_window * 2u;
-    if (next_window > max_window)
-        next_window = max_window;
-    return val_tx_mode_from_window(next_window);
-}
+// (Removed legacy mode upgrade/degrade helpers)
 
 void val_internal_record_transmission_error(val_session_t *s)
 {
@@ -1977,43 +1852,24 @@ void val_internal_record_transmission_error(val_session_t *s)
 
     s->consecutive_errors++;
     s->consecutive_successes = 0; // reset success counter
-    s->streaming_engaged = false; // drop back to non-streaming pacing on any error
 
-    // Check if we should degrade mode
-    uint16_t threshold = s->cfg.adaptive_tx.degrade_error_threshold;
+    // AIMD halve on sustained errors
+    uint16_t threshold = s->cfg.tx_flow.degrade_error_threshold ? s->cfg.tx_flow.degrade_error_threshold : 0;
     if (threshold == 0)
         threshold = 3; // default threshold
 
-    if (s->consecutive_errors >= threshold && s->current_tx_mode != VAL_TX_STOP_AND_WAIT)
+    if (s->consecutive_errors >= threshold)
     {
-        val_tx_mode_t new_mode = degrade_mode(s->current_tx_mode);
-        VAL_LOG_INFOF(s, "adaptive: degrading mode from %u to %u after %u errors", (unsigned)s->current_tx_mode,
-                      (unsigned)new_mode, s->consecutive_errors);
-    s->current_tx_mode = new_mode;
-    s->peer_tx_mode = s->current_tx_mode; // local view: our peers may want to know our new mode
-    // Best-effort mode sync (Phase 1: fire-and-forget)
-    val_mode_sync_t ms = {0};
-    ms.current_mode = (uint32_t)new_mode;
-    ms.sequence = ++s->mode_sync_sequence;
-    ms.consecutive_errors = s->consecutive_errors;
-    ms.consecutive_successes = s->consecutive_successes;
-    // Set streaming flag only when streaming overlay is enabled
-#if VAL_ENABLE_STREAMING
-    ms.flags = s->streaming_engaged ? 1u : 0u;
-#else
-    ms.flags = 0u;
-#endif
-    uint8_t ms_wire[VAL_WIRE_MODE_SYNC_SIZE];
-    val_serialize_mode_sync(&ms, ms_wire);
-    (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, ms_wire, VAL_WIRE_MODE_SYNC_SIZE, 0);
-        s->consecutive_errors = 0; // reset after mode change
-        s->packets_since_mode_change = 0;
-
-        // Reallocate tracking slots if needed
-        uint32_t new_slots = calculate_tracking_slots(new_mode);
-        if (new_slots != s->max_tracking_slots)
+        uint16_t cur = s->current_window_packets ? s->current_window_packets : 1u;
+        uint16_t new_w = (uint16_t)(cur / 2u);
+        if (new_w < 1u) new_w = 1u;
+        if (new_w != cur)
         {
-            // For simplicity, just reset tracking when changing modes
+            VAL_LOG_INFOF(s, "adaptive(win): decrease %u -> %u after %u errors", (unsigned)cur, (unsigned)new_w,
+                          (unsigned)s->consecutive_errors);
+            s->current_window_packets = new_w;
+            s->consecutive_errors = 0; // reset after adjustment
+            s->packets_since_mode_change = 0;
             if (s->tracking_slots)
                 memset(s->tracking_slots, 0, sizeof(val_inflight_packet_t) * s->max_tracking_slots);
         }
@@ -2028,71 +1884,31 @@ void val_internal_record_transmission_success(val_session_t *s)
     s->consecutive_successes++;
     s->consecutive_errors = 0; // reset error counter
 
-    // Check if we should upgrade mode
-    uint16_t threshold = s->cfg.adaptive_tx.recovery_success_threshold;
+    // AIMD additive increase on sustained successes
+    uint16_t threshold = s->cfg.tx_flow.recovery_success_threshold ? s->cfg.tx_flow.recovery_success_threshold : 0;
     if (threshold == 0)
         threshold = 10; // default threshold
 
-    if (s->consecutive_successes >= threshold && s->current_tx_mode != s->min_negotiated_mode)
+    if (s->consecutive_successes >= threshold)
     {
-        val_tx_mode_t new_mode = upgrade_mode(s->current_tx_mode, s->min_negotiated_mode);
-        if (new_mode != s->current_tx_mode)
+        uint16_t cur = s->current_window_packets ? s->current_window_packets : 1u;
+        uint16_t cap = s->negotiated_window_packets ? s->negotiated_window_packets : cur;
+        if (cur < cap)
         {
-            VAL_LOG_INFOF(s, "adaptive: upgrading mode from %u to %u after %u successes", (unsigned)s->current_tx_mode,
-                          (unsigned)new_mode, s->consecutive_successes);
-            s->current_tx_mode = new_mode;
-            s->peer_tx_mode = s->current_tx_mode; // local view: our peers may want to know our new mode
-            // Best-effort mode sync (Phase 1: fire-and-forget)
-            val_mode_sync_t ms = {0};
-            ms.current_mode = (uint32_t)new_mode;
-            ms.sequence = ++s->mode_sync_sequence;
-            ms.consecutive_errors = s->consecutive_errors;
-            ms.consecutive_successes = s->consecutive_successes;
-            ms.flags = s->streaming_engaged ? 1u : 0u;
-            uint8_t ms_wire[VAL_WIRE_MODE_SYNC_SIZE];
-            val_serialize_mode_sync(&ms, ms_wire);
-            (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, ms_wire, VAL_WIRE_MODE_SYNC_SIZE, 0);
-            // Preserve the triggering success so downstream logic (e.g., streaming engage) can act immediately.
-            // Previously this was reset to 0 on every mode change, which delayed streaming engagement by one extra ACK.
-            s->consecutive_successes = 1;
-            s->packets_since_mode_change = 0;
-
-            // Reallocate tracking slots if needed
-            uint32_t new_slots = calculate_tracking_slots(new_mode);
-            if (new_slots != s->max_tracking_slots)
+            uint16_t new_w = (uint16_t)(cur + 1u);
+            if (new_w > cap) new_w = cap;
+            if (new_w != cur)
             {
-                // For simplicity, just reset tracking when changing modes
+                VAL_LOG_INFOF(s, "adaptive(win): increase %u -> %u after %u successes", (unsigned)cur, (unsigned)new_w,
+                              (unsigned)s->consecutive_successes);
+                s->current_window_packets = new_w;
+                s->consecutive_successes = 1; // keep momentum
+                s->packets_since_mode_change = 0;
                 if (s->tracking_slots)
                     memset(s->tracking_slots, 0, sizeof(val_inflight_packet_t) * s->max_tracking_slots);
             }
         }
     }
-    // Escalate to streaming pacing after sustained successes when allowed.
-#if VAL_ENABLE_STREAMING
-    if (s->send_streaming_allowed && s->cfg.adaptive_tx.allow_streaming)
-    {
-        if (!s->streaming_engaged)
-        {
-            uint16_t stream_threshold = s->cfg.adaptive_tx.recovery_success_threshold ? s->cfg.adaptive_tx.recovery_success_threshold : 10;
-            if (s->consecutive_successes >= stream_threshold)
-            {
-                s->streaming_engaged = true;
-                // Notify peer via mode sync with streaming flag set
-                val_mode_sync_t ms2 = {0};
-                ms2.current_mode = (uint32_t)s->current_tx_mode;
-                ms2.sequence = ++s->mode_sync_sequence;
-                ms2.consecutive_errors = s->consecutive_errors;
-                ms2.consecutive_successes = s->consecutive_successes;
-                ms2.flags = 1u; // streaming engaged
-                uint8_t ms_wire2[VAL_WIRE_MODE_SYNC_SIZE];
-                val_serialize_mode_sync(&ms2, ms_wire2);
-                (void)val_internal_send_packet(s, VAL_PKT_MODE_SYNC, ms_wire2, VAL_WIRE_MODE_SYNC_SIZE, 0);
-                VAL_LOG_INFO(s, "adaptive: engaging streaming pacing after sustained successes");
-                s->consecutive_successes = 0; // reset after escalation
-            }
-        }
-    }
-#endif
 }
 
 #if VAL_ENABLE_METRICS

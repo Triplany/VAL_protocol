@@ -26,20 +26,16 @@ static void on_packet_capture_rx(void *ctx, const val_packet_record_t *rec)
 static void usage(const char *prog)
 {
 	fprintf(stderr,
-			"Usage: %s [--mtu N] [--resume MODE] [--tail-bytes N] [--streaming on|off] [--accept-streaming on|off] "
-			"[--no-validation] [--log-level L] [--log-file PATH] "
-			"[--tx-mode MODE] [--max-mode MODE] [--degrade N] [--upgrade N] [--min-timeout MS] [--max-timeout MS] [--meta-retries N] [--data-retries N] [--ack-retries N] [--backoff MS] "
+			"Usage: %s [--mtu N] [--resume MODE] [--tail-bytes N] "
+			"[--validation] [--log-level L] [--log-file PATH] "
+			"[--degrade N] [--upgrade N] [--min-timeout MS] [--max-timeout MS] [--meta-retries N] [--data-retries N] [--ack-retries N] [--backoff MS] "
 			"<port> "
 			"<outdir>\n"
 			"  --mtu N          Packet size/MTU (default 4096; min %u, max %u)\n"
 			"  --resume MODE    Resume mode: never, skip, tail\n"
 			"  --tail-bytes N   Tail verification cap in bytes for tail mode (default 1024)\n"
-			"  --streaming      Enable sender streaming pacing if peer accepts (default on)\n"
-			"  --accept-streaming  Accept incoming peer streaming pacing (default on). Note: --streaming off implies\n"
-			"                     --accept-streaming off unless explicitly overridden with --accept-streaming on.\n"
-			"  --no-validation  Disable metadata validation (accept all files)\n"
-			"  --tx-mode MODE   Preferred initial TX mode rung: stop|1|2|4|8|16|32|64 (default 16)\n"
-			"  --max-mode MODE  Max TX mode this endpoint supports: stop|1|2|4|8|16|32|64 (default 64)\n"
+			""
+			"  --validation     Enable metadata validation (accept/reject via example filter)\n"
 			"  --degrade N      Errors before degrading a rung (default 3)\n"
 			"  --upgrade N      Successes before upgrading a rung (default 10)\n"
 			"  --min-timeout MS Minimum adaptive timeout clamp in ms (default 100)\n"
@@ -99,71 +95,7 @@ static int parse_resume_mode(const char *s, val_resume_mode_t *out)
 	return 0;
 }
 
-static const char *tx_mode_name(val_tx_mode_t m)
-{
-	switch (m)
-	{
-	case VAL_TX_STOP_AND_WAIT:
-		return "stop(1:1)";
-	case VAL_TX_WINDOW_2:
-		return "2";
-	case VAL_TX_WINDOW_4:
-		return "4";
-	case VAL_TX_WINDOW_8:
-		return "8";
-	case VAL_TX_WINDOW_16:
-		return "16";
-	case VAL_TX_WINDOW_32:
-		return "32";
-	case VAL_TX_WINDOW_64:
-		return "64";
-	default:
-		return "?";
-	}
-}
-
-static int parse_tx_mode(const char *s, val_tx_mode_t *out)
-{
-	if (!s || !out)
-		return -1;
-	// Accept numeric aliases and words
-	if (strieq(s, "stop") || strieq(s, "saw") || strieq(s, "1") || strieq(s, "1:1") || strieq(s, "stop_and_wait"))
-	{
-		*out = VAL_TX_STOP_AND_WAIT;
-		return 0;
-	}
-	if (strieq(s, "2") || strieq(s, "win2") || strieq(s, "window2") || strieq(s, "window_2"))
-	{
-		*out = VAL_TX_WINDOW_2;
-		return 0;
-	}
-	if (strieq(s, "4") || strieq(s, "win4") || strieq(s, "window4") || strieq(s, "window_4"))
-	{
-		*out = VAL_TX_WINDOW_4;
-		return 0;
-	}
-	if (strieq(s, "8") || strieq(s, "win8") || strieq(s, "window8") || strieq(s, "window_8"))
-	{
-		*out = VAL_TX_WINDOW_8;
-		return 0;
-	}
-	if (strieq(s, "16") || strieq(s, "win16") || strieq(s, "window16") || strieq(s, "window_16"))
-	{
-		*out = VAL_TX_WINDOW_16;
-		return 0;
-	}
-	if (strieq(s, "32") || strieq(s, "win32") || strieq(s, "window32") || strieq(s, "window_32"))
-	{
-		*out = VAL_TX_WINDOW_32;
-		return 0;
-	}
-	if (strieq(s, "64") || strieq(s, "win64") || strieq(s, "window64") || strieq(s, "window_64"))
-	{
-		*out = VAL_TX_WINDOW_64;
-		return 0;
-	}
-	return -1;
-}
+/* ladder parsing/helpers removed */
 
 static int tp_send(void *ctx, const void *data, size_t len)
 {
@@ -303,9 +235,9 @@ static int fs_fclose(void *ctx, void *file)
 
 // --- Optional: progress callback to announce LOCAL TX mode changes (receiver side) ---
 static val_session_t *g_rx_session_for_progress = NULL;            // set after session create
-static val_tx_mode_t g_rx_last_mode_reported = (val_tx_mode_t)255; // invalid sentinel
+static uint32_t g_rx_last_cwnd_reported = 0xFFFFFFFFu; // invalid sentinel
 static int g_rx_post_handshake_printed = 0;
-static val_tx_mode_t g_peer_last_mode_reported = (val_tx_mode_t)255; // last known peer mode
+static uint32_t g_peer_last_cap_reported = 0xFFFFFFFFu; // last known peer cap
 static int g_peer_stream_last = -1; // unknown
 static void on_progress_announce_mode_rx(const val_progress_info_t *info)
 {
@@ -316,54 +248,39 @@ static void on_progress_announce_mode_rx(const val_progress_info_t *info)
 	if (!g_rx_post_handshake_printed)
 	{
 		size_t mtu = 0;
-	bool send_stream_ok = false, recv_stream_ok = false;
-		val_tx_mode_t m0 = VAL_TX_STOP_AND_WAIT;
-		val_tx_mode_t pm0 = VAL_TX_STOP_AND_WAIT;
+		uint32_t cwnd0 = 0, peercap0 = 0;
 		if (val_get_effective_packet_size(g_rx_session_for_progress, &mtu) == VAL_OK)
 		{
-			(void)val_get_streaming_allowed(g_rx_session_for_progress, &send_stream_ok, &recv_stream_ok);
-			(void)val_get_current_tx_mode(g_rx_session_for_progress, &m0);
-			(void)val_get_peer_tx_mode(g_rx_session_for_progress, &pm0);
-			bool pstream = false;
-			(void)val_is_peer_streaming_engaged(g_rx_session_for_progress, &pstream);
-		fprintf(stdout, "[VAL][RX] post-handshake: mtu=%zu, send_streaming=%s, accept_streaming=%s, local_tx_init=%s, peer_tx_init=%s, peer_streaming=%s\n",
-			mtu, send_stream_ok ? "yes" : "no", recv_stream_ok ? "yes" : "no", tx_mode_name(m0), tx_mode_name(pm0), pstream ? "+streaming" : "off");
+			(void)val_get_cwnd_packets(g_rx_session_for_progress, &cwnd0);
+			(void)val_get_peer_tx_cap_packets(g_rx_session_for_progress, &peercap0);
+			fprintf(stdout, "[VAL][RX] post-handshake: mtu=%zu, cwnd=%u, peer_tx_cap=%u\n",
+				mtu, (unsigned)cwnd0, (unsigned)peercap0);
 			fflush(stdout);
 			g_rx_post_handshake_printed = 1;
 		}
 	}
-	val_tx_mode_t m = VAL_TX_STOP_AND_WAIT;
-	if (val_get_current_tx_mode(g_rx_session_for_progress, &m) == VAL_OK)
+	uint32_t cw = 0;
+	if (val_get_cwnd_packets(g_rx_session_for_progress, &cw) == VAL_OK)
 	{
-		if (g_rx_last_mode_reported != m)
+		if (g_rx_last_cwnd_reported != cw)
 		{
-			g_rx_last_mode_reported = m;
-			fprintf(stdout, "[VAL][RX] local-tx mode changed -> %s\n", tx_mode_name(m));
+			g_rx_last_cwnd_reported = cw;
+			fprintf(stdout, "[VAL][RX] cwnd changed -> %u\n", (unsigned)cw);
 			fflush(stdout);
 		}
 	}
-	// Also show peer's current TX mode when it changes (via mode sync)
-	val_tx_mode_t pm = VAL_TX_STOP_AND_WAIT;
-	if (val_get_peer_tx_mode(g_rx_session_for_progress, &pm) == VAL_OK)
+	// Also show peer's advertised cap when it changes
+	uint32_t pc = 0;
+	if (val_get_peer_tx_cap_packets(g_rx_session_for_progress, &pc) == VAL_OK)
 	{
-		if (g_peer_last_mode_reported != pm)
+		if (g_peer_last_cap_reported != pc)
 		{
-			g_peer_last_mode_reported = pm;
-			fprintf(stdout, "[VAL][RX] peer-tx mode changed -> %s\n", tx_mode_name(pm));
+			g_peer_last_cap_reported = pc;
+			fprintf(stdout, "[VAL][RX] peer-tx cap -> %u\n", (unsigned)pc);
 			fflush(stdout);
 		}
 	}
-	// And show peer streaming engage/disengage transitions
-	bool ps = false;
-	if (val_is_peer_streaming_engaged(g_rx_session_for_progress, &ps) == VAL_OK)
-	{
-		if (g_peer_stream_last != ps)
-		{
-			g_peer_stream_last = ps;
-			fprintf(stdout, "[VAL][RX] peer streaming %s\n", ps ? "ENGAGED" : "OFF");
-			fflush(stdout);
-		}
-	}
+	/* streaming overlay removed */
 }
 
 // Example metadata validator: basic size/type filtering
@@ -401,9 +318,11 @@ static void print_metrics_rx(val_session_t *rx)
 	if (val_get_metrics(rx, &m) != VAL_OK)
 		return;
 	fprintf(stdout, "\n==== Session Metrics (Receiver) ====\n");
-	fprintf(stdout, "Packets: sent=%llu recv=%llu\n", (unsigned long long)m.packets_sent, (unsigned long long)m.packets_recv);
+    fprintf(stdout, "Packets: sent=%llu recv=%llu\n", (unsigned long long)m.packets_sent, (unsigned long long)m.packets_recv);
+    fprintf(stdout, "Reliab:  timeouts=%u (soft=%u hard=%u) retrans=%u crc_err=%u\n",
+	    (unsigned)m.timeouts, (unsigned)m.timeouts_soft, (unsigned)m.timeouts_hard,
+	    (unsigned)m.retransmits, (unsigned)m.crc_errors);
 	fprintf(stdout, "Bytes:   sent=%llu recv=%llu\n", (unsigned long long)m.bytes_sent, (unsigned long long)m.bytes_recv);
-				bool send_stream_ok = false, recv_stream_ok = false;
 	fprintf(stdout, "Session: handshakes=%u files_recv=%u rtt_samples=%u\n", (unsigned)m.handshakes, (unsigned)m.files_recv, (unsigned)m.rtt_samples);
 	const char *names[32] = {0};
 	names[VAL_PKT_HELLO] = "HELLO";
@@ -418,8 +337,6 @@ static void print_metrics_rx(val_session_t *rx)
 	names[VAL_PKT_EOT] = "EOT";
 	names[VAL_PKT_EOT_ACK] = "EOT_ACK";
 	names[VAL_PKT_DONE_ACK] = "DONE_ACK";
-	names[VAL_PKT_MODE_SYNC] = "MODE_SYNC";
-	names[VAL_PKT_MODE_SYNC_ACK] = "MODE_SYNC_ACK";
 	names[VAL_PKT_CANCEL & 31u] = "CANCEL";
 	fprintf(stdout, "Per-type (send/recv):\n");
 	for (unsigned i = 0; i < 32; ++i)
@@ -613,12 +530,9 @@ int main(int argc, char **argv)
 	unsigned tail_bytes = 16384; // cap for tail verification window
 	int log_level = -1;
 	const char *log_file_path = NULL;
-	int opt_streaming = 1;        // default on
-	int opt_accept_streaming = 1; // default on
-	int accept_streaming_explicit = 0; // track if user provided explicit override
+	/* streaming overlay removed */
 	// Adaptive TX customizations
-	val_tx_mode_t opt_tx_mode = VAL_TX_WINDOW_16;
-	val_tx_mode_t opt_max_mode = VAL_TX_WINDOW_64;
+	/* ladder removed: no tx-mode knobs; keep a sane internal default cap */
 	unsigned opt_degrade = 3;
 	unsigned opt_upgrade = 10;
 	// Timeout/retry defaults (overridable)
@@ -683,47 +597,11 @@ int main(int argc, char **argv)
 			}
 			tail_bytes = v;
 		}
-		else if (strcmp(arg, "--no-validation") == 0)
+		else if (strcmp(arg, "--validation") == 0)
 		{
 			// marker handled later; nothing to parse here
 		}
-		else if (strcmp(arg, "--streaming") == 0)
-		{
-			if (argi >= argc)
-			{
-				usage(argv[0]);
-				return 1;
-			}
-			const char *v = argv[argi++];
-			if (strieq(v, "on") || strieq(v, "true") || strieq(v, "1"))
-				opt_streaming = 1;
-			else if (strieq(v, "off") || strieq(v, "false") || strieq(v, "0"))
-				opt_streaming = 0;
-			else
-			{
-				fprintf(stderr, "Invalid --streaming value; use on|off\n");
-				return 1;
-			}
-		}
-		else if (strcmp(arg, "--accept-streaming") == 0)
-		{
-			if (argi >= argc)
-			{
-				usage(argv[0]);
-				return 1;
-			}
-			const char *v = argv[argi++];
-			if (strieq(v, "on") || strieq(v, "true") || strieq(v, "1"))
-				opt_accept_streaming = 1;
-			else if (strieq(v, "off") || strieq(v, "false") || strieq(v, "0"))
-				opt_accept_streaming = 0;
-			else
-			{
-				fprintf(stderr, "Invalid --accept-streaming value; use on|off\n");
-				return 1;
-			}
-			accept_streaming_explicit = 1;
-		}
+		/* streaming options removed */
 		else if (strcmp(arg, "--log-level") == 0)
 		{
 			if (argi >= argc)
@@ -794,36 +672,7 @@ int main(int argc, char **argv)
 		{
 			log_level = 4;
 		}
-		else if (strcmp(arg, "--tx-mode") == 0)
-		{
-			if (argi >= argc)
-			{
-				usage(argv[0]);
-				return 1;
-			}
-			val_tx_mode_t m;
-			if (parse_tx_mode(argv[argi++], &m) != 0)
-			{
-				fprintf(stderr, "Invalid --tx-mode; use stop|1|2|4|8|16|32|64\n");
-				return 1;
-			}
-			opt_tx_mode = m;
-		}
-		else if (strcmp(arg, "--max-mode") == 0)
-		{
-			if (argi >= argc)
-			{
-				usage(argv[0]);
-				return 1;
-			}
-			val_tx_mode_t m;
-			if (parse_tx_mode(argv[argi++], &m) != 0)
-			{
-				fprintf(stderr, "Invalid --max-mode; use stop|1|2|4|8|16|32|64\n");
-				return 1;
-			}
-			opt_max_mode = m;
-		}
+		/* --tx-mode/--max-mode removed */
 		else if (strcmp(arg, "--degrade") == 0)
 		{
 			if (argi >= argc)
@@ -899,10 +748,7 @@ int main(int argc, char **argv)
 		return 4;
 	}
 
-	// Unified streaming semantics: if streaming is off and accept-streaming wasn't explicitly set,
-	// default to refusing incoming streaming as well.
-	if (!opt_streaming && !accept_streaming_explicit)
-		opt_accept_streaming = 0;
+	/* streaming overlay removed */
 
 	val_config_t cfg;
 	memset(&cfg, 0, sizeof(cfg));
@@ -962,25 +808,23 @@ int main(int argc, char **argv)
 	cfg.resume.tail_cap_bytes = tail_bytes;
 	cfg.resume.min_verify_bytes = 0;
 	cfg.resume.mismatch_skip = false; // default: restart on mismatch; set to true to skip on mismatch
-	// Adaptive TX defaults; allow flags to override
-	cfg.adaptive_tx.max_performance_mode = opt_max_mode;
-	cfg.adaptive_tx.preferred_initial_mode = opt_tx_mode;
-	// Single policy: allow_streaming governs both directions
-	cfg.adaptive_tx.allow_streaming = ((opt_streaming || opt_accept_streaming) ? true : false);
-	cfg.adaptive_tx.retransmit_cache_enabled = false;
-	cfg.adaptive_tx.degrade_error_threshold = (uint16_t)opt_degrade;
-	cfg.adaptive_tx.recovery_success_threshold = (uint16_t)opt_upgrade;
-	cfg.adaptive_tx.mode_sync_interval = 0;
+	// Preferred single-knob flow control
+	cfg.tx_flow.window_cap_packets = 64; /* default cap; bounded-window governs actual in-flight */
+	cfg.tx_flow.initial_cwnd_packets = 0; /* auto */
+	cfg.tx_flow.retransmit_cache_enabled = false;
+	cfg.tx_flow.degrade_error_threshold = (uint16_t)opt_degrade;
+	cfg.tx_flow.recovery_success_threshold = (uint16_t)opt_upgrade;
+	// Legacy fields removed in 0.7
 	// Register progress callback to announce TX mode changes during receive
 	cfg.callbacks.on_progress = on_progress_announce_mode_rx;
 
-	// Enable example metadata validation by default unless --no-validation present
-	int use_validation = 1;
+	// Default: NO validation unless --validation was passed
+	int use_validation = 0;
 	for (int i = 1; i < argc; ++i)
 	{
-		if (strcmp(argv[i], "--no-validation") == 0)
+		if (strcmp(argv[i], "--validation") == 0)
 		{
-			use_validation = 0;
+			use_validation = 1;
 			break;
 		}
 	}
@@ -1013,16 +857,17 @@ int main(int argc, char **argv)
 	g_rx_session_for_progress = rx;
 
 	// Print initial mode preference/cap for visibility
-	fprintf(stdout, "[VAL][RX] config: local_tx_init=%s, local_tx_cap<=%s, degrade=%u, upgrade=%u\n", tx_mode_name(cfg.adaptive_tx.preferred_initial_mode),
-		tx_mode_name(cfg.adaptive_tx.max_performance_mode), (unsigned)cfg.adaptive_tx.degrade_error_threshold,
-		(unsigned)cfg.adaptive_tx.recovery_success_threshold);
+	fprintf(stdout, "[VAL][RX] config: mtu=%zu, tx_cap<=%u, degrade=%u, upgrade=%u\n", packet,
+		(unsigned)(cfg.tx_flow.window_cap_packets ? cfg.tx_flow.window_cap_packets : 64u),
+		(unsigned)(cfg.tx_flow.degrade_error_threshold ? cfg.tx_flow.degrade_error_threshold : opt_degrade),
+		(unsigned)(cfg.tx_flow.recovery_success_threshold ? cfg.tx_flow.recovery_success_threshold : opt_upgrade));
 	fflush(stdout);
 	// Note: current mode is initialized to stop(1:1) before handshake; it will switch after handshake.
 	{
-		val_tx_mode_t mode = VAL_TX_STOP_AND_WAIT;
-		if (val_get_current_tx_mode(rx, &mode) == VAL_OK)
+		uint32_t cw = 0;
+		if (val_get_cwnd_packets(rx, &cw) == VAL_OK)
 		{
-			fprintf(stdout, "[VAL][RX] local-tx-mode(pre-handshake)=%s\n", tx_mode_name(mode));
+			fprintf(stdout, "[VAL][RX] cwnd(pre-handshake)=%u\n", (unsigned)cw);
 			fflush(stdout);
 		}
 	}
@@ -1049,12 +894,9 @@ int main(int argc, char **argv)
 		size_t mtu = 0;
 		if (val_get_effective_packet_size(rx, &mtu) == VAL_OK)
 		{
-			bool send_stream_ok = false, recv_stream_ok = false;
-			(void)val_get_streaming_allowed(rx, &send_stream_ok, &recv_stream_ok);
-		val_tx_mode_t mode = VAL_TX_STOP_AND_WAIT;
-		(void)val_get_current_tx_mode(rx, &mode);
-		fprintf(stdout, "[VAL][RX] negotiated: mtu=%zu, send_streaming=%s, accept_streaming=%s, local_tx_init=%s\n", mtu,
-			send_stream_ok ? "yes" : "no", recv_stream_ok ? "yes" : "no", tx_mode_name(mode));
+	// legacy mode removed; cwnd is the observable knob
+		uint32_t cw = 0; (void)val_get_cwnd_packets(rx, &cw);
+	fprintf(stdout, "[VAL][RX] negotiated: mtu=%zu, cwnd=%u\n", mtu, (unsigned)cw);
 			fflush(stdout);
 		}
 	}

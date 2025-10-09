@@ -13,9 +13,8 @@ This guide will help you get started with VAL Protocol in under 15 minutes.
 
 **VAL excels at:**
 - **Embedded file transfers** over UART, USB, RS-485, CAN - where HTTP/FTP aren't available
-- **Streaming mode performance** - 15-20x faster than XMODEM/YMODEM with small memory footprint
 - **Complete abstraction** - implement custom encryption, compression, hardware CRC, any byte source
-- **Adaptive performance** - automatically adjusts to network quality from localhost to satellite links
+- **Adaptive performance** - bounded-window cwnd adjusts to link quality (localhost to satellite)
 - **Robust resume** - CRC-verified resume modes with corruption detection
 
 **Not for:** Internet-scale distribution, real-time streaming media, or datagram networks.
@@ -238,14 +237,10 @@ The repository includes complete TCP examples with all features enabled.
 ### With Advanced Options
 
 ```bash
-# Large MTU, tail resume, verbose logging
-./val_example_send --mtu 32768 --resume tail --log-level debug \
-    --tx-mode 64 --streaming on \
-    192.168.1.100 9000 bigfile.iso
+# Large MTU, tail resume, verbose logging (bounded-window)
+./val_example_send --mtu 32768 --resume tail --log-level debug 192.168.1.100 9000 bigfile.iso
 
-./val_example_receive --mtu 32768 --resume tail --log-level debug \
-    --accept-streaming on \
-    9000 ./downloads
+./val_example_receive --mtu 32768 --resume tail --log-level debug 9000 ./downloads
 ```
 
 ## Common Configuration Patterns
@@ -255,9 +250,8 @@ The repository includes complete TCP examples with all features enabled.
 ```c
 // Minimal footprint: 1 KB MTU, stop-and-wait
 cfg.buffers.packet_size = 1024;
-cfg.adaptive_tx.max_performance_mode = VAL_TX_STOP_AND_WAIT;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_STOP_AND_WAIT;
-cfg.adaptive_tx.allow_streaming = 0;
+cfg.tx_flow.window_cap_packets = 1;
+cfg.tx_flow.initial_cwnd_packets = 1;
 cfg.resume.mode = VAL_RESUME_TAIL;
 cfg.resume.tail_cap_bytes = 1024; // Small tail cap
 ```
@@ -265,11 +259,10 @@ cfg.resume.tail_cap_bytes = 1024; // Small tail cap
 ### High-Speed LAN
 
 ```c
-// Maximize throughput: 64 KB MTU, full windowing
+// Maximize throughput: large MTU, larger window cap
 cfg.buffers.packet_size = (2*1024*1024); // 2 MB
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_64;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_32;
-cfg.adaptive_tx.allow_streaming = 1;
+cfg.tx_flow.window_cap_packets = 128;   // if memory allows
+cfg.tx_flow.initial_cwnd_packets = 4;   // start conservatively
 cfg.resume.mode = VAL_RESUME_TAIL;
 ```
 
@@ -278,10 +271,10 @@ cfg.resume.mode = VAL_RESUME_TAIL;
 ```c
 // Conservative: moderate MTU, aggressive error recovery
 cfg.buffers.packet_size = 4096;
-cfg.adaptive_tx.max_performance_mode = VAL_TX_WINDOW_16;
-cfg.adaptive_tx.preferred_initial_mode = VAL_TX_WINDOW_4;
-cfg.adaptive_tx.degrade_error_threshold = 2; // Quick downgrade
-cfg.adaptive_tx.recovery_success_threshold = 20; // Slow upgrade
+cfg.tx_flow.window_cap_packets = 16;
+cfg.tx_flow.initial_cwnd_packets = 4;
+cfg.tx_flow.degrade_error_threshold = 2;     // Quick downgrade
+cfg.tx_flow.recovery_success_threshold = 20; // Slow upgrade
 cfg.timeouts.min_timeout_ms = 500;
 cfg.timeouts.max_timeout_ms = 30000;
 ```

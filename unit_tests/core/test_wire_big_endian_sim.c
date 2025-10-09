@@ -31,10 +31,13 @@ static int roundtrip_all(void) {
         in.features = 0x01020304;
         in.required = 0xA5A5A5A5;
         in.requested = 0x5A5A5A5A;
-        in.max_performance_mode = VAL_TX_WINDOW_32;
-        in.preferred_initial_mode = VAL_TX_WINDOW_8;
-        in.mode_sync_interval = 250;
-        in.streaming_flags = 0x3C;
+        // New bounded-window capability exchange fields
+        in.tx_max_window_packets = 32;  // sender can handle up to 32 in-flight packets
+        in.rx_max_window_packets = 64;  // receiver can accept up to 64 in-flight packets
+        in.ack_stride_packets = 250;    // preferred ACK cadence (every 250 packets)
+        in.reserved_capabilities[0] = 0x3C; // exercise reserved bytes to ensure roundtrip
+        in.reserved_capabilities[1] = 0xBE;
+        in.reserved_capabilities[2] = 0xEF;
         in.supported_features16 = 0xBEEF;
         in.required_features16 = 0xFEED;
         in.requested_features16 = 0xAA55;
@@ -76,30 +79,6 @@ static int roundtrip_all(void) {
         val_serialize_error_payload(&in, buf);
         val_deserialize_error_payload(buf, &out);
         if (!(in.code == out.code && in.detail == out.detail)) fails++;
-    }
-    // Mode sync
-    {
-        uint8_t buf[VAL_WIRE_MODE_SYNC_SIZE];
-        val_mode_sync_t in = {0}, out = {0};
-        in.current_mode = VAL_TX_WINDOW_4;
-        in.sequence = 7;
-        in.consecutive_errors = 1;
-    in.consecutive_successes = 9;
-        in.flags = 0xCAFEBABE;
-        val_serialize_mode_sync(&in, buf);
-        val_deserialize_mode_sync(buf, &out);
-        if (memcmp(&in, &out, sizeof(in)) != 0) fails++;
-    }
-    // Mode sync ack
-    {
-        uint8_t buf[VAL_WIRE_MODE_SYNC_ACK_SIZE];
-        val_mode_sync_ack_t in = {0}, out = {0};
-        in.ack_sequence = 1234;
-        in.agreed_mode = VAL_TX_WINDOW_2;
-        in.receiver_errors = 5;
-        val_serialize_mode_sync_ack(&in, buf);
-        val_deserialize_mode_sync_ack(buf, &out);
-        if (memcmp(&in, &out, sizeof(in)) != 0) fails++;
     }
     return fails;
 }

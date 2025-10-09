@@ -65,13 +65,13 @@ void val_serialize_handshake(const val_handshake_t *hs, uint8_t *wire_data)
     VAL_PUT_LE32(wire_data + 12, hs->features);
     VAL_PUT_LE32(wire_data + 16, hs->required);
     VAL_PUT_LE32(wire_data + 20, hs->requested);
-    wire_data[24] = hs->max_performance_mode;
-    wire_data[25] = hs->preferred_initial_mode;
-    VAL_PUT_LE16(wire_data + 26, hs->mode_sync_interval);
-    wire_data[28] = hs->streaming_flags;
-    wire_data[29] = hs->reserved_streaming[0];
-    wire_data[30] = hs->reserved_streaming[1];
-    wire_data[31] = hs->reserved_streaming[2];
+    // Flow-control capabilities (repurposed from legacy mode/streaming fields)
+    VAL_PUT_LE16(wire_data + 24, hs->tx_max_window_packets);
+    VAL_PUT_LE16(wire_data + 26, hs->rx_max_window_packets);
+    wire_data[28] = hs->ack_stride_packets;
+    wire_data[29] = hs->reserved_capabilities[0];
+    wire_data[30] = hs->reserved_capabilities[1];
+    wire_data[31] = hs->reserved_capabilities[2];
     VAL_PUT_LE16(wire_data + 32, hs->supported_features16);
     VAL_PUT_LE16(wire_data + 34, hs->required_features16);
     VAL_PUT_LE16(wire_data + 36, hs->requested_features16);
@@ -93,13 +93,12 @@ void val_deserialize_handshake(const uint8_t *wire_data, val_handshake_t *hs)
     hs->features = VAL_GET_LE32(wire_data + 12);
     hs->required = VAL_GET_LE32(wire_data + 16);
     hs->requested = VAL_GET_LE32(wire_data + 20);
-    hs->max_performance_mode = wire_data[24];
-    hs->preferred_initial_mode = wire_data[25];
-    hs->mode_sync_interval = VAL_GET_LE16(wire_data + 26);
-    hs->streaming_flags = wire_data[28];
-    hs->reserved_streaming[0] = wire_data[29];
-    hs->reserved_streaming[1] = wire_data[30];
-    hs->reserved_streaming[2] = wire_data[31];
+    hs->tx_max_window_packets = VAL_GET_LE16(wire_data + 24);
+    hs->rx_max_window_packets = VAL_GET_LE16(wire_data + 26);
+    hs->ack_stride_packets = wire_data[28];
+    hs->reserved_capabilities[0] = wire_data[29];
+    hs->reserved_capabilities[1] = wire_data[30];
+    hs->reserved_capabilities[2] = wire_data[31];
     hs->supported_features16 = VAL_GET_LE16(wire_data + 32);
     hs->required_features16 = VAL_GET_LE16(wire_data + 34);
     hs->requested_features16 = VAL_GET_LE16(wire_data + 36);
@@ -166,46 +165,4 @@ void val_deserialize_error_payload(const uint8_t *wire_data, val_error_payload_t
     payload->detail = VAL_GET_LE32(wire_data + 4);
 }
 
-void val_serialize_mode_sync(const val_mode_sync_t *sync, uint8_t *wire_data)
-{
-    if (!sync || !wire_data)
-        return;
-
-    VAL_PUT_LE32(wire_data + 0, sync->current_mode);
-    VAL_PUT_LE32(wire_data + 4, sync->sequence);
-    VAL_PUT_LE32(wire_data + 8, sync->consecutive_errors);
-    VAL_PUT_LE32(wire_data + 12, sync->consecutive_successes);
-    VAL_PUT_LE32(wire_data + 16, sync->flags);
-}
-
-void val_deserialize_mode_sync(const uint8_t *wire_data, val_mode_sync_t *sync)
-{
-    if (!wire_data || !sync)
-        return;
-
-    sync->current_mode = VAL_GET_LE32(wire_data + 0);
-    sync->sequence = VAL_GET_LE32(wire_data + 4);
-    sync->consecutive_errors = VAL_GET_LE32(wire_data + 8);
-    sync->consecutive_successes = VAL_GET_LE32(wire_data + 12);
-    sync->flags = VAL_GET_LE32(wire_data + 16);
-}
-
-void val_serialize_mode_sync_ack(const val_mode_sync_ack_t *ack, uint8_t *wire_data)
-{
-    if (!ack || !wire_data)
-        return;
-
-    VAL_PUT_LE32(wire_data + 0, ack->ack_sequence);
-    VAL_PUT_LE32(wire_data + 4, ack->agreed_mode);
-    VAL_PUT_LE32(wire_data + 8, ack->receiver_errors);
-}
-
-void val_deserialize_mode_sync_ack(const uint8_t *wire_data, val_mode_sync_ack_t *ack)
-{
-    if (!wire_data || !ack)
-        return;
-
-    ack->ack_sequence = VAL_GET_LE32(wire_data + 0);
-    ack->agreed_mode = VAL_GET_LE32(wire_data + 4);
-    ack->receiver_errors = VAL_GET_LE32(wire_data + 8);
-}
+// MODE_SYNC payloads have been removed in bounded-window protocol.

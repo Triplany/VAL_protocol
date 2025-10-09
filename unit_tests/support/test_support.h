@@ -124,6 +124,10 @@ extern "C"
     //   before calling val_session_create(). ts_make_config() only fills these
     //   hooks when they are NULL, so explicit assignments are preserved.
     uint32_t ts_ticks(void);
+    // High-resolution monotonic clock for tests (microseconds since boot/monotonic epoch)
+    // Uses QueryPerformanceCounter on Windows and clock_gettime(CLOCK_MONOTONIC) on POSIX.
+    // Intended for measuring short durations in tests; not part of the library API.
+    uint64_t ts_ticks_us(void);
     void ts_delay(uint32_t ms);
 
     // Helper to build a common config for a session with provided buffers and duplex end
@@ -180,6 +184,16 @@ extern "C"
     int ts_build_case_dirs(const char *case_name, char *basedir, size_t basedir_sz, char *outdir, size_t outdir_sz);
     // Optional: small receiver warm-up without open-coding delay checks
     void ts_receiver_warmup(const val_config_t *cfg, uint32_t ms);
+
+#if VAL_ENABLE_METRICS
+    typedef struct {
+        int allow_soft_timeouts; // when non-zero, ignore soft timeout counters
+        int expect_files_sent;   // -1 to skip, otherwise exact expected (TX side)
+        int expect_files_recv;   // -1 to skip, otherwise exact expected (RX side)
+    } ts_metrics_expect_t;
+    // Returns 0 on success (clean), non-zero on failure and prints to stderr
+    int ts_assert_clean_metrics(val_session_t *tx, val_session_t *rx, const ts_metrics_expect_t *exp);
+#endif
 
     // Fake clock support for deterministic time tests
     typedef struct

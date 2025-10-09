@@ -33,7 +33,6 @@ typedef enum
     VAL_ERR_ABORTED = -11,
     // Adaptive TX related (Phase 1 scaffolding)
     VAL_ERR_MODE_NEGOTIATION_FAILED = -12,
-    VAL_ERR_MODE_SYNC_FAILED = -13,
     VAL_ERR_UNSUPPORTED_TX_MODE = -14,
     // Connection quality (graceful failure)
     VAL_ERR_PERFORMANCE = -15,

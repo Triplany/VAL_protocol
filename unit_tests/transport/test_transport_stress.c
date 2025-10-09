@@ -58,17 +58,20 @@ static int test_extreme_packet_loss(void)
     ts_set_console_logger_with_level(&tx_cfg, 4);  // DEBUG level
     ts_set_console_logger_with_level(&rx_cfg, 4);
     
-    // Keep timeouts reasonable to fail faster
+    // Keep timeouts reasonable to fail faster; bound max to avoid exceeding 30s watchdog
     tx_cfg.timeouts.min_timeout_ms = 500;
-    tx_cfg.timeouts.max_timeout_ms = 5000;
+    tx_cfg.timeouts.max_timeout_ms = 4000; // cap to 4s per try for quicker fail
     rx_cfg.timeouts.min_timeout_ms = 500;
-    rx_cfg.timeouts.max_timeout_ms = 5000;
+    rx_cfg.timeouts.max_timeout_ms = 4000;
     tx_cfg.retries.data_retries = 0;  // No retries under extreme loss to fail fast
     rx_cfg.retries.data_retries = 0;
     tx_cfg.retries.meta_retries = 0;  // No retries for metadata
     rx_cfg.retries.meta_retries = 0;
     tx_cfg.retries.handshake_retries = 0;  // Fail immediately on handshake timeout under extreme loss
     rx_cfg.retries.handshake_retries = 0;
+    // Also reduce ACK retries so worst-case total wait remains < 30s (4 * 4s = 16s)
+    tx_cfg.retries.ack_retries = 4;
+    rx_cfg.retries.ack_retries = 4;
     
     val_session_t *tx = NULL, *rx = NULL;
     uint32_t detail;
@@ -91,11 +94,12 @@ static int test_extreme_packet_loss(void)
     // Set a 30-second watchdog - test should complete or fail within this time
     ts_cancel_token_t watchdog = ts_start_timeout_guard(30000, "stress_extreme_loss");
     
-    uint32_t start_time = ts_ticks();
+    uint64_t start_us = ts_ticks_us();
     const char *files[] = {infile};
     printf("Starting transfer with ~15%% packet loss...\n");
     val_status_t err = val_send_files(tx, files, 1, NULL);
-    uint32_t elapsed_ms = ts_ticks() - start_time;
+    uint64_t elapsed_us = ts_ticks_us() - start_us;
+    uint32_t elapsed_ms = (uint32_t)(elapsed_us / 1000ull);
     
     ts_cancel_timeout_guard(watchdog);
     
@@ -194,11 +198,12 @@ static int test_sustained_moderate_loss(void)
     ts_thread_t rx_thread = ts_start_receiver(rx, outdir);
     ts_delay(100);
     
-    uint32_t start_time = ts_ticks();
+    uint64_t start_us = ts_ticks_us();
     const char *files[] = {infile};
     printf("Starting transfer with ~4%% packet loss...\n");
     val_status_t err = val_send_files(tx, files, 1, NULL);
-    uint32_t elapsed_ms = ts_ticks() - start_time;
+    uint64_t elapsed_us = ts_ticks_us() - start_us;
+    uint32_t elapsed_ms = (uint32_t)(elapsed_us / 1000ull);
     
     ts_join_thread(rx_thread);
     val_session_destroy(tx);

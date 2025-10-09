@@ -96,34 +96,7 @@ static int run_veto_case(void)
         return 1;
     }
 
-    // Query negotiated streaming permissions on both sessions after handshake/transfer
-    bool tx_send_allowed = false, tx_recv_allowed = false;
-    bool rx_send_allowed = false, rx_recv_allowed = false;
-    if (val_get_streaming_allowed(tx, &tx_send_allowed, &tx_recv_allowed) != VAL_OK ||
-        val_get_streaming_allowed(rx, &rx_send_allowed, &rx_recv_allowed) != VAL_OK)
-    {
-        fprintf(stderr, "val_get_streaming_allowed failed\n");
-        free(inpath);
-        free(outpath);
-        return 1;
-    }
-
-    // Expectation: sender wanted to stream, but receiver vetoed -> sender may NOT stream
-    if (tx_send_allowed)
-    {
-        fprintf(stderr, "expected sender streaming vetoed, but got allowed=%d\n", (int)tx_send_allowed);
-        free(inpath);
-        free(outpath);
-        return 1;
-    }
-    // And receiver reports it does NOT accept peer streaming
-    if (rx_recv_allowed)
-    {
-        fprintf(stderr, "expected receiver not accepting streaming, but got recv_allowed=%d\n", (int)rx_recv_allowed);
-        free(inpath);
-        free(outpath);
-        return 1;
-    }
+    // Streaming overlay removed in bounded-window model; no permission checks needed here.
 
     // Cleanup
     val_session_destroy(tx);
