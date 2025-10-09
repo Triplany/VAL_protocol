@@ -364,7 +364,7 @@ Sender                                  Receiver
 
 #### 5.3.1 Windowed Transmission
 
-Data packets are sent with a sliding window:
+Data packets are sent with a bounded window:
 
 ```
 Sender                                  Receiver

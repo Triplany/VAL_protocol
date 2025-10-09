@@ -530,7 +530,7 @@ int main(int argc, char **argv)
 	cfg.resume.tail_cap_bytes = tail_bytes;
 
 	// Preferred single-knob flow control
-	cfg.tx_flow.window_cap_packets = 64; // reasonable default; adjust per platform
+	cfg.tx_flow.window_cap_packets = 512; // reasonable default; adjust per platform
 	cfg.tx_flow.initial_cwnd_packets = 0; // auto
 	cfg.tx_flow.retransmit_cache_enabled = false;
 	cfg.tx_flow.degrade_error_threshold = (uint16_t)opt_degrade;

@@ -67,8 +67,8 @@ This documentation is organized into the following sections:
 
 ## Key Features
 
-- Bounded-window flow control: simple 1..64 packet windows, negotiated at handshake and adapted at runtime
-- **Adaptive Transmission**: Dynamic window sizing (1-64 packets) that automatically escalates/de-escalates based on network quality and RTT measurements
+- Bounded-window flow control: simple 1..512 packet windows, negotiated at handshake and adapted at runtime
+- **Adaptive Transmission**: Dynamic window sizing (1-512 packets) that automatically escalates/de-escalates based on network quality and RTT measurements
 - **Powerful Abstraction Layer**: Complete separation of concerns - implement custom encryption, compression, in-memory transfers, hardware CRC acceleration, or use any byte source/sink (files, RAM, flash, network buffers)
 - **Resume Support**: Simplified, CRC-verified resume with tail-only verification (configurable cap) and skip-existing policy
 - **Embedded-Friendly**: Zero dynamic allocations in steady state, configurable memory footprint, blocking I/O design for bare-metal and RTOS integration

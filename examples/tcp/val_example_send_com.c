@@ -754,7 +754,7 @@ int main(int argc, char **argv) {
 	}
 
 	// Flow control (bounded window)
-	cfg.tx_flow.window_cap_packets = 64; /* default cap */
+	cfg.tx_flow.window_cap_packets = 512; /* default cap */
 	cfg.tx_flow.initial_cwnd_packets = 0;
 	cfg.tx_flow.retransmit_cache_enabled = false;
 	cfg.tx_flow.degrade_error_threshold = 3;

@@ -45,8 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.0] - 2025-10-04
 
 ### Added
-Removed: Streaming pacing overlay. Protocol now uses a single bounded-window model with cwnd-based adaptation.
-- **Adaptive Transmission System**: Dynamic window-based flow control with discrete rungs (1, 2, 4, 8, 16, 32, 64 packets) that automatically adjusts based on network conditions
+- **Bounded-Window Flow Control**: Single unified flow control model with dynamic window sizing (1-512 packets) and AIMD congestion control adaptation
+- **Adaptive Transmission System**: Dynamic window-based flow control with discrete rungs that automatically adjusts based on network conditions
 - **Powerful Abstraction Layer**: Complete separation of protocol from transport/filesystem/system - enables custom encryption, compression, hardware CRC, in-memory transfers, any byte source
 - **Simplified Resume Modes**: NEVER, SKIP_EXISTING, TAIL (tail verification with configurable cap and unified mismatch policy)
 - **Metadata Validation Framework**: Application callbacks to accept/skip/abort files based on metadata
@@ -68,10 +68,15 @@ Removed: Streaming pacing overlay. Protocol now uses a single bounded-window mod
 - **Improved**: Error detail masks reorganized with clear category segmentation
 - **Improved**: Progress callbacks now include enhanced `val_progress_info_t` with ETA and rate
 
+### Removed
+- **Streaming Mode**: Removed streaming pacing overlay; protocol now uses single bounded-window model with cwnd-based adaptation
+- **Mode Synchronization**: Removed mode synchronization and streaming permissions
+- **Whole-File CRC32**: Removed from SEND_META and public API; integrity provided by per-packet CRCs and optional tail verification
+- **Complex Resume Modes**: Consolidated VAL_RESUME_CRC_TAIL/FULL variants into simplified NEVER/SKIP_EXISTING/TAIL system
+
 ### Fixed
 - Resume verification now correctly handles files larger than incoming size
 - CRC verification window capping for responsive embedded systems (2 MB tail default)
-Removed: Mode synchronization and streaming permissions
 - Header CRC computation excludes reserved fields properly
 - Transport flush called after control packets for better reliability
 

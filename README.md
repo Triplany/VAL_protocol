@@ -36,19 +36,17 @@ _Dedicated to Valerie Lee - for all her support over the years allowing me to ch
 
 ## Overview
 
-VAL Protocol is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. A small, efficient protocol featuring fixed header + variable payload (bounded by a negotiated MTU) + trailer CRC. It supports a bounded congestion window with AIMD, comprehensive resume modes, cumulative ACKs, and avoids dynamic allocations in steady state. Integrity is enforced by header and trailer CRCs; whole-file CRCs are not used on the wire.
+VAL (Versatile Adaptive Link) Protocol v0.7 is a robust, blocking-I/O file transfer protocol library written in C, designed for reliable file transfers across diverse network conditions and embedded systems. The protocol uses fixed header + variable payload + trailer CRC format with bounded congestion window, AIMD flow control, and zero dynamic allocations in steady state.
 
 ### Key Features
 
-- **Bounded Windowing**: Congestion window negotiated at handshake (packet-count based) and adapted over time using success/error signals
-- **Powerful Abstraction Layer**: Complete separation of protocol from transport, filesystem, and system - enables custom encryption, compression, in-memory transfers, any byte source
-- **Resume Support**: Simplified, CRC-verified resume with tail-only verification (configurable cap; default small cap); also supports skip-existing
-- **Embedded-Friendly**: Zero dynamic allocations in steady state, configurable memory footprint, works on bare-metal
+- **Bounded Window Flow Control**: Congestion window negotiated at handshake (packet-count based) with AIMD adaptation based on network conditions
+- **Powerful Abstraction Layer**: Complete separation of protocol from transport, filesystem, and system - enables custom encryption, compression, in-memory transfers, hardware acceleration
+- **Resume Support**: Simplified tail-verification resume with configurable window cap; supports never/skip-existing/tail modes  
+- **Embedded-Friendly**: Zero dynamic allocations in steady state, configurable memory footprint, works on bare-metal MCUs
 - **Transport Agnostic**: Works over TCP, UART, RS-485, CAN, USB CDC, or any reliable byte stream
 - **Robust Error Handling**: Comprehensive error codes with detailed 32-bit diagnostic masks
-- **Optional Diagnostics**: Compile-time metrics collection and a lightweight packet capture hook
-
-- Development topics are covered across the docs/ guides.
+- **Optional Diagnostics**: Compile-time metrics collection and lightweight packet capture hook
 - Pre‑1.0 policy: backward compatibility isn’t guaranteed until v1.0. The current on‑wire behavior uses cumulative DATA_ACKs, DONE_ACK, and two CRCs (header + trailer). All multi‑byte fields are little‑endian.
   - The packet header includes a reserved `wire_version` byte (after `type`) that is always 0 in the base protocol; receivers validate it and reject non‑zero as incompatible for future evolution.
 - Public headers: `include/`
@@ -56,36 +54,44 @@ VAL Protocol is a robust, blocking-I/O file transfer protocol library written in
 - Examples: `examples/tcp/` (TCP send/receive)
 - Unit tests: `unit_tests/` (CTest executables; artifacts like ut_artifacts live under the build tree)
 
-## At a glance
+## Protocol Overview
 
-- On-wire header (24 bytes):
-  - type (1), wire_version (1, always 0), reserved2 (2), payload_len (4), seq (4), offset (8), header_crc (4)
-- Integrity: CRC-32 over header (bytes 0–19), and a trailer CRC over header+payload+padding
-- Handshake (HELLO): includes version, packet_size, and window preferences/caps
+**Wire Format:**
+- Fixed 24-byte header: type(1) + wire_version(1) + reserved(2) + payload_len(4) + seq(4) + offset(8) + header_crc(4)
+- Variable payload (0 to MTU-24 bytes)
+- Trailer CRC-32 over header+payload
+- All multi-byte fields are little-endian
 
-## Features (from source)
+**Core Features:**
+- Protocol version 0.7 with bounded-window transmission
+- Packet-based flow control with negotiated window caps (1-65535 packets)
+- AIMD congestion control with configurable thresholds
+- Adaptive timeouts using RFC 6298-like RTT estimation
+- CRC-32 integrity verification on all packets
+- Emergency cancel capability (ASCII CAN 0x18)
 
-- Feature bits: see `include/val_protocol.h` and `val_get_builtin_features()`
-  - Currently no optional features are defined; all core features (bounded window, resume) are implicit and always available.
-- Resume configuration
-  - Modes (see `val_resume_mode_t`): `VAL_RESUME_NEVER`, `VAL_RESUME_SKIP_EXISTING`, `VAL_RESUME_TAIL`.
-  - Tail mode uses a trailing verification window with a configurable cap (`resume.tail_cap_bytes`), clamped internally (up to 256 MiB). Optional `min_verify_bytes` avoids too-small windows. On mismatch, the policy is unified via `resume.mismatch_skip` (0 = restart from zero, 1 = skip the file).
-  - Sizes/offsets on wire are 64‑bit LE.
-- Flow control
-  - Single knob: `val_tx_flow_config_t` in `val_config_t` with `window_cap_packets`, `initial_cwnd_packets`, thresholds, and optional retransmit cache
-  - Accessors:
-    - `val_get_cwnd_packets(session, &out_cwnd)` — current congestion window (packets)
-    - `val_get_peer_tx_cap_packets(session, &out_cap)` — peer-advertised TX cap (packets)
-    - `val_get_effective_packet_size(session, &out_packet_size)` — negotiated MTU
-- Diagnostics (optional, compile‑time)
-  - Metrics: `VAL_ENABLE_METRICS` — packet/byte counters, timeouts, retransmits, CRC errors, etc.
-  - Packet capture hook: configure `config.capture.on_packet` to observe TX/RX packets (type, sizes, offset)
-  - Emergency cancel: `val_emergency_cancel(session)` sends a best‑effort CANCEL and marks the session aborted.
+**Resume Modes:**
+- `VAL_RESUME_NEVER`: Always overwrite from zero
+- `VAL_RESUME_SKIP_EXISTING`: Skip any existing file (no verification)
+- `VAL_RESUME_TAIL`: Verify trailing window of local file; resume on match
 
-Limitations
-- Very large verification windows (>4 GiB) are not currently supported by the example filesystem adapter during VERIFY CRC computation.
-  The core clamps verification windows for responsiveness: tail modes are capped by default (≈8 MiB by default, configurable), with an optional minimum.
-  and falls back to a large‑tail verify beyond that. Application integrations can supply their own filesystem and CRC providers to remove these limits.
+**Flow Control Configuration:**
+- `window_cap_packets`: Max in-flight packets (negotiated with peer)
+- `initial_cwnd_packets`: Initial congestion window size
+- `degrade_error_threshold`: Errors before halving cwnd (AIMD)
+- `recovery_success_threshold`: Successes before cwnd += 1
+
+**API Functions:**
+- `val_send_files()` / `val_receive_files()`: Main transfer functions
+- `val_get_cwnd_packets()`: Current congestion window size
+- `val_get_peer_tx_cap_packets()`: Peer's advertised TX capability
+- `val_get_effective_packet_size()`: Negotiated MTU
+- `val_emergency_cancel()`: Best-effort session abort
+
+**Optional Diagnostics:**
+- Metrics: packet/byte counters, timeouts (soft/hard), retransmits, CRC errors
+- Packet capture hook: observe TX/RX packets with minimal overhead
+- Debug logging with runtime filtering
 
 ## Build options
 
