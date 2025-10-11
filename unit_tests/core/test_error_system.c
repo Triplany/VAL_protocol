@@ -11,6 +11,7 @@
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "error_system");
 
     // Create a valid session using the in-memory duplex transport via test support
     test_duplex_t d;
@@ -90,5 +91,7 @@ int main(void)
 #endif
     val_session_destroy(s);
     test_duplex_free(&d);
+    
+    ts_cancel_timeout_guard(wd);
     return 0;
 }

@@ -5,6 +5,8 @@
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "clock_requirement");
+    
     // Prepare a valid config using test helpers
     uint8_t send_buf[2048];
     uint8_t recv_buf[2048];
@@ -43,5 +45,7 @@ int main(void)
     val_session_destroy(s);
 
     test_duplex_free(&link);
+    
+    ts_cancel_timeout_guard(wd);
     return 0;
 }

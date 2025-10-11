@@ -19,6 +19,8 @@ static void on_progress_cancel_rx(const val_progress_info_t *info)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "cancel_mid_data_receiver");
+    
     const size_t packet = 2048; // ensure multiple packets
     const size_t depth = 64;
     // Big file so transfer is long enough to cancel mid-flight (overridable)
@@ -129,6 +131,8 @@ int main(void)
     }
 
     test_duplex_free(&d);
+    
+    ts_cancel_timeout_guard(wd);
     printf("OK\n");
     return 0;
 }

@@ -320,11 +320,13 @@ typedef enum {
 
 **Mode Selection Guide:**
 
-- **NEVER**: Debug/testing, always want clean copy
-- **SKIP_EXISTING**: Avoid re-transferring completed files (no verification)
-- **CRC_TAIL**: Fast resume with verification, skip on corruption
-- **TAIL**: Fast resume using trailing verification window (cap via resume.tail_cap_bytes); restart or skip on mismatch based on resume.mismatch_skip
-Notes: Large files are verified using a tail window; adjust resume.tail_cap_bytes and mismatch policy as needed.
+- **NEVER**: Always start from beginning (clean copy, no resume)
+- **SKIP_EXISTING**: Skip any existing file (no verification, useful for batch re-transfer)
+- **TAIL**: CRC-verified resume using trailing verification window (cap via `tail_cap_bytes`); on mismatch, restart file or skip based on `mismatch_skip`
+
+**Notes**: 
+- TAIL mode verifies trailing data up to the configured cap (default clamps to safe maximum)
+- Adjust `resume.tail_cap_bytes` and `resume.mismatch_skip` to control verification window and mismatch behavior
 
 ---
 

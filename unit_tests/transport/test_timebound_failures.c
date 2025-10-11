@@ -213,9 +213,13 @@ static int run_handshake_fail_fast_case(const char *case_name)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_INTEGRATION_MS, "timebound_failures");
+    
     int failures = 0;
     printf("\n=== Time-bounded failure tests ===\n");
     failures += run_extreme_loss_case("timebound_extreme_loss");
     failures += run_handshake_fail_fast_case("timebound_handshake_fail");
+    
+    ts_cancel_timeout_guard(wd);
     return failures ? 1 : 0;
 }

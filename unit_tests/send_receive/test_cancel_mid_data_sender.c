@@ -26,6 +26,8 @@ static void on_progress_cancel_tx(const val_progress_info_t *info)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "cancel_mid_data_sender");
+    
     const size_t packet = 2048;
     const size_t depth = 64;
     const size_t file_size = ts_env_size_bytes("VAL_TEST_CANCEL_TX_SIZE", 8 * 1024 * 1024 + 13);
@@ -143,6 +145,8 @@ int main(void)
     }
 
     test_duplex_free(&d);
+    
+    ts_cancel_timeout_guard(wd);
     printf("OK\n");
     return 0;
 }

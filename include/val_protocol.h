@@ -39,8 +39,6 @@ extern "C"
 #include <stdint.h>
 #include <stdbool.h>
 
-// Streaming overlay has been removed in the bounded-window model.
-
 // Protocol constants
 #define VAL_MAGIC 0x56414C00u // "VAL\0"
 #define VAL_VERSION_MAJOR 0u
@@ -70,9 +68,7 @@ extern "C"
         VAL_PKT_DATA_NAK = 13,   // negative ack with next_expected_offset and reason bits
     } val_packet_type_t;
 
-    // Optional flags for DATA_ACK payload semantics (when payload is present)
-    // For now, most ACKs remain header-only with offset used as rx_highwater.
-    // These flags are reserved for future use to distinguish heartbeat vs EOF.
+    // Optional flags for DATA_ACK payload semantics (currently unused, reserved for future extensions)
     typedef enum
     {
         VAL_ACK_FLAG_HEARTBEAT = 1u << 0,
@@ -130,6 +126,24 @@ extern "C"
         VAL_RESUME_SKIP_EXISTING = 1, // Skip any existing file (no verification)
         VAL_RESUME_TAIL = 2,          // Verify a tail window of the local file; on match resume from local_size
     } val_resume_mode_t;
+
+    // Resume action responses
+    typedef enum
+    {
+        VAL_RESUME_START_ZERO = 0,
+        VAL_RESUME_START_OFFSET = 1,
+        VAL_RESUME_VERIFY_FIRST = 2,
+        VAL_RESUME_SKIP_FILE = 3,
+        VAL_RESUME_ABORT_FILE = 4,
+    } val_resume_action_t;
+
+    typedef struct
+    {
+        val_resume_action_t action;
+        uint64_t resume_offset;
+        uint32_t verify_crc;
+        uint64_t verify_length;
+    } val_resume_resp_t;
 
     typedef struct val_session_s val_session_t;
     // Packet capture hook (optional): observe each on-wire packet with minimal overhead.
@@ -269,6 +283,9 @@ extern "C"
         {
             uint32_t min_timeout_ms; // Minimum allowed timeout (floor)
             uint32_t max_timeout_ms; // Maximum allowed timeout (ceiling)
+            // Single knob to bound total time spent trying the initial HELLO handshake (both sides).
+            // 0 uses a sensible default chosen by the implementation (typically ~7000 ms).
+            uint32_t handshake_budget_ms;
         } timeouts;
 
         // Feature requirements and requests (used during handshake)
@@ -409,9 +426,8 @@ extern "C"
         uint64_t send_by_type[32];
         uint64_t recv_by_type[32];
         // Reliability/timing
-        // Total timeout events observed (soft + hard). Soft = interim (recoverable) waits; Hard = terminal (operation failed/exhausted).
+        // Total timeout events observed (only hard timeouts are tracked)
         uint32_t timeouts;
-        uint32_t timeouts_soft; // slice/interim timeouts that did not end the operation
         uint32_t timeouts_hard; // terminal timeouts that ended an operation after retries/deadline
         uint32_t retransmits;
         uint32_t crc_errors;

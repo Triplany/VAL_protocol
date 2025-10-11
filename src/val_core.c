@@ -7,6 +7,41 @@
 
 // A monotonic millisecond clock is required via config.system.get_ticks_ms; no built-in defaults.
 
+// Helper: read exactly N bytes within timeout, tolerating partial reads.
+// This is C-compatible (no nested functions) and is reused by recv paths.
+static int val_recv_full(void *io_context,
+                         int (*recv_fn)(void *, void *, size_t, size_t *, uint32_t),
+                         uint32_t (*ticks_fn)(void),
+                         void *dst,
+                         size_t need,
+                         uint32_t to_ms)
+{
+    if (!recv_fn)
+        return VAL_ERR_IO;
+    size_t have = 0;
+    uint32_t start = ticks_fn ? ticks_fn() : 0u;
+    for (;;)
+    {
+        if (have >= need)
+            return VAL_OK;
+        uint32_t now = ticks_fn ? ticks_fn() : 0u;
+        uint32_t elapsed = (now >= start) ? (now - start) : 0u;
+        uint32_t remaining = (to_ms > elapsed) ? (to_ms - elapsed) : 0u;
+        // Ensure at least a minimal wait to avoid busy looping on transports that need >0 timeout
+        uint32_t slice = remaining ? remaining : (to_ms ? 1u : 0u);
+        size_t rgot = 0;
+        int r = recv_fn(io_context, (uint8_t *)dst + have, need - have, &rgot, slice);
+        if (r < 0)
+            return VAL_ERR_IO;
+        have += rgot;
+        if (have >= need)
+            return VAL_OK;
+        if ((ticks_fn ? ticks_fn() : 0u) - start >= to_ms)
+            return VAL_ERR_TIMEOUT;
+        // Otherwise, loop again within remaining time
+    }
+}
+
 // Internal logging implementation. If compile-time logging is enabled and a sink is provided in config,
 // forward messages; otherwise, drop them. This function itself is a tiny call and will be removed by
 // the compiler entirely when VAL_LOG_LEVEL==0 because no callers remain.
@@ -594,6 +629,14 @@ val_status_t val_session_create(const val_config_t *config, val_session_t **out_
     val_internal_lock_init(s);
     val_internal_init_timing(s);
     s->effective_packet_size = s->cfg.buffers.packet_size;
+    // Set default handshake budget if not provided (single-knob robustness)
+    if (s->cfg.timeouts.handshake_budget_ms == 0)
+        s->cfg.timeouts.handshake_budget_ms = 7000u; // ~7s default budget
+    // Clamp budget to at least min_timeout and at most max_timeout * 4 to avoid extremes
+    if (s->cfg.timeouts.min_timeout_ms && s->cfg.timeouts.handshake_budget_ms < s->cfg.timeouts.min_timeout_ms)
+        s->cfg.timeouts.handshake_budget_ms = s->cfg.timeouts.min_timeout_ms;
+    if (s->cfg.timeouts.max_timeout_ms && s->cfg.timeouts.handshake_budget_ms > (s->cfg.timeouts.max_timeout_ms * 4u))
+        s->cfg.timeouts.handshake_budget_ms = s->cfg.timeouts.max_timeout_ms * 4u;
     s->handshake_done = false;
     s->seq_counter = 0;
     s->last_error.code = VAL_OK;
@@ -671,20 +714,8 @@ val_status_t val_get_error(val_session_t *session, val_error_t *out)
     return VAL_OK;
 }
 
-// Packet helpers
-static void fill_header(val_packet_header_t *h, val_packet_type_t type, uint32_t payload_len, uint64_t offset, uint32_t seq)
-{
-    memset(h, 0, sizeof(*h));
-    h->type = (uint8_t)type;
-    h->wire_version = 0; // base/core protocol reserves this byte; always 0 for now
-    h->reserved2 = 0;
-    h->payload_len = payload_len;
-    h->seq = seq;
-    h->offset = offset;
-    h->header_crc = 0;
-}
-
-int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len, uint64_t offset)
+// Core sender with control over including explicit DATA offset and finalized NAK encoding
+static int val__internal_send_packet_core(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len, uint64_t offset, int include_data_offset)
 {
     // Serialize low-level send operations; recursive with public API locks
     val_internal_lock(s);
@@ -700,29 +731,104 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
         return VAL_ERR_IO;
     }
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size; // MTU
-    if (payload_len > (uint32_t)(P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE))
+    uint8_t *buf = (uint8_t *)s->config->buffers.send_buffer;
+    uint8_t flags = 0;
+    uint16_t content_len = payload_len;
+    uint32_t type_data = 0;
+    uint8_t *content_dst = buf + VAL_WIRE_HEADER_SIZE;
+    size_t copy_payload_from = 0; // 0 means use provided payload as-is
+
+    switch (type)
     {
-        // Payload does not fit into negotiated MTU
+    case VAL_PKT_DATA:
+        if (include_data_offset)
+        {
+            flags |= VAL_DATA_OFFSET_PRESENT;
+            content_len = (uint16_t)(payload_len + 8u);
+            if (payload_len && payload)
+            {
+                if (payload == content_dst)
+                {
+                    // Shift existing payload right by 8 bytes to make room for offset; handle overlap safely
+                    memmove(content_dst + 8, content_dst, payload_len);
+                    VAL_PUT_LE64(content_dst, offset);
+                }
+                else
+                {
+                    VAL_PUT_LE64(content_dst, offset);
+                    memcpy(content_dst + 8, payload, payload_len);
+                }
+            }
+            else
+            {
+                VAL_PUT_LE64(content_dst, offset);
+            }
+        }
+        else
+        {
+            // Implied offset: no prefix; copy payload as-is
+            content_len = payload_len;
+            if (payload_len && payload)
+                memcpy(content_dst, payload, payload_len);
+        }
+        break;
+    case VAL_PKT_DATA_ACK:
+    case VAL_PKT_DONE_ACK:
+    case VAL_PKT_EOT_ACK:
+    {
+        // Encode cumulative ACK offset: low32 in type_data, optional high32 in content (4 bytes)
+        uint32_t low = (uint32_t)(offset & 0xFFFFFFFFull);
+        uint32_t high = (uint32_t)((offset >> 32) & 0xFFFFFFFFull);
+        type_data = low;
+        if (high != 0)
+        {
+            content_len = 4u;
+            VAL_PUT_LE32(content_dst, high);
+        }
+        else
+        {
+            content_len = 0u;
+        }
+        if (type == VAL_PKT_DONE_ACK)
+            flags |= VAL_ACK_DONE_FILE;
+        if (type == VAL_PKT_EOT_ACK)
+            flags |= VAL_ACK_EOT;
+        break;
+    }
+    case VAL_PKT_DATA_NAK:
+    {
+        // New NAK format: type_data = low32(next_expected); content = [high32][reason][reserved]
+        uint32_t low = (uint32_t)(offset & 0xFFFFFFFFull);
+        uint32_t high = (uint32_t)((offset >> 32) & 0xFFFFFFFFull);
+        type_data = low;
+        uint32_t reason = 0x1u; // GAP default
+        if (payload && payload_len >= 4)
+            reason = VAL_GET_LE32((const uint8_t *)payload);
+        VAL_PUT_LE32(content_dst + 0, high);
+        VAL_PUT_LE32(content_dst + 4, reason);
+        VAL_PUT_LE32(content_dst + 8, 0u);
+        content_len = 12u;
+        break;
+    }
+    default:
+        // Control packets: copy payload raw
+        if (payload_len && payload)
+            memcpy(content_dst, payload, payload_len);
+        break;
+    }
+
+    // Validate computed content length now that it's known
+    if ((size_t)content_len > (P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE))
+    {
         val_internal_set_error_detailed(s, VAL_ERR_INVALID_ARG, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
-        VAL_LOG_ERROR(s, "send_packet: payload too large for MTU");
-    val_internal_unlock(s);
+        VAL_LOG_ERROR(s, "send_packet: content too large for MTU");
+        val_internal_unlock(s);
         return VAL_ERR_INVALID_ARG;
     }
-    uint8_t *buf = (uint8_t *)s->config->buffers.send_buffer;
-    uint32_t seq = s->seq_counter++;
-    val_packet_header_t header;
-    fill_header(&header, type, payload_len, offset, seq);
-    // Serialize header once with header_crc=0, compute CRC over 24 bytes, then write CRC in-place
-    val_serialize_header(&header, buf);
-    uint32_t header_crc = val_internal_crc32(s, buf, VAL_WIRE_HEADER_SIZE);
-    VAL_PUT_LE32(buf + 20, header_crc);
-    uint8_t *payload_dst = buf + VAL_WIRE_HEADER_SIZE;
-    if (payload_len && payload)
-    {
-        memcpy(payload_dst, payload, payload_len);
-    }
-    // Trailer CRC over Header+Data
-    size_t used = VAL_WIRE_HEADER_SIZE + payload_len;
+    // Serialize 8-byte header
+    val_serialize_frame_header((uint8_t)type, flags, content_len, type_data, buf);
+    // Trailer CRC over [header + content]
+    size_t used = VAL_WIRE_HEADER_SIZE + (size_t)content_len;
     uint32_t pkt_crc = val_internal_crc32(s, buf, used);
     VAL_PUT_LE32(buf + used, pkt_crc);
     size_t total_len = used + VAL_WIRE_TRAILER_SIZE;
@@ -759,6 +865,18 @@ int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const voi
     return VAL_OK;
 }
 
+int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len, uint64_t offset)
+{
+    // Preserve previous behavior: DATA includes explicit offset by default
+    return val__internal_send_packet_core(s, type, payload, payload_len, offset, 1);
+}
+
+int val_internal_send_packet_ex(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len,
+                                uint64_t offset, int include_data_offset)
+{
+    return val__internal_send_packet_core(s, type, payload, payload_len, offset, include_data_offset);
+}
+
 int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *payload_out, uint32_t payload_cap,
                              uint32_t *payload_len_out, uint64_t *offset_out, uint32_t timeout_ms)
 {
@@ -770,105 +888,30 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
     size_t P = s->effective_packet_size ? s->effective_packet_size : s->config->buffers.packet_size; // MTU
     uint8_t *buf = (uint8_t *)s->config->buffers.recv_buffer;
     size_t got = 0;
-    // Read header first
-    int rc = recv_fn ? recv_fn(io, buf, VAL_WIRE_HEADER_SIZE, &got, timeout_ms) : -1;
-    if (rc < 0)
+
+    // Read header first (8 bytes) using robust partial-read loop
+    int rc = val_recv_full(io, recv_fn, ticks_fn, buf, VAL_WIRE_HEADER_SIZE, timeout_ms);
+    if (rc == VAL_ERR_IO)
     {
         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
         VAL_LOG_ERROR(s, "recv_packet: transport error on header");
-    val_internal_unlock(s);
+        val_internal_unlock(s);
         return VAL_ERR_IO;
     }
-    if (got != VAL_WIRE_HEADER_SIZE)
+    if (rc == VAL_ERR_TIMEOUT)
     {
         // Benign timeout while waiting for a header; record without emitting a CRITICAL numeric log
         val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
-    VAL_LOG_DEBUGF(s, "recv_packet: header timeout ts=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u));
-    val_internal_unlock(s);
-        val_metrics_inc_timeout(s);
+        if (timeout_ms > 50u) {
+            VAL_LOG_DEBUGF(s, "recv_packet: HEADER timeout ts=%u timeout_ms=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u), timeout_ms);
+        }
+        val_internal_unlock(s);
         return VAL_ERR_TIMEOUT;
     }
-    uint8_t header_scratch[VAL_WIRE_HEADER_SIZE];
-    for (;;)
-    {
-        memcpy(header_scratch, buf, VAL_WIRE_HEADER_SIZE);
-        uint32_t header_crc_expected = VAL_GET_LE32(buf + 20);
-        VAL_PUT_LE32(header_scratch + 20, 0u);
-        uint32_t header_crc_calc = val_internal_crc32(s, header_scratch, VAL_WIRE_HEADER_SIZE);
-        if (header_crc_calc == header_crc_expected)
-        {
-            break;
-        }
-
-        // Header corruption detected. Increment metrics and attempt to resynchronize to the next valid header
-        // boundary by sliding a 1-byte window until a plausible header CRC matches and basic sanity checks pass.
-        VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_CRC_HEADER);
-        VAL_LOG_ERROR(s, "recv_packet: header CRC mismatch (attempting resync)");
-#if VAL_ENABLE_METRICS
-        s->metrics.crc_errors++;
-#endif
-        uint8_t window[VAL_WIRE_HEADER_SIZE];
-        memcpy(window, buf, VAL_WIRE_HEADER_SIZE);
-        size_t bytes_scanned = 0;
-        const size_t scan_limit = P; // don't scan more than one MTU worth of extra bytes
-        for (;;)
-        {
-            memmove(window, window + 1, VAL_WIRE_HEADER_SIZE - 1);
-            size_t gotb = 0;
-            int rc2 = recv_fn ? recv_fn(io, window + VAL_WIRE_HEADER_SIZE - 1, 1, &gotb, timeout_ms) : -1;
-            if (rc2 < 0)
-            {
-                VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
-                VAL_LOG_ERROR(s, "recv_packet: transport error during resync");
-                val_internal_unlock(s);
-                return VAL_ERR_IO;
-            }
-            if (gotb != 1)
-            {
-                // Resync timeout — record without CRITICAL numeric log
-                val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
-                VAL_LOG_DEBUGF(s, "recv_packet: timeout while resyncing after bad header ts=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u));
-                val_internal_unlock(s);
-                val_metrics_inc_timeout(s);
-                return VAL_ERR_TIMEOUT;
-            }
-            bytes_scanned++;
-
-            uint8_t tmp[VAL_WIRE_HEADER_SIZE];
-            memcpy(tmp, window, VAL_WIRE_HEADER_SIZE);
-            uint32_t exp = VAL_GET_LE32(window + 20);
-            VAL_PUT_LE32(tmp + 20, 0u);
-            uint32_t calc = val_internal_crc32(s, tmp, VAL_WIRE_HEADER_SIZE);
-            if (calc == exp)
-            {
-                val_packet_header_t candidate;
-                val_deserialize_header(window, &candidate);
-                if (candidate.wire_version == 0 &&
-                    candidate.payload_len <= (uint32_t)(P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE))
-                {
-                    memcpy(buf, window, VAL_WIRE_HEADER_SIZE);
-                    break;
-                }
-            }
-            if (bytes_scanned > scan_limit)
-            {
-                VAL_LOG_ERROR(s, "recv_packet: resync failed after scanning limit");
-                val_internal_unlock(s);
-                return VAL_ERR_CRC;
-            }
-        }
-        // Loop re-validates the new header in buf
-    }
-    val_packet_header_t header;
-    val_deserialize_header(buf, &header);
-    if (header.wire_version != 0)
-    {
-        val_internal_set_error_detailed(s, VAL_ERR_INCOMPATIBLE_VERSION, VAL_ERROR_DETAIL_VERSION);
-    val_internal_unlock(s);
-        return VAL_ERR_INCOMPATIBLE_VERSION;
-    }
-
-    uint32_t payload_len = header.payload_len;
+    // Parse 8-byte header
+    uint8_t tbyte = 0, flags = 0; uint16_t content_len = 0; uint32_t type_data = 0;
+    val_deserialize_frame_header(buf, &tbyte, &flags, &content_len, &type_data);
+    uint32_t payload_len = (uint32_t)content_len;
     if (payload_len > (uint32_t)(P - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE))
     {
         VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
@@ -879,41 +922,41 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 
     if (payload_len > 0)
     {
-        size_t got2 = 0;
-    rc = recv_fn ? recv_fn(io, buf + VAL_WIRE_HEADER_SIZE, payload_len, &got2, timeout_ms) : -1;
-        if (rc < 0)
+        rc = val_recv_full(io, recv_fn, ticks_fn, buf + VAL_WIRE_HEADER_SIZE, payload_len, timeout_ms);
+        if (rc == VAL_ERR_IO)
         {
             VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
             VAL_LOG_ERROR(s, "recv_packet: transport error on payload");
             val_internal_unlock(s);
             return VAL_ERR_IO;
         }
-        if (got2 != payload_len)
+        if (rc == VAL_ERR_TIMEOUT)
         {
             val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
-            VAL_LOG_DEBUGF(s, "recv_packet: payload timeout ts=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u));
+            if (timeout_ms > 50u) {
+                VAL_LOG_DEBUGF(s, "recv_packet: PAYLOAD timeout ts=%u timeout_ms=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u), timeout_ms);
+            }
             val_internal_unlock(s);
-            val_metrics_inc_timeout(s);
             return VAL_ERR_TIMEOUT;
         }
     }
 
     uint8_t trailer_bytes[VAL_WIRE_TRAILER_SIZE];
-    size_t got3 = 0;
-    rc = recv_fn ? recv_fn(io, trailer_bytes, VAL_WIRE_TRAILER_SIZE, &got3, timeout_ms) : -1;
-    if (rc < 0)
+    rc = val_recv_full(io, recv_fn, ticks_fn, trailer_bytes, VAL_WIRE_TRAILER_SIZE, timeout_ms);
+    if (rc == VAL_ERR_IO)
     {
         VAL_SET_NETWORK_ERROR(s, VAL_ERROR_DETAIL_RECV_FAILED);
         VAL_LOG_ERROR(s, "recv_packet: transport error on trailer");
-    val_internal_unlock(s);
+        val_internal_unlock(s);
         return VAL_ERR_IO;
     }
-    if (got3 != VAL_WIRE_TRAILER_SIZE)
+    if (rc == VAL_ERR_TIMEOUT)
     {
         val_internal_set_last_error(s, VAL_ERR_TIMEOUT, VAL_ERROR_DETAIL_TIMEOUT_DATA);
-    VAL_LOG_DEBUGF(s, "recv_packet: trailer timeout ts=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u));
-    val_internal_unlock(s);
-        val_metrics_inc_timeout(s);
+        if (timeout_ms > 50u) {
+            VAL_LOG_DEBUGF(s, "recv_packet: TRAILER timeout ts=%u timeout_ms=%u", (unsigned)(ticks_fn ? ticks_fn() : 0u), timeout_ms);
+        }
+        val_internal_unlock(s);
         return VAL_ERR_TIMEOUT;
     }
 
@@ -930,15 +973,48 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         return VAL_ERR_CRC;
     }
 
-    uint8_t type_byte = header.type;
-    if (type)
-        *type = (val_packet_type_t)type_byte;
+    // Interpret per-type semantics and set out params
+    uint8_t type_byte = tbyte;
+    if (type) *type = (val_packet_type_t)type_byte;
+    if (payload_len_out) *payload_len_out = payload_len;
     if (offset_out)
-        *offset_out = header.offset;
-    if (payload_len_out)
-        *payload_len_out = payload_len;
+    {
+        uint64_t offv = 0;
+        if (type_byte == VAL_PKT_DATA)
+        {
+            if (flags & VAL_DATA_OFFSET_PRESENT)
+            {
+                offv = VAL_GET_LE64(buf + VAL_WIRE_HEADER_SIZE);
+            }
+            else
+            {
+                // Implied offset: mark with sentinel
+                offv = UINT64_MAX;
+            }
+        }
+        else if (type_byte == VAL_PKT_DATA_ACK || type_byte == VAL_PKT_DONE_ACK || type_byte == VAL_PKT_EOT_ACK)
+        {
+            uint32_t low = type_data;
+            uint32_t high = 0;
+            if (payload_len >= 4)
+                high = VAL_GET_LE32(buf + VAL_WIRE_HEADER_SIZE);
+            offv = ((uint64_t)high << 32) | (uint64_t)low;
+        }
+        else if (type_byte == VAL_PKT_DATA_NAK)
+        {
+            // Reconstruct next_expected from header+content
+            uint32_t low = type_data;
+            uint32_t high = (payload_len >= 4) ? VAL_GET_LE32(buf + VAL_WIRE_HEADER_SIZE) : 0u;
+            offv = ((uint64_t)high << 32) | (uint64_t)low;
+        }
+        else
+        {
+            offv = 0;
+        }
+        *offset_out = offv;
+    }
 
-    if (header.type == (uint8_t)VAL_PKT_CANCEL)
+    if (type_byte == (uint8_t)VAL_PKT_CANCEL)
     {
         val_internal_set_last_error(s, VAL_ERR_ABORTED, 0);
         VAL_LOG_WARN(s, "recv_packet: observed CANCEL on wire");
@@ -946,13 +1022,24 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
 
     if (payload_out && payload_cap)
     {
-        if (payload_len > payload_cap)
+        // Special handling for DATA with explicit offset: deliver only payload bytes to caller
+        const uint8_t *src = buf + VAL_WIRE_HEADER_SIZE;
+        uint32_t copy_len = payload_len;
+        if (type_byte == VAL_PKT_DATA && (flags & VAL_DATA_OFFSET_PRESENT))
+        {
+            if (payload_len < 8) { val_internal_unlock(s); return VAL_ERR_PROTOCOL; }
+            src += 8;
+            copy_len -= 8;
+            if (payload_len_out) *payload_len_out = copy_len;
+        }
+        if (copy_len > payload_cap)
         {
             val_internal_set_error_detailed(s, VAL_ERR_INVALID_ARG, VAL_ERROR_DETAIL_PAYLOAD_SIZE);
             val_internal_unlock(s);
             return VAL_ERR_INVALID_ARG;
         }
-        memcpy(payload_out, buf + VAL_WIRE_HEADER_SIZE, payload_len);
+        // Use memmove to handle potential overlap when payload_out points into the same recv buffer
+        memmove(payload_out, src, copy_len);
     }
 
     val_internal_unlock(s);
@@ -966,7 +1053,16 @@ int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *pa
         rec.type = type_byte;
         rec.wire_len = VAL_WIRE_HEADER_SIZE + payload_len + VAL_WIRE_TRAILER_SIZE;
         rec.payload_len = payload_len;
-        rec.offset = header.offset;
+        // Best-effort: compute offset as above for capture too
+        uint64_t cap_off = 0;
+        if (type_byte == VAL_PKT_DATA && (flags & VAL_DATA_OFFSET_PRESENT))
+            cap_off = VAL_GET_LE64(buf + VAL_WIRE_HEADER_SIZE);
+        else if (type_byte == VAL_PKT_DATA_ACK || type_byte == VAL_PKT_DONE_ACK || type_byte == VAL_PKT_EOT_ACK)
+        {
+            uint32_t low = type_data; uint32_t high = (payload_len >= 4) ? VAL_GET_LE32(buf + VAL_WIRE_HEADER_SIZE) : 0;
+            cap_off = ((uint64_t)high << 32) | (uint64_t)low;
+        }
+        rec.offset = cap_off;
     rec.crc_ok = true; // we verified CRC above
         uint32_t now = ticks_fn ? ticks_fn() : 0u;
         rec.timestamp_ms = now;
@@ -998,9 +1094,29 @@ val_status_t val_internal_recv_until_deadline(val_session_t *s,
         val_packet_type_t t = 0;
         uint32_t len = 0;
         uint64_t off = 0;
-        val_status_t st = val_internal_recv_packet(s, &t, payload_out, payload_cap, &len, &off, slice);
+        // Receive without copying payload first to avoid copying large DATA frames into tiny scratch buffers
+        val_status_t st = val_internal_recv_packet(s, &t, NULL, 0, &len, &off, slice);
         if (st == VAL_OK)
         {
+            // Conditionally copy payload bytes for non-DATA packets after knowing the type.
+            // This avoids copying large DATA frames into tiny scratch buffers while preserving
+            // expected behavior for HELLO/VERIFY and other control packets.
+            if (payload_out && payload_cap && len > 0 && t != VAL_PKT_DATA)
+            {
+                const uint8_t *src = (const uint8_t *)s->config->buffers.recv_buffer + VAL_WIRE_HEADER_SIZE;
+                uint32_t copy_len = len;
+                if (copy_len <= payload_cap)
+                {
+                    memmove(payload_out, src, copy_len);
+                }
+                else
+                {
+                    if (out_type) *out_type = t;
+                    if (out_len) *out_len = len;
+                    if (out_off) *out_off = off;
+                    return VAL_ERR_INVALID_ARG;
+                }
+            }
             if (out_type) *out_type = t;
             if (out_len) *out_len = len;
             if (out_off) *out_off = off;
@@ -1014,15 +1130,19 @@ val_status_t val_internal_recv_until_deadline(val_session_t *s,
                 VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
             return st;
         }
-        // Benign slice miss; update metrics and loop until deadline
-        if (st == VAL_ERR_TIMEOUT)
-            val_metrics_inc_timeout_soft(s);
-        else if (st == VAL_ERR_CRC)
-            val_metrics_inc_crcerr(s);
+        // Benign slice miss: do NOT increment soft-timeout/CRC metrics here.
+        // This loop performs micro-slicing (short waits) toward a caller-provided
+        // deadline. Counting each micro-slice as a soft timeout produces noisy
+        // metrics (hundreds of small slice misses per logical wait). Higher-level
+        // callers (for example val_internal_wait_control, wait_for_window_ack,
+        // etc.) are responsible for classifying retryable/terminal timeouts and
+        // updating the session metrics appropriately. Leave this loop silent so
+        // metrics reflect meaningful retry events only.
         if (ticks_fn() >= deadline_ms)
         {
-            // Deadline reached: classify as a hard timeout for this recv-until-deadline operation
-            val_metrics_inc_timeout_hard(s);
+            // Deadline reached for this wait; do not classify here.
+            // Callers decide whether this timeout is soft (retryable) or hard (terminal)
+            // and update metrics accordingly. We already counted slice soft timeouts above.
             return VAL_ERR_TIMEOUT;
         }
     }
@@ -1093,11 +1213,13 @@ val_status_t val_internal_wait_control(val_session_t *s,
             return VAL_ERR_ABORTED;
         if (st == VAL_OK)
         {
+            VAL_LOG_DEBUGF(s, "wait_control: received packet type=%d len=%u", (int)t, (unsigned)len);
             if (t == VAL_PKT_CANCEL)
                 return VAL_ERR_ABORTED;
             if (t == VAL_PKT_ERROR)
                 return VAL_ERR_PROTOCOL;
             int ar = accept(s, t, scratch, len, off, ctx);
+            VAL_LOG_DEBUGF(s, "wait_control: accept callback returned %d", ar);
             if (ar > 0)
             {
                 if (out_type) *out_type = t;
@@ -1124,8 +1246,7 @@ val_status_t val_internal_wait_control(val_session_t *s,
         s->timing.in_retransmit = 1; // Karn's algorithm
         val_metrics_inc_retrans(s);
         VAL_HEALTH_RECORD_RETRY(s);
-        if (st == VAL_ERR_TIMEOUT)
-            val_metrics_inc_timeout_soft(s);
+        // Soft timeout tracking removed - only hard timeouts are meaningful
         if (on_timeout)
         {
             val_status_t rs = on_timeout(s, ctx);
@@ -1417,16 +1538,43 @@ val_status_t val_internal_wait_verify_result(val_session_t *s,
     if (status == VAL_OK)
     {
         *out_resume_offset = end_off;
+        VAL_LOG_TRACEF(s, "verify_result: status=OK -> resume_off=%llu", (unsigned long long)*out_resume_offset);
+        {
+            FILE *tf = fopen("resume_trace.log", "a");
+            if (tf)
+            {
+                fprintf(tf, "VERIFY_RESULT status=OK resume_off=%llu\n", (unsigned long long)*out_resume_offset);
+                fclose(tf);
+            }
+        }
         return VAL_OK;
     }
     if (status == VAL_SKIPPED)
     {
         *out_resume_offset = UINT64_MAX;
+        VAL_LOG_TRACEF(s, "verify_result: status=SKIPPED -> resume_off=UINT64_MAX");
+        {
+            FILE *tf = fopen("resume_trace.log", "a");
+            if (tf)
+            {
+                fprintf(tf, "VERIFY_RESULT status=SKIPPED resume_off=UINT64_MAX\n");
+                fclose(tf);
+            }
+        }
         return VAL_OK;
     }
     if (status == VAL_ERR_RESUME_VERIFY)
     {
         *out_resume_offset = 0;
+        VAL_LOG_TRACEF(s, "verify_result: status=ERR_RESUME_VERIFY -> resume_off=0");
+        {
+            FILE *tf = fopen("resume_trace.log", "a");
+            if (tf)
+            {
+                fprintf(tf, "VERIFY_RESULT status=ERR_RESUME_VERIFY resume_off=0\n");
+                fclose(tf);
+            }
+        }
         return VAL_OK;
     }
     return (val_status_t)status;
@@ -1732,39 +1880,108 @@ val_status_t val_internal_do_handshake_sender(val_session_t *s)
     val__fill_local_hello(s, s->config->buffers.packet_size, &hello);
     uint8_t hello_wire[VAL_WIRE_HANDSHAKE_SIZE];
     val_serialize_handshake(&hello, hello_wire);
+    // Budgeted, paced handshake loop to tolerate staggered starts without flooding
+    uint32_t now0 = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
+    uint32_t budget = s->cfg.timeouts.handshake_budget_ms ? s->cfg.timeouts.handshake_budget_ms : 7000u;
+    uint32_t global_deadline = now0 ? (now0 + budget) : 0u;
+    uint32_t base_to = val_internal_get_timeout(s, VAL_OP_HANDSHAKE);
+    uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0u;
+    uint8_t retries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0u;
+    // Minimum resend spacing: at least 1/2 min_timeout, clamped to [200, 500]ms to avoid HELLO floods
+    uint32_t min_to = s->cfg.timeouts.min_timeout_ms ? s->cfg.timeouts.min_timeout_ms : 200u;
+    uint32_t min_resend_ms = min_to / 2u;
+    if (min_resend_ms < 200u) min_resend_ms = 200u;
+    if (min_resend_ms > 500u) min_resend_ms = 500u;
+    uint32_t last_send = 0u;
+    // Initial HELLO send
     VAL_LOG_TRACE(s, "handshake(sender): sending HELLO");
     val_status_t st = val_internal_send_packet(s, VAL_PKT_HELLO, hello_wire, VAL_WIRE_HANDSHAKE_SIZE, 0);
     if (st != VAL_OK)
         return st;
-    // Wait for peer HELLO using centralized control wait with retry-on-timeout
-    uint32_t to = val_internal_get_timeout(s, VAL_OP_HANDSHAKE);
-    uint8_t tries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0;
-    uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
-    uint8_t peer_wire[VAL_WIRE_HANDSHAKE_SIZE];
-    uint32_t plen = 0; uint64_t poff = 0; val_packet_type_t pt = 0;
-    val_retry_payload_ctx_t ctx = { hello_wire, VAL_WIRE_HANDSHAKE_SIZE };
-    st = val_internal_wait_control(s, to, tries, backoff, peer_wire, (uint32_t)sizeof(peer_wire), &pt, &plen, &poff,
-                                   accept_hello_cb, retry_send_hello_cb, &ctx);
-    if (st != VAL_OK)
+    if (s->config->system.get_ticks_ms)
+        last_send = s->config->system.get_ticks_ms();
+    // Wait in short slices until we get peer HELLO or budget expires; on timeout, pace resend with backoff
+    for (;;)
     {
-        if (st == VAL_ERR_TIMEOUT)
-            VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_HELLO);
-        return st;
-    }
-    val_handshake_t peer_h;
-    val_deserialize_handshake(peer_wire, &peer_h);
-    // Adopt peer and finalize negotiation
-    val_status_t adopt = val__adopt_peer_hello(s, &peer_h);
-    if (adopt != VAL_OK)
-        return adopt;
-    // Optionally adjust behavior based on requested ∧ peer.features later
-    s->handshake_done = true;
+        if (val_check_for_cancel(s))
+            return VAL_ERR_ABORTED;
+        uint32_t now = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
+        uint32_t deadline = base_to;
+        if (now && base_to)
+        {
+            deadline = now + base_to;
+            // Guard against overflow
+            if (deadline < now)
+                deadline = UINT32_MAX;
+        }
+        uint8_t buf[VAL_WIRE_HANDSHAKE_SIZE]; uint32_t bl=0; uint64_t bo=0; val_packet_type_t bt=0;
+        val_status_t wr = val_internal_recv_until_deadline(s, &bt, buf, (uint32_t)sizeof(buf), &bl, &bo, deadline, 20u);
+        if (wr == VAL_OK)
+        {
+            if (bt == VAL_PKT_CANCEL) return VAL_ERR_ABORTED;
+            if (bt == VAL_PKT_ERROR) return VAL_ERR_PROTOCOL;
+            if (accept_hello_cb(s, bt, buf, bl, bo, NULL) > 0)
+            {
+                // Got peer HELLO
+                memcpy(hello_wire, buf, VAL_WIRE_HANDSHAKE_SIZE); // reuse buffer variable name for peer_wire
+                st = VAL_OK;
+                // Deserialize below using hello_wire as peer buffer
+                val_handshake_t peer_h; val_deserialize_handshake(hello_wire, &peer_h);
+                val_status_t adopt = val__adopt_peer_hello(s, &peer_h);
+                if (adopt != VAL_OK)
+                    return adopt;
+                s->handshake_done = true;
 #if VAL_ENABLE_METRICS
-    s->metrics.handshakes++;
+                s->metrics.handshakes++;
 #endif
-    // features compatibility: ensure required features supported. For now, just note the peer features; could gate behavior
-    // later.
-    return VAL_OK;
+                return VAL_OK;
+            }
+            // ignore others
+            continue;
+        }
+        if (wr != VAL_ERR_TIMEOUT && wr != VAL_ERR_CRC)
+            return wr;
+        // Timeout slice; check global budget
+        if (global_deadline && now >= global_deadline)
+        {
+            VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_HELLO);
+            val_metrics_inc_timeout_hard(s);
+            return VAL_ERR_TIMEOUT;
+        }
+        // Consider paced resend if spacing and retries permit
+        if (retries > 0)
+        {
+            if (now == 0u || (now - last_send) >= min_resend_ms)
+            {
+                s->timing.in_retransmit = 1;
+                val_metrics_inc_retrans(s);
+                VAL_HEALTH_RECORD_RETRY(s);
+                VAL_LOG_DEBUG(s, "handshake(sender): timeout -> resend HELLO");
+                val_status_t rs = val_internal_send_packet(s, VAL_PKT_HELLO, hello_wire, VAL_WIRE_HANDSHAKE_SIZE, 0);
+                if (rs != VAL_OK)
+                    return rs;
+                last_send = now;
+                // backoff sleep and retry decrement
+                val_internal_backoff_step(s, &backoff, &retries);
+            }
+            else
+            {
+                // Sleep small to honor pacing
+                uint32_t wait_more = min_resend_ms - (now - last_send);
+                if (s->config->system.delay_ms)
+                    s->config->system.delay_ms(wait_more);
+            }
+        }
+        else
+        {
+            // No retries budgeted; keep listening until global deadline
+            // small delay to avoid tight spin
+            if (s->config->system.delay_ms)
+                s->config->system.delay_ms(10u);
+        }
+    }
+    // Unreachable: loop returns on success or failure paths above
+    return VAL_ERR_TIMEOUT;
 }
 
 val_status_t val_internal_do_handshake_receiver(val_session_t *s)
@@ -1774,19 +1991,47 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
         // If already done, do nothing
         return VAL_OK;
     }
-    // Receive sender HELLO using centralized control-wait; receiver does not resend on timeout
-    uint32_t to = val_internal_get_timeout(s, VAL_OP_HANDSHAKE);
-    uint8_t tries = s->config->retries.handshake_retries ? s->config->retries.handshake_retries : 0;
-    uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+    // Budgeted wait for sender HELLO; receiver doesn't resend but stays patient within budget
+    uint32_t now0 = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
+    uint32_t budget = s->cfg.timeouts.handshake_budget_ms ? s->cfg.timeouts.handshake_budget_ms : 7000u;
+    uint32_t global_deadline = now0 ? (now0 + budget) : 0u;
+    uint32_t base_to = val_internal_get_timeout(s, VAL_OP_HANDSHAKE);
     uint8_t peer_wire[VAL_WIRE_HANDSHAKE_SIZE];
-    uint32_t plen = 0; uint64_t poff = 0; val_packet_type_t pt = 0;
-    val_status_t st = val_internal_wait_control(s, to, tries, backoff, peer_wire, (uint32_t)sizeof(peer_wire), &pt, &plen, &poff,
-                                                accept_hello_rx_cb, NULL, NULL);
-    if (st != VAL_OK)
+    for (;;)
     {
-        if (st == VAL_ERR_TIMEOUT)
+        if (val_check_for_cancel(s))
+            return VAL_ERR_ABORTED;
+        uint32_t now = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
+        uint32_t deadline = base_to;
+        if (now && base_to)
+        {
+            deadline = now + base_to;
+            // Guard against overflow
+            if (deadline < now)
+                deadline = UINT32_MAX;
+        }
+        val_packet_type_t t = 0; uint32_t l=0; uint64_t o=0;
+        val_status_t wr = val_internal_recv_until_deadline(s, &t, peer_wire, (uint32_t)sizeof(peer_wire), &l, &o, deadline, 20u);
+        if (wr == VAL_OK)
+        {
+            if (t == VAL_PKT_CANCEL) return VAL_ERR_ABORTED;
+            if (t == VAL_PKT_ERROR) return VAL_ERR_PROTOCOL;
+            if (accept_hello_rx_cb(s, t, peer_wire, l, o, NULL) > 0)
+                break; // got HELLO
+            continue; // ignore others
+        }
+        if (wr != VAL_ERR_TIMEOUT && wr != VAL_ERR_CRC)
+            return wr;
+        // Timeout slice -> check budget
+        if (global_deadline && now >= global_deadline)
+        {
             VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_HELLO);
-        return st;
+            val_metrics_inc_timeout_hard(s);
+            return VAL_ERR_TIMEOUT;
+        }
+        // Small sleep to avoid tight spin
+        if (s->config->system.delay_ms)
+            s->config->system.delay_ms(10u);
     }
     val_handshake_t peer_h;
     val_deserialize_handshake(peer_wire, &peer_h);
@@ -1820,7 +2065,7 @@ val_status_t val_internal_do_handshake_receiver(val_session_t *s)
     uint8_t hello_wire[VAL_WIRE_HANDSHAKE_SIZE];
     val_serialize_handshake(&hello, hello_wire);
     VAL_LOG_TRACE(s, "handshake(receiver): sending HELLO response");
-    st = val_internal_send_packet(s, VAL_PKT_HELLO, hello_wire, VAL_WIRE_HANDSHAKE_SIZE, 0);
+    val_status_t st = val_internal_send_packet(s, VAL_PKT_HELLO, hello_wire, VAL_WIRE_HANDSHAKE_SIZE, 0);
     if (st == VAL_OK)
     {
     s->handshake_done = true;

@@ -80,6 +80,24 @@ static int run_send_recv(const char *in, const char *outdir, val_config_t *cfg_t
     const char *files[1] = {in};
     val_status_t st = val_send_files(tx, files, 1, NULL);
     ts_join_thread(th);
+
+    // Validate metrics before destroying sessions
+    if (st == VAL_OK)
+    {
+        ts_metrics_expect_t exp = {0};
+        exp.allow_soft_timeouts = 0;
+        exp.allow_retransmits = 0;
+        exp.expect_files_sent = 1;
+        exp.expect_files_recv = 1;
+        if (ts_assert_clean_metrics(tx, rx, &exp) != 0)
+        {
+            fprintf(stderr, "[METRICS] Clean metrics validation failed\n");
+            val_session_destroy(tx);
+            val_session_destroy(rx);
+            return -1;
+        }
+    }
+
     val_session_destroy(tx);
     val_session_destroy(rx);
     if (st_out)
@@ -375,6 +393,8 @@ static int scenario_existing_larger(val_resume_mode_t mode)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "resume_modes");
+    
     // New simplified modes set
     val_resume_mode_t modes[] = {VAL_RESUME_NEVER, VAL_RESUME_SKIP_EXISTING, VAL_RESUME_TAIL};
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
@@ -389,8 +409,12 @@ int main(void)
         if (scenario_existing_diff_same_size(m) != 0)
             return 40 + (int)m;
         if (scenario_existing_larger(m) != 0)
+        {
+            ts_cancel_timeout_guard(wd);
             return 50 + (int)m;
+        }
     }
+    ts_cancel_timeout_guard(wd);
     printf("OK\n");
     return 0;
 }

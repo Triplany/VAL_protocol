@@ -201,8 +201,8 @@ static void print_metrics_tx(val_session_t *tx)
 	fprintf(stdout, "\n==== Session Metrics (Sender) ====\n");
 	fprintf(stdout, "Packets: sent=%llu recv=%llu\n", (unsigned long long)m.packets_sent, (unsigned long long)m.packets_recv);
 	fprintf(stdout, "Bytes:   sent=%llu recv=%llu\n", (unsigned long long)m.bytes_sent, (unsigned long long)m.bytes_recv);
-    fprintf(stdout, "Reliab:  timeouts=%u (soft=%u hard=%u) retrans=%u crc_err=%u\n",
-	    (unsigned)m.timeouts, (unsigned)m.timeouts_soft, (unsigned)m.timeouts_hard,
+    fprintf(stdout, "Reliab:  timeouts=%u (hard=%u) retrans=%u crc_err=%u\n",
+	    (unsigned)m.timeouts, (unsigned)m.timeouts_hard,
 	    (unsigned)m.retransmits, (unsigned)m.crc_errors);
 	fprintf(stdout, "Session: handshakes=%u files_sent=%u rtt_samples=%u\n", (unsigned)m.handshakes, (unsigned)m.files_sent, (unsigned)m.rtt_samples);
 	const char *names[32] = {0};

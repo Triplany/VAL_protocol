@@ -1,5 +1,6 @@
 #include "val_wire.h"
 #include "val_protocol.h"
+#include "test_support.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -8,17 +9,13 @@ static int roundtrip_all(void) {
     // Header
     {
         uint8_t buf[VAL_WIRE_HEADER_SIZE];
-        val_packet_header_t in = {0}, out = {0};
-        in.type = VAL_PKT_HELLO;
-        in.wire_version = 0;
-        in.reserved2 = 0x2211;
-        in.payload_len = 0x11223344u;
-        in.seq = 0x90ABCDEFu;
-        in.offset = 0x0A0B0C0D0E0F1011ULL;
-        in.header_crc = 0x55667788u;
-        val_serialize_header(&in, buf);
-        val_deserialize_header(buf, &out);
-        if (memcmp(&in, &out, sizeof(in)) != 0) fails++;
+        uint8_t type_in = (uint8_t)VAL_PKT_HELLO, flags_in = 0x5A;
+        uint16_t clen_in = 0x2211;
+        uint32_t tdata_in = 0x55667788u;
+        val_serialize_frame_header(type_in, flags_in, clen_in, tdata_in, buf);
+        uint8_t type_out = 0, flags_out = 0; uint16_t clen_out = 0; uint32_t tdata_out = 0;
+        val_deserialize_frame_header(buf, &type_out, &flags_out, &clen_out, &tdata_out);
+        if (!(type_in == type_out && flags_in == flags_out && clen_in == clen_out && tdata_in == tdata_out)) fails++;
     }
     // Handshake
     {
@@ -84,7 +81,12 @@ static int roundtrip_all(void) {
 }
 
 int main(void) {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "wire_big_endian_sim");
+    
     int fails = roundtrip_all();
+    
+    ts_cancel_timeout_guard(wd);
+    
     if (fails == 0) {
         printf("wire_be_sim: PASS\n");
         return 0;

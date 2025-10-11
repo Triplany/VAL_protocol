@@ -119,14 +119,14 @@ static int test_single_file_check(void)
                 return 1;
             }
             // Under ideal, no-fault conditions we expect no timeouts, retransmits, or CRC errors
-            if (mtx.timeouts != 0 || mtx.timeouts_soft != 0 || mtx.timeouts_hard != 0 ||
+            if (mtx.timeouts != 0 || mtx.timeouts_hard != 0 ||
                 mtx.retransmits != 0 || mtx.crc_errors != 0 ||
-                mrx.timeouts != 0 || mrx.timeouts_soft != 0 || mrx.timeouts_hard != 0 ||
+                mrx.timeouts != 0 || mrx.timeouts_hard != 0 ||
                 mrx.retransmits != 0 || mrx.crc_errors != 0)
             {
-                fprintf(stderr, "unexpected reliability events: tx[t=%u s=%u h=%u r=%u c=%u] rx[t=%u s=%u h=%u r=%u c=%u]\n",
-                        mtx.timeouts, mtx.timeouts_soft, mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors,
-                        mrx.timeouts, mrx.timeouts_soft, mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors);
+                fprintf(stderr, "unexpected reliability events: tx[t=%u h=%u r=%u c=%u] rx[t=%u h=%u r=%u c=%u]\n",
+                        mtx.timeouts, mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors,
+                        mrx.timeouts, mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors);
                 val_session_destroy(tx);
                 val_session_destroy(rx);
                 free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
@@ -264,14 +264,14 @@ static int test_multi_file_check(void)
                 free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
                 return 1;
             }
-            if (mtx.timeouts != 0 || mtx.timeouts_soft != 0 || mtx.timeouts_hard != 0 ||
+            if (mtx.timeouts != 0 || mtx.timeouts_hard != 0 ||
                 mtx.retransmits != 0 || mtx.crc_errors != 0 ||
-                mrx.timeouts != 0 || mrx.timeouts_soft != 0 || mrx.timeouts_hard != 0 ||
+                mrx.timeouts != 0 || mrx.timeouts_hard != 0 ||
                 mrx.retransmits != 0 || mrx.crc_errors != 0)
             {
-                fprintf(stderr, "unexpected reliability events (multi): tx[t=%u s=%u h=%u r=%u c=%u] rx[t=%u s=%u h=%u r=%u c=%u]\n",
-                        mtx.timeouts, mtx.timeouts_soft, mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors,
-                        mrx.timeouts, mrx.timeouts_soft, mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors);
+                fprintf(stderr, "unexpected reliability events (multi): tx[t=%u h=%u r=%u c=%u] rx[t=%u h=%u r=%u c=%u]\n",
+                        mtx.timeouts, mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors,
+                        mrx.timeouts, mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors);
                 val_session_destroy(tx);
                 val_session_destroy(rx);
                 free(sb_a); free(rb_a); free(sb_b); free(rb_b); test_duplex_free(&d);
@@ -442,6 +442,8 @@ static int test_packet_size_sweep(void)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "suite_send_receive_check");
+    
     int rc = 0;
     if (test_single_file_check() != 0)
         rc = 1;
@@ -449,5 +451,7 @@ int main(void)
         rc = 1;
     if (test_packet_size_sweep() != 0)
         rc = 1;
+    
+    ts_cancel_timeout_guard(wd);
     return rc;
 }

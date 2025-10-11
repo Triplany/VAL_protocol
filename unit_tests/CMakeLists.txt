@@ -30,16 +30,20 @@ endfunction()
 add_ctest_exe(ut_sr_check send_receive/suite_send_receive_check.c)
 add_ctest_exe(ut_recovery_check recovery/suite_recovery_check.c)
 add_ctest_exe(ut_resume_policies recovery/test_resume_policies.c)
-set_property(TEST ut_resume_policies PROPERTY LABELS "heavy")
+set_property(TEST ut_resume_policies PROPERTY LABELS "quick")
 
 # Comprehensive resume modes coverage
 add_ctest_exe(ut_resume_modes recovery/test_resume_modes.c)
-set_property(TEST ut_resume_modes PROPERTY LABELS "heavy")
+set_property(TEST ut_resume_modes PROPERTY LABELS "quick")
+
+# Resume + validation interaction tests (Phase 2 comprehensive coverage)
+add_ctest_exe(ut_resume_with_validation recovery/test_resume_with_validation.c)
+set_property(TEST ut_resume_with_validation PROPERTY LABELS "normal")
 
 add_ctest_exe(ut_error_system core/test_error_system.c)
 add_ctest_exe(ut_transport_optional core/test_transport_optional.c)
 add_ctest_exe(ut_packet_negotiation core/test_packet_negotiation.c)
-set_property(TEST ut_packet_negotiation PROPERTY LABELS "quick;heavy")
+set_property(TEST ut_packet_negotiation PROPERTY LABELS "normal")
 add_ctest_exe(ut_metadata_validation core/test_metadata_validation.c)
 set_property(TEST ut_metadata_validation PROPERTY LABELS "quick")
 
@@ -71,27 +75,27 @@ add_ctest_exe(ut_transport_fragmentation core/test_transport_fragmentation.c)
 set_property(TEST ut_transport_fragmentation PROPERTY LABELS "quick")
 
 # Label heavier suites to allow selective runs
-set_property(TEST ut_sr_check PROPERTY LABELS "heavy")
-set_property(TEST ut_recovery_check PROPERTY LABELS "heavy")
+set_property(TEST ut_sr_check PROPERTY LABELS "quick")
+set_property(TEST ut_recovery_check PROPERTY LABELS "quick")
 
 # Cancel tests
 add_ctest_exe(ut_cancel_mid_data_receiver send_receive/test_cancel_mid_data_receiver.c)
-set_property(TEST ut_cancel_mid_data_receiver PROPERTY LABELS "heavy")
+set_property(TEST ut_cancel_mid_data_receiver PROPERTY LABELS "quick")
 add_ctest_exe(ut_cancel_mid_data_sender send_receive/test_cancel_mid_data_sender.c)
-set_property(TEST ut_cancel_mid_data_sender PROPERTY LABELS "heavy")
+set_property(TEST ut_cancel_mid_data_sender PROPERTY LABELS "quick")
 
 # Integration tests using TCP example binaries over localhost
 add_ctest_exe(it_tcp_single integration/test_tcp_single.c)
-set_property(TEST it_tcp_single PROPERTY LABELS "heavy")
+set_property(TEST it_tcp_single PROPERTY LABELS "normal")
 add_ctest_exe(it_tcp_multi integration/test_tcp_multi.c)
-set_property(TEST it_tcp_multi PROPERTY LABELS "heavy")
+set_property(TEST it_tcp_multi PROPERTY LABELS "normal")
 
 # Metrics-specific tests (only meaningful when metrics are compiled in)
 if(VAL_ENABLE_METRICS)
     add_ctest_exe(ut_metrics core/test_metrics.c)
     set_property(TEST ut_metrics PROPERTY LABELS "quick")
     add_ctest_exe(ut_metrics_crc core/test_metrics_crc.c)
-    set_property(TEST ut_metrics_crc PROPERTY LABELS "quick")
+    set_property(TEST ut_metrics_crc PROPERTY LABELS "normal")
     add_ctest_exe(ut_metrics_rtt core/test_metrics_rtt.c)
     set_property(TEST ut_metrics_rtt PROPERTY LABELS "quick")
     add_ctest_exe(ut_metrics_timeout core/test_metrics_timeout.c)
@@ -116,13 +120,13 @@ function(add_transport_profile_test name src)
 endfunction()
 
 add_transport_profile_test(ut_uart_profile transport/test_uart_profile.c)
-set_property(TEST ut_uart_profile PROPERTY LABELS "quick")
+set_property(TEST ut_uart_profile PROPERTY LABELS "heavy")
 
 add_transport_profile_test(ut_wifi_profile transport/test_wifi_profile.c)
-set_property(TEST ut_wifi_profile PROPERTY LABELS "quick")
+set_property(TEST ut_wifi_profile PROPERTY LABELS "heavy")
 
 add_transport_profile_test(ut_satellite_profile transport/test_satellite_profile.c)
-set_property(TEST ut_satellite_profile PROPERTY LABELS "heavy")
+set_property(TEST ut_satellite_profile PROPERTY LABELS "quick")
 
 # Diagnostic test for satellite packet loss investigation
 # Opt-in diagnostics: excluded from default builds/runs to keep CI fast and green
@@ -140,4 +144,4 @@ set_property(TEST ut_transport_stress PROPERTY LABELS "stress")
 
 # Assert graceful failure occurs within a bounded time under extreme loss
 add_transport_profile_test(ut_timebound_failures transport/test_timebound_failures.c)
-set_property(TEST ut_timebound_failures PROPERTY LABELS "stress;quick")
+set_property(TEST ut_timebound_failures PROPERTY LABELS "stress;heavy")

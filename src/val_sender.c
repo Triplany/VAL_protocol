@@ -147,17 +147,115 @@ typedef struct val_sender_ack_ctx_s
     uint64_t *file_cursor_ptr; // keep sender's local cursor in sync on rewinds
 } val_sender_ack_ctx_t;
 
-static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next_to_send, uint32_t *inflight);
+static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next_to_send, uint32_t *inflight, int include_offset);
 static int handle_nak_retransmit(val_session_t *s, void *file_handle, uint64_t file_size, uint64_t *last_acked,
                                  uint64_t *next_to_send, uint32_t *inflight, const uint8_t *payload,
                                  uint32_t payload_len);
 static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *restart_window);
 static void val_emit_progress_sender(val_session_t *s, val_send_progress_ctx_t *ctx, const char *filename,
                                      uint64_t bytes_sent, int force_emit);
-static val_status_t request_resume_and_get_response(val_session_t *s, const char *filepath,
-                                                    uint64_t *resume_offset_out);
+static val_status_t await_resume_ack(val_session_t *s, uint64_t file_size,
+                                     uint64_t *resume_offset_out);
+// New: full resume negotiation using RESUME_REQ/RESUME_RESP and VERIFY
+static val_status_t handle_resume_negotiation(val_session_t *s, uint64_t file_size, const char *filepath,
+                                              uint64_t *resume_offset_out)
+{
+    if (!s || !resume_offset_out)
+        return VAL_ERR_INVALID_ARG;
+    // Send RESUME_REQ
+    VAL_LOG_INFO(s, "sender: sending RESUME_REQ");
+    val_status_t st = val_internal_send_packet(s, VAL_PKT_RESUME_REQ, NULL, 0, 0);
+    if (st != VAL_OK)
+    {
+        VAL_LOG_ERRORF(s, "sender: failed to send RESUME_REQ st=%d", (int)st);
+        return st;
+    }
+    VAL_LOG_INFO(s, "sender: RESUME_REQ sent, waiting for RESUME_RESP");
+    // Wait for RESUME_RESP (payload up to VAL_WIRE_RESUME_RESP_SIZE bytes)
+    uint8_t resp_buf[VAL_WIRE_RESUME_RESP_SIZE];
+    uint32_t resp_len = 0; uint64_t resp_off = 0;
+    uint32_t to = val_internal_get_timeout(s, VAL_OP_META);
+    uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
+    uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
+    st = val_internal_wait_resume_resp(s, to, tries, backoff, resp_buf, (uint32_t)sizeof(resp_buf), &resp_len, &resp_off);
+    if (st != VAL_OK)
+    {
+        VAL_LOG_ERRORF(s, "sender: failed waiting for RESUME_RESP st=%d", (int)st);
+        return st;
+    }
+    VAL_LOG_INFO(s, "sender: received RESUME_RESP");
+    if (resp_len < VAL_WIRE_RESUME_RESP_SIZE)
+        return VAL_ERR_PROTOCOL;
+    val_resume_resp_t rr; val_deserialize_resume_resp(resp_buf, &rr);
+    // Bound resume offset to file size
+    uint64_t resume_off = (rr.resume_offset > file_size) ? 0 : rr.resume_offset;
+    switch (rr.action)
+    {
+    case VAL_RESUME_START_ZERO:
+        *resume_offset_out = 0;
+        return VAL_OK;
+    case VAL_RESUME_START_OFFSET:
+        *resume_offset_out = resume_off;
+        return VAL_OK;
+    case VAL_RESUME_SKIP_FILE:
+        *resume_offset_out = UINT64_MAX; // sentinel for skip
+        return VAL_OK;
+    case VAL_RESUME_ABORT_FILE:
+        return VAL_ERR_ABORTED;
+    case VAL_RESUME_VERIFY_FIRST:
+    {
+        // Compute CRC over the requested tail window ending at resume_off; use rr.verify_length or clamp to resume_off
+        uint32_t vlen32 = (uint32_t)((rr.verify_length > resume_off) ? resume_off : rr.verify_length);
+        if (vlen32 == 0)
+        {
+            // Nothing to verify; treat as START_OFFSET
+            *resume_offset_out = resume_off;
+            return VAL_OK;
+        }
+        uint64_t start = resume_off - (uint64_t)vlen32;
+        uint32_t crc = 0;
+        // Compute CRC from local file tail
+        void *f = s->config->filesystem.fopen(s->config->filesystem.fs_context, filepath, "rb");
+        if (!f)
+            return VAL_ERR_IO;
+        if (start > 0)
+            s->config->filesystem.fseek(s->config->filesystem.fs_context, f, (int64_t)start, SEEK_SET);
+        /* Compute CRC starting at the tail window start (start) for length vlen32. */
+        val_status_t crcs = val_internal_crc32_region(s, f, start, (uint64_t)vlen32, &crc);
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        if (crcs != VAL_OK)
+            return crcs;
+        // Build VERIFY request payload
+        uint8_t verify_payload[VAL_WIRE_VERIFY_REQ_PAYLOAD_SIZE];
+        val_serialize_verify_request(start, crc, vlen32, verify_payload);
+        // Send VERIFY request
+    VAL_LOG_TRACEF(s, "sender: sending VERIFY start=%llu crc=0x%08x len=%u",
+               (unsigned long long)start, (unsigned)crc, (unsigned)vlen32);
+    {
+        FILE *tf = fopen("resume_trace.log", "a");
+        if (tf)
+        {
+            fprintf(tf, "SENDER_VERIFY start=%llu crc=0x%08x len=%u\n", (unsigned long long)start, (unsigned)crc, (unsigned)vlen32);
+            fclose(tf);
+        }
+    }
+    st = val_internal_send_packet(s, VAL_PKT_VERIFY, verify_payload, (uint32_t)sizeof(verify_payload), 0);
+        if (st != VAL_OK)
+            return st;
+        // Wait for VERIFY result and map to resume offset
+        uint64_t out_off = 0;
+        st = val_internal_wait_verify_result(s, verify_payload, (uint32_t)sizeof(verify_payload), resume_off, &out_off);
+        if (st != VAL_OK)
+            return st;
+        *resume_offset_out = out_off;
+        return VAL_OK;
+    }
+    default:
+        return VAL_ERR_PROTOCOL;
+    }
+}
 
-static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next_to_send, uint32_t *inflight)
+static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next_to_send, uint32_t *inflight, int include_offset)
 {
     if (!io_ctx || !io_ctx->session || !io_ctx->file_handle || !io_ctx->payload_area || !next_to_send || !inflight)
         return VAL_ERR_INVALID_ARG;
@@ -170,7 +268,14 @@ static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next
         return VAL_OK;
 
     uint64_t remaining = io_ctx->file_size - *next_to_send;
-    size_t to_read = (size_t)((remaining < (uint64_t)io_ctx->max_payload) ? remaining : (uint64_t)io_ctx->max_payload);
+    size_t max_payload_this_pkt = io_ctx->max_payload;
+    if (include_offset)
+    {
+        if (max_payload_this_pkt <= 8)
+            return VAL_ERR_INVALID_ARG;
+        max_payload_this_pkt -= 8u;
+    }
+    size_t to_read = (size_t)((remaining < (uint64_t)max_payload_this_pkt) ? remaining : (uint64_t)max_payload_this_pkt);
     if (to_read == 0)
         return VAL_OK;
 
@@ -194,9 +299,13 @@ static val_status_t send_data_packet(val_sender_io_ctx_t *io_ctx, uint64_t *next
     if (have != to_read)
         return VAL_ERR_IO;
 
-    val_status_t st = val_internal_send_packet(s, VAL_PKT_DATA, io_ctx->payload_area, (uint32_t)to_read, *next_to_send);
+    val_status_t st = val_internal_send_packet_ex(s, VAL_PKT_DATA, io_ctx->payload_area, (uint32_t)to_read, *next_to_send, include_offset);
     if (st != VAL_OK)
         return st;
+
+    VAL_LOG_DEBUGF(s, "data(win): sent DATA len=%u off=%llu %s", (unsigned)to_read,
+                   (unsigned long long)*next_to_send,
+                   include_offset ? "(explicit off)" : "(implied)");
 
     *next_to_send += to_read;
     io_ctx->file_cursor += to_read;
@@ -214,22 +323,17 @@ static int handle_nak_retransmit(val_session_t *s, void *file_handle, uint64_t f
 
     if (payload && payload_len >= 12)
     {
-    uint64_t nak_next = VAL_GET_LE64(payload);
-    uint32_t reason = VAL_GET_LE32(payload + 8);
-        VAL_LOG_DEBUGF(s, "data(win): got DATA_NAK next=%llu reason=0x%08X (last_acked=%llu next_to_send=%llu)",
-                       (unsigned long long)nak_next, (unsigned)reason, (unsigned long long)(*last_acked),
-                       (unsigned long long)(*next_to_send));
-        if (nak_next > *last_acked && nak_next <= file_size)
-        {
-            uint64_t prev = *last_acked;
-            *last_acked = nak_next;
-            VAL_LOG_DEBUGF(s, "data(win): advance on NAK prev=%llu -> last_acked=%llu", (unsigned long long)prev,
-                           (unsigned long long)(*last_acked));
-        }
+        // New NAK content: [high32][reason][reserved]. Low32 came in header->type_data and was reconstructed by core
+        // We can't access header fields here, so rely on caller passing the reconstructed offset via other means.
+        // Since core now sets 'off' for NAK in wait loop, ack handler reads 'off' directly; this function processes side effects only.
+        uint32_t high = VAL_GET_LE32(payload);
+        uint32_t reason = VAL_GET_LE32(payload + 4);
+        (void)high; (void)reason; // logging only
     }
 
     val_internal_record_transmission_error(s);
     val_metrics_inc_retrans(s);
+    val_metrics_inc_timeout(s); // Ensure timeout metric is incremented for every retransmit
     s->timing.in_retransmit = 1;
 
     long target_l = (long)(*last_acked);
@@ -327,6 +431,14 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
 
             if (t == VAL_PKT_DATA_NAK)
             {
+                // Core reconstructs next_expected into 'off' for NAK; adopt it if it advances our high-water
+                if (off > *ack_ctx->last_acked && off <= ack_ctx->file_size)
+                {
+                    uint64_t prev = *ack_ctx->last_acked;
+                    *ack_ctx->last_acked = off;
+                    VAL_LOG_DEBUGF(s, "data(win): advance on NAK prev=%llu -> last_acked=%llu",
+                                   (unsigned long long)prev, (unsigned long long)(*ack_ctx->last_acked));
+                }
                 if (handle_nak_retransmit(s, ack_ctx->file_handle, ack_ctx->file_size, ack_ctx->last_acked,
                                           ack_ctx->next_to_send, ack_ctx->inflight, ctrl_buf, len))
                 {
@@ -404,10 +516,12 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
 
         if ((st != VAL_ERR_TIMEOUT && st != VAL_ERR_CRC))
         {
-            if (st == VAL_ERR_TIMEOUT)
+            if (st == VAL_ERR_TIMEOUT) {
                 VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-            else if (st == VAL_ERR_CRC)
+                val_metrics_inc_timeout(s);
+            } else if (st == VAL_ERR_CRC) {
                 VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
+            }
             return st;
         }
         // Timeout/CRC path: if we've exhausted retries, return timeout/CRC; otherwise, trigger a bounded-window restart
@@ -416,19 +530,22 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
             if (st == VAL_ERR_TIMEOUT)
             {
                 VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
-                // Terminal ACK wait timeout
-                val_metrics_inc_timeout_hard(s);
+                val_metrics_inc_timeout(s);
             }
             else if (st == VAL_ERR_CRC)
+            {
                 VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
+            }
+            // Do not classify as hard here; caller may have data_retries to consume
             return st;
         }
         // Interim TIMEOUT/CRC: backoff one try and request a retransmit by restarting the current window
         VAL_HEALTH_RECORD_RETRY(s);
-        if (st == VAL_ERR_TIMEOUT)
-            val_metrics_inc_timeout_soft(s);
-        else if (st == VAL_ERR_CRC)
+        // Soft timeout tracking removed - only hard timeouts are meaningful
+        if (st == VAL_ERR_CRC)
             val_metrics_inc_crcerr(s);
+        if (st == VAL_ERR_TIMEOUT)
+            val_metrics_inc_timeout(s);
         // Mark retransmit path and rewind sender state to last_acked
         val_internal_record_transmission_error(s);
         val_metrics_inc_retrans(s);
@@ -461,96 +578,76 @@ static val_status_t wait_for_window_ack(val_sender_ack_ctx_t *ack_ctx, int *rest
 }
 
 // Sender-side: request resume policy and finalize resume offset
-static val_status_t request_resume_and_get_response(val_session_t *s, const char *filepath,
-                                                    uint64_t *resume_offset_out)
+static val_status_t await_resume_ack(val_session_t *s, uint64_t file_size,
+                                     uint64_t *resume_offset_out)
 {
-    if (!s || !filepath || !resume_offset_out)
+    if (!s || !resume_offset_out)
         return VAL_ERR_INVALID_ARG;
-
-    // Best-effort send RESUME_REQ immediately (receiver may also proactively send RESP after META)
-    (void)val_internal_send_packet(s, VAL_PKT_RESUME_REQ, NULL, 0, 0);
 
     uint32_t to = val_internal_get_timeout(s, VAL_OP_META);
     uint8_t tries = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
     uint32_t backoff = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
-    val_status_t st = VAL_OK;
+    (void)backoff; // no explicit resend here
+
     for (;;)
     {
         VAL_HEALTH_RECORD_OPERATION(s);
         val_status_t health = val_internal_check_health(s);
         if (health != VAL_OK)
             return health;
-            
-    uint8_t buf[128];
-    uint32_t len = 0;
-    uint64_t off = 0;
-        uint32_t wait_ms = to;
-        // Use centralized RESUME_RESP wait helper which ignores benign traffic and resends on timeout
-        st = val_internal_wait_resume_resp(s, wait_ms, tries, backoff, buf, (uint32_t)sizeof(buf), &len, &off);
+
+        val_packet_type_t t = 0;
+        uint8_t buf[32];
+        uint32_t len = 0;
+        uint64_t off = 0;
+        uint32_t now = s->config->system.get_ticks_ms ? s->config->system.get_ticks_ms() : 0u;
+        uint32_t deadline = now + (to ? to : 1u);
+        val_status_t st = val_internal_recv_until_deadline(s, &t, buf, (uint32_t)sizeof(buf), &len, &off, deadline, 5u);
         if (st == VAL_OK)
         {
-
-            if (len < VAL_WIRE_RESUME_RESP_SIZE)
-            {
-                VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_MALFORMED_PKT);
-                return VAL_ERR_PROTOCOL;
-            }
-
-            val_resume_resp_t rr;
-            val_deserialize_resume_resp(buf, &rr);
-
-            uint32_t action = rr.action;
-            if (action == VAL_RESUME_ACTION_SKIP_FILE)
-            {
-                *resume_offset_out = UINT64_MAX; // sentinel to skip
-                return VAL_OK;
-            }
-            if (action == VAL_RESUME_ACTION_ABORT_FILE)
-            {
+            if (t == VAL_PKT_CANCEL)
                 return VAL_ERR_ABORTED;
-            }
-            if (action == VAL_RESUME_ACTION_START_ZERO)
+            if (t == VAL_PKT_ERROR)
+                return VAL_ERR_PROTOCOL;
+            if (t == VAL_PKT_DATA_ACK)
             {
-                *resume_offset_out = 0;
+                // Interpret offset
+                if (off >= file_size)
+                    *resume_offset_out = UINT64_MAX; // sentinel to skip
+                else
+                    *resume_offset_out = off;
                 return VAL_OK;
             }
-            if (action == VAL_RESUME_ACTION_START_OFFSET)
-            {
-                *resume_offset_out = rr.resume_offset;
-                return VAL_OK;
-            }
-            if (action == VAL_RESUME_ACTION_VERIFY_FIRST)
-            {
-                // Compute CRC over [resume_offset - verify_length, resume_offset)
-                uint64_t end_off = rr.resume_offset;
-                uint64_t vlen = rr.verify_length;
-                uint32_t my_crc = 0;
-                val_status_t cst = compute_crc_region(s, filepath, end_off, vlen, &my_crc);
-                if (cst != VAL_OK)
-                    return cst;
-                // Reply with VERIFY containing our CRC; reuse val_resume_resp_t payload format (receiver parses verify_crc)
-                val_resume_resp_t v;
-                v.action = 0;
-                v.resume_offset = end_off;
-                v.verify_crc = my_crc;
-                v.verify_length = vlen;
-                uint8_t verify_wire[VAL_WIRE_RESUME_RESP_SIZE];
-                val_serialize_resume_resp(&v, verify_wire);
-                st = val_internal_send_packet(s, VAL_PKT_VERIFY, verify_wire, VAL_WIRE_RESUME_RESP_SIZE, 0);
-                if (st != VAL_OK)
-                    return st;
-
-                // Wait for receiver's VERIFY result using centralized helper
-                st = val_internal_wait_verify_result(s, verify_wire, VAL_WIRE_RESUME_RESP_SIZE, end_off, resume_offset_out);
-                return st;
-            }
-
-            // Unknown action
-            VAL_SET_PROTOCOL_ERROR(s, VAL_ERROR_DETAIL_INVALID_STATE);
-            return VAL_ERR_PROTOCOL;
+            // Ignore any other traffic until we see DATA_ACK
+            continue;
         }
 
-        // TIMEOUT/CRC and retry behavior handled within the resume wait wrapper; on non-OK return, just propagate
+        if (st == VAL_ERR_TIMEOUT || st == VAL_ERR_CRC)
+        {
+            if (tries == 0)
+            {
+                if (st == VAL_ERR_TIMEOUT)
+                    VAL_SET_TIMEOUT_ERROR(s, VAL_ERROR_DETAIL_TIMEOUT_ACK);
+                else if (st == VAL_ERR_CRC)
+                    VAL_SET_CRC_ERROR(s, VAL_ERROR_DETAIL_PACKET_CORRUPT);
+                return st;
+            }
+            /* Do not increment soft-timeout or crc metrics here — this helper performs
+             * an opportunistic wait for a resume ACK. Higher-level callers (for
+             * example the main send loop) are responsible for classifying and
+             * counting meaningful soft/hard timeouts. Incrementing here generated
+             * spurious metrics in micro-retry cases. */
+            VAL_HEALTH_RECORD_RETRY(s);
+            if (tries)
+                --tries;
+            if (backoff && s->config->system.delay_ms)
+                s->config->system.delay_ms(backoff);
+            backoff <<= 1;
+            /* loop and wait again */
+            continue;
+        }
+
+        // Any other error: propagate
         return st;
     }
 }
@@ -576,9 +673,8 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
         return st;
     // Resume negotiation
     uint64_t resume_off = 0;
-    st = request_resume_and_get_response(s, filepath, &resume_off);
-    if (st != VAL_OK)
-        return st;
+    val_status_t rs = handle_resume_negotiation(s, size, filepath, &resume_off);
+    if (rs != VAL_OK) return rs;
     // If receiver requested to skip this file entirely, resume_off is a sentinel (UINT64_MAX)
     if (resume_off == UINT64_MAX)
     {
@@ -632,6 +728,11 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
     uint8_t *send_buf_bytes = (uint8_t *)s->config->buffers.send_buffer;
     uint8_t *payload_area = send_buf_bytes ? (send_buf_bytes + VAL_WIRE_HEADER_SIZE) : NULL;
     size_t max_payload = (size_t)(mtu_bytes - VAL_WIRE_HEADER_SIZE - VAL_WIRE_TRAILER_SIZE);
+    if (max_payload == 0)
+    {
+        s->config->filesystem.fclose(s->config->filesystem.fs_context, f);
+        return VAL_ERR_INVALID_ARG;
+    }
     uint64_t last_acked = resume_off;
     uint64_t next_to_send = resume_off;
     uint32_t inflight = 0;
@@ -708,7 +809,8 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                 ack_timeout_ms = ext;
             VAL_LOG_INFO(s, "data: extended first DATA_ACK wait after resume");
         }
-        uint8_t tries_rem = s->config->retries.ack_retries ? s->config->retries.ack_retries : 0;
+        // Ensure at least one retry for DATA_ACK waits so a single dropped ACK triggers a retransmit
+        uint8_t tries_rem = s->config->retries.ack_retries ? s->config->retries.ack_retries : 1;
         if (first_ack_grace && last_acked == resume_off)
             tries_rem = (uint8_t)(tries_rem + first_ack_extra_tries);
     uint32_t backoff_ms = s->config->retries.backoff_ms_base ? s->config->retries.backoff_ms_base : 0;
@@ -727,7 +829,10 @@ static val_status_t send_file_data_adaptive(val_session_t *s, const char *filepa
                     VAL_LOG_WARN(s, "data(win): local cancel during fill-window");
                     return VAL_ERR_ABORTED;
                 }
-                val_status_t send_status = send_data_packet(&io_ctx, &next_to_send, &inflight);
+                // Include explicit offset on first packet after resume or after a window restart due to NAK/timeout
+                int include_offset = (next_to_send == last_acked) ? 1 : 0;
+                // Ensure that when including offset, we don't exceed max wire size by reducing read size inside send function
+                val_status_t send_status = send_data_packet(&io_ctx, &next_to_send, &inflight, include_offset);
                 if (send_status != VAL_OK)
                 {
                     s->config->filesystem.fclose(s->config->filesystem.fs_context, f);

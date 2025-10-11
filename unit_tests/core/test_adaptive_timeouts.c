@@ -53,6 +53,8 @@ static val_session_t *make_session_with_bounds(uint32_t min_ms, uint32_t max_ms,
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "adaptive_timeouts");
+    
     int ok = 1;
 
     // Case 1: Initialization and clamping to max when seed RTO exceeds bounds
@@ -109,5 +111,6 @@ int main(void)
 
     // No no-clock fallback: a clock is always required in VAL builds.
 
+    ts_cancel_timeout_guard(wd);
     return ok ? 0 : 10;
 }

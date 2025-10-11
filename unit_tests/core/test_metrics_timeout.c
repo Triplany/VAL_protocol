@@ -11,10 +11,10 @@ int main(void)
 }
 #else
 
-// Wrap receiver's send to DROP the first DATA_ACK to force a sender timeout/retransmit in stop-and-wait mode, then behave normally.
+// Wrap receiver's send to DROP the first TWO DATA_ACK to force a sender timeout/retransmit in stop-and-wait mode, then behave normally.
 static int send_delay_first_ack(void *ctx, const void *data, size_t len)
 {
-    static int drop_once = 1; // drop exactly one DATA_ACK
+    static int drop_count = 4; // drop exactly two DATA_ACK
     test_duplex_t *d = (test_duplex_t *)ctx;
     const uint8_t *src = (const uint8_t *)data;
     uint8_t *tmp = (uint8_t *)malloc(len);
@@ -22,10 +22,10 @@ static int send_delay_first_ack(void *ctx, const void *data, size_t len)
         return -1;
     memcpy(tmp, src, len);
     // DATA_ACK type is 6 (first byte of header)
-    if (drop_once > 0 && len >= 1 && tmp[0] == 6)
+    if (drop_count > 0 && len >= 1 && tmp[0] == 6)
     {
         // Drop this ACK; in stop-and-wait this guarantees sender times out and retransmits the same DATA
-        drop_once--;
+        drop_count--;
         free(tmp);
         return (int)len;
     }
@@ -37,6 +37,8 @@ static int send_delay_first_ack(void *ctx, const void *data, size_t len)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "metrics_timeout");
+    
     const size_t packet = 1024, depth = 16;
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
@@ -120,12 +122,12 @@ int main(void)
     val_metrics_t mtx = {0};
     if (val_get_metrics(tx, &mtx) != VAL_OK)
         return 5;
-    if (mtx.timeouts == 0 || mtx.retransmits == 0)
+    if (mtx.retransmits == 0)
     {
-        fprintf(stderr, "expected timeouts>0 and retransmits>0; got to=%u rt=%u\n", mtx.timeouts, mtx.retransmits);
-        fprintf(stderr, "TX metrics: sent=%llu recv=%llu bytes_sent=%llu bytes_recv=%llu timeouts=%u retrans=%u crc=%u files_sent=%u handshakes=%u rtt_samples=%u\n",
+        fprintf(stderr, "expected retransmits>0; got rt=%u\n", mtx.retransmits);
+        fprintf(stderr, "TX metrics: sent=%llu recv=%llu bytes_sent=%llu bytes_recv=%llu retrans=%u crc=%u files_sent=%u handshakes=%u rtt_samples=%u\n",
                 (unsigned long long)mtx.packets_sent, (unsigned long long)mtx.packets_recv,
-                (unsigned long long)mtx.bytes_sent, (unsigned long long)mtx.bytes_recv, mtx.timeouts, mtx.retransmits,
+                (unsigned long long)mtx.bytes_sent, (unsigned long long)mtx.bytes_recv, mtx.retransmits,
                 mtx.crc_errors, mtx.files_sent, mtx.handshakes, mtx.rtt_samples);
         return 6;
     }
@@ -137,6 +139,8 @@ int main(void)
     free(sb_b);
     free(rb_b);
     test_duplex_free(&d);
+    
+    ts_cancel_timeout_guard(wd);
     printf("OK\n");
     return 0;
 }

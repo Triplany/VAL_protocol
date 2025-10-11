@@ -380,7 +380,9 @@ struct val_error_payload_t {
 
 ---
 
-<!-- Packet type 14 removed in v0.7 (previously reserved). -->
+### Packet Type 14
+
+Reserved for future use.
 
 ---
 

@@ -396,6 +396,8 @@ static int test_satellite_weather_event_OLD(void)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "satellite_profile");
+    
     int failures = 0;
     
     printf("========================================\n");
@@ -419,5 +421,6 @@ int main(void)
     }
     printf("========================================\n");
     
+    ts_cancel_timeout_guard(wd);
     return failures > 0 ? 1 : 0;
 }

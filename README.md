@@ -99,7 +99,7 @@ These CMake options toggle compile-time features; defaults are conservative.
 
 - **VAL_ENABLE_ERROR_STRINGS=ON**: Build host-only string utilities (`val_error_strings`) for human-readable error messages
 - **VAL_ENABLE_METRICS=OFF**: Enable lightweight internal counters/timing (packets, bytes, RTT, errors, retransmits)
-- Packet capture is a runtime callback (no build flag). Wire audit has been removed.
+- **Packet Capture**: Runtime callback hook (`config.capture.on_packet`) for non-intrusive wire observation (no build flag required)
 - **VAL_LOG_LEVEL** (0-5): Compile-time log level (0=OFF, 1=CRITICAL, 2=WARNING, 3=INFO, 4=DEBUG, 5=TRACE)
 
 **Example:**
@@ -166,7 +166,7 @@ On Linux/WSL, use the provided `linux-*` presets in `CMakePresets.json` and run 
 Notes
 - The repository root should stay clean. All build outputs and test artifacts go under `build/<preset>/...`.
 - Executables are emitted to `build/<preset>/bin` and libraries to `build/<preset>/lib` (no extra `Debug/` level for Visual Studio generators).
-- If you previously had stray `Testing/` or `out/` folders at the root, they were from older ad-hoc runs; they are ignored by `.gitignore` and no longer created by the current CMake setup.
+- Build artifacts are contained within the build directory per CMake best practices.
 
 ## Status
 

@@ -38,6 +38,8 @@ static int send_corrupt_once(void *ctx, const void *data, size_t len)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_NORMAL_MS, "metrics_crc");
+    
     const size_t packet = 1024, depth = 16;
     test_duplex_t d;
     test_duplex_init(&d, packet, depth);
@@ -142,6 +144,8 @@ int main(void)
     free(sb_b);
     free(rb_b);
     test_duplex_free(&d);
+    
+    ts_cancel_timeout_guard(wd);
     printf("OK\n");
     return 0;
 }

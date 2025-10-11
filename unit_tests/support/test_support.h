@@ -188,6 +188,7 @@ extern "C"
 #if VAL_ENABLE_METRICS
     typedef struct {
         int allow_soft_timeouts; // when non-zero, ignore soft timeout counters
+        int allow_retransmits;   // when non-zero, ignore retransmit counters (for robust handshake)
         int expect_files_sent;   // -1 to skip, otherwise exact expected (TX side)
         int expect_files_recv;   // -1 to skip, otherwise exact expected (RX side)
     } ts_metrics_expect_t;
@@ -212,6 +213,12 @@ extern "C"
     void ts_fake_clock_set(uint32_t now_ms);
 
     // Watchdog: abort process if not cancelled within the timeout (helps catch hangs in CI)
+    // Standard timeout values per TEST_COVERAGE_IMPROVEMENT_PLAN.md Appendix A
+    #define TEST_TIMEOUT_QUICK_MS       10000   // Quick tests: single file, <1s expected
+    #define TEST_TIMEOUT_NORMAL_MS      30000   // Normal tests: multiple files or complex scenarios
+    #define TEST_TIMEOUT_HEAVY_MS       120000  // Heavy tests: large files, stress tests
+    #define TEST_TIMEOUT_INTEGRATION_MS 300000  // Integration tests: multi-phase scenarios
+    
     typedef void *ts_cancel_token_t; // opaque
     ts_cancel_token_t ts_start_timeout_guard(uint32_t timeout_ms, const char *name);
     void ts_cancel_timeout_guard(ts_cancel_token_t token);

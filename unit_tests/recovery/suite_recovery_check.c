@@ -137,6 +137,23 @@ static int test_resume_crc_verify_check(void)
         fprintf(stderr, "file mismatch after resume crc verify\n");
         return 1;
     }
+
+    // Validate metrics before destroying sessions (no faults, expect clean)
+    {
+        ts_metrics_expect_t exp = {0};
+        exp.allow_soft_timeouts = 0;
+        exp.allow_retransmits = 0;
+        exp.expect_files_sent = 1;
+        exp.expect_files_recv = 1;
+        if (ts_assert_clean_metrics(tx, rx, &exp) != 0)
+        {
+            fprintf(stderr, "[METRICS] Clean metrics validation failed in resume_crc_verify\n");
+            val_session_destroy(tx);
+            val_session_destroy(rx);
+            return 1;
+        }
+    }
+
     val_session_destroy(tx);
     val_session_destroy(rx);
     free(sb_a);
@@ -218,6 +235,23 @@ static int test_corruption_recovery_check(void)
         fprintf(stderr, "file mismatch in corruption recovery test\n");
         return 1;
     }
+
+    // Validate metrics before destroying sessions (with faults, allow retransmits and soft timeouts)
+    {
+        ts_metrics_expect_t exp = {0};
+        exp.allow_soft_timeouts = 1;  // Fault injection may cause timeouts
+        exp.allow_retransmits = 1;    // Fault injection will cause retransmits
+        exp.expect_files_sent = 1;
+        exp.expect_files_recv = 1;
+        if (ts_assert_clean_metrics(tx, rx, &exp) != 0)
+        {
+            fprintf(stderr, "[METRICS] Metrics validation failed in corruption_recovery\n");
+            val_session_destroy(tx);
+            val_session_destroy(rx);
+            return 1;
+        }
+    }
+
     val_session_destroy(tx);
     val_session_destroy(rx);
     free(sb_a);
@@ -229,10 +263,14 @@ static int test_corruption_recovery_check(void)
 }
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "suite_recovery_check");
+    
     int rc = 0;
     if (test_resume_crc_verify_check() != 0)
         rc = 1;
     if (test_corruption_recovery_check() != 0)
         rc = 1;
+    
+    ts_cancel_timeout_guard(wd);
     return rc;
 }

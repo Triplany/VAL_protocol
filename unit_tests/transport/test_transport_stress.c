@@ -21,6 +21,9 @@ static int test_extreme_packet_loss(void)
         return 1;
     }
     
+    // Disable partial I/O to avoid fragmenting packets (VAL protocol is packet-oriented)
+    ts_net_sim_reset();
+    
     char indir[512], outdir[512], infile[512], outfile[512];
     if (ts_build_case_dirs("stress_extreme_loss", indir, sizeof(indir), outdir, sizeof(outdir)) != 0)
     {
@@ -144,6 +147,9 @@ static int test_sustained_moderate_loss(void)
         return 1;
     }
     
+    // Disable partial I/O to avoid fragmenting packets (VAL protocol is packet-oriented)
+    ts_net_sim_reset();
+    
     char indir[512], outdir[512], infile[512], outfile[512];
     if (ts_build_case_dirs("stress_moderate_loss", indir, sizeof(indir), outdir, sizeof(outdir)) != 0)
     {
@@ -240,6 +246,8 @@ static int test_sustained_moderate_loss(void)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_INTEGRATION_MS, "transport_stress");
+    
     int failures = 0;
     
     printf("========================================\n");
@@ -267,5 +275,6 @@ int main(void)
     }
     printf("========================================\n");
     
+    ts_cancel_timeout_guard(wd);
     return failures > 0 ? 1 : 0;
 }

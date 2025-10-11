@@ -57,8 +57,10 @@ static void make_cfgs(val_config_t *cfg_tx, val_config_t *cfg_rx, test_duplex_t 
     ts_make_config(cfg_tx, sb_a, rb_a, packet, d_tx, VAL_RESUME_TAIL, 8192);
     ts_make_config(cfg_rx, sb_b, rb_b, packet, d_rx, VAL_RESUME_TAIL, 8192);
     // ts_make_config installs real system hooks by default
-    ts_set_console_logger(cfg_tx);
-    ts_set_console_logger(cfg_rx);
+    // Force TRACE level console logging for these tests so our diagnostic TRACE
+    // messages (RESUME_RESP / VERIFY payload / VERIFY result mapping) are visible.
+    ts_set_console_logger_with_level(cfg_tx, VAL_LOG_TRACE);
+    ts_set_console_logger_with_level(cfg_rx, VAL_LOG_TRACE);
 }
 
 static int run_send_recv(const char *in, const char *outdir, val_config_t *cfg_tx, val_config_t *cfg_rx, val_status_t *st_out)
@@ -82,6 +84,24 @@ static int run_send_recv(const char *in, const char *outdir, val_config_t *cfg_t
     const char *files[1] = {in};
     val_status_t st = val_send_files(tx, files, 1, NULL);
     ts_join_thread(th);
+    
+    // Validate metrics before destroying sessions (no faults injected in this test)
+    if (st == VAL_OK)
+    {
+        ts_metrics_expect_t exp = {0};
+        exp.allow_soft_timeouts = 0;
+        exp.allow_retransmits = 0;
+        exp.expect_files_sent = 1;
+        exp.expect_files_recv = 1;
+        if (ts_assert_clean_metrics(tx, rx, &exp) != 0)
+        {
+            fprintf(stderr, "[METRICS] Clean metrics validation failed\n");
+            val_session_destroy(tx);
+            val_session_destroy(rx);
+            return -1;
+        }
+    }
+    
     val_session_destroy(tx);
     val_session_destroy(rx);
     if (st_out)
@@ -121,6 +141,8 @@ static int test_always_skip_if_exists(void)
     cfg_rx.resume.mode = VAL_RESUME_SKIP_EXISTING;
 
     val_status_t st = VAL_OK;
+    /* Ensure any previous diagnostic trace is removed so this run is clean */
+    (void)remove("resume_trace.log");
     if (run_send_recv(in, outdir, &cfg_tx, &cfg_rx, &st) != 0)
         return 2;
     free(sb_a);
@@ -262,8 +284,89 @@ static int test_always_start_zero_overwrite(void)
     return 0;
 }
 
+static int test_tail_identical_file(void)
+{
+    const size_t packet = 1024, depth = 16, size = 200 * 1024 + 13;
+    test_duplex_t d;
+    test_duplex_init(&d, packet, depth);
+    char basedir[512], outdir[512];
+    char in[512], out[512];
+    if (ts_build_case_dirs("policies_tail_identical", basedir, sizeof(basedir), outdir, sizeof(outdir)) != 0)
+        return 1;
+    if (ts_path_join(in, sizeof(in), basedir, "file.bin") != 0)
+        return 1;
+    if (ts_path_join(out, sizeof(out), outdir, "file.bin") != 0)
+        return 1;
+
+    // Create input and copy to receiver so they are identical
+    if (write_pattern_file(in, size, 0) != 0)
+        return 1;
+    if (copy_prefix(in, out, size) != 0)
+        return 1;
+
+    uint64_t before_size = ts_file_size(out);
+    uint32_t before_crc = ts_file_crc32(out);
+
+    uint8_t *sb_a = (uint8_t *)calloc(1, packet), *rb_a = (uint8_t *)calloc(1, packet);
+    uint8_t *sb_b = (uint8_t *)calloc(1, packet), *rb_b = (uint8_t *)calloc(1, packet);
+    test_duplex_t end_tx = d;
+    test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
+    val_config_t cfg_tx, cfg_rx;
+    make_cfgs(&cfg_tx, &cfg_rx, &end_tx, &end_rx, sb_a, rb_a, sb_b, rb_b, packet);
+    cfg_rx.resume.mode = VAL_RESUME_TAIL;
+    cfg_rx.resume.tail_cap_bytes = (uint32_t)(256u * 1024u * 1024u); // verify full file
+
+    val_status_t st = VAL_OK;
+    if (run_send_recv(in, outdir, &cfg_tx, &cfg_rx, &st) != 0)
+        return 2;
+    free(sb_a);
+    free(rb_a);
+    free(sb_b);
+    free(rb_b);
+    test_duplex_free(&d);
+
+    if (st != VAL_OK)
+    {
+        fprintf(stderr, "TAIL_IDENTICAL: send status %d\n", st);
+        return 3;
+    }
+    // Ensure output unchanged
+    uint64_t after_size = ts_file_size(out);
+    uint32_t after_crc = ts_file_crc32(out);
+    if (before_size != after_size || before_crc != after_crc)
+    {
+        fprintf(stderr, "TAIL_IDENTICAL: output changed\n");
+        return 4;
+    }
+
+    /* Validate that the sender performed a VERIFY and the verify result was OK by
+     * reading the diagnostic file written by the code under test. This ensures
+     * future regressions (wrong CRC window, wrong start) are detected by the test.
+     */
+    FILE *tf = fopen("resume_trace.log", "r");
+    if (!tf)
+    {
+        fprintf(stderr, "TAIL_IDENTICAL: resume_trace.log not found (no VERIFY emitted)\n");
+        return 5;
+    }
+    char buf[4096]; size_t r = fread(buf, 1, sizeof(buf) - 1, tf); buf[r] = '\0'; fclose(tf);
+    if (!strstr(buf, "SENDER_VERIFY"))
+    {
+        fprintf(stderr, "TAIL_IDENTICAL: expected SENDER_VERIFY in resume_trace.log\n");
+        return 6;
+    }
+    if (!strstr(buf, "VERIFY_RESULT status=OK"))
+    {
+        fprintf(stderr, "TAIL_IDENTICAL: expected VERIFY_RESULT status=OK in resume_trace.log\n");
+        return 7;
+    }
+    return 0;
+}
+
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_NORMAL_MS, "resume_policies");
+    
     int rc = 0;
     if (test_always_skip_if_exists() != 0)
         rc = 1;
@@ -319,5 +422,7 @@ int main(void)
         rc = 1;
     if (rc == 0)
         printf("OK\n");
+    
+    ts_cancel_timeout_guard(wd);
     return rc;
 }

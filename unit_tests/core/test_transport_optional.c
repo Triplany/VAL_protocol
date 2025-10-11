@@ -11,6 +11,8 @@ static int fake_is_connected(void *ctx)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "transport_optional");
+    
     // Build a minimal session config with in-memory duplex and NO optional hooks
     test_duplex_t d;
     test_duplex_init(&d, 2048, 4);
@@ -58,5 +60,7 @@ int main(void)
     }
     val_session_destroy(s);
     test_duplex_free(&d);
+    
+    ts_cancel_timeout_guard(wd);
     return 0;
 }

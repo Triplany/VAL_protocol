@@ -24,32 +24,24 @@ VAL_STATIC_ASSERT(VAL_WIRE_META_SIZE == (VAL_MAX_FILENAME + 1u) + (VAL_MAX_PATH 
 VAL_STATIC_ASSERT(VAL_MAX_FILENAME == 127u, "VAL_MAX_FILENAME must be 127");
 VAL_STATIC_ASSERT(VAL_MAX_PATH == 127u, "VAL_MAX_PATH must be 127");
 
-void val_serialize_header(const val_packet_header_t *hdr, uint8_t *wire_data)
+void val_serialize_frame_header(uint8_t type, uint8_t flags, uint16_t content_len, uint32_t type_data, uint8_t *wiredata)
 {
-    if (!hdr || !wire_data)
+    if (!wiredata)
         return;
-
-    wire_data[0] = hdr->type;
-    wire_data[1] = hdr->wire_version;
-    VAL_PUT_LE16(wire_data + 2, hdr->reserved2);
-    VAL_PUT_LE32(wire_data + 4, hdr->payload_len);
-    VAL_PUT_LE32(wire_data + 8, hdr->seq);
-    VAL_PUT_LE64(wire_data + 12, hdr->offset);
-    VAL_PUT_LE32(wire_data + 20, hdr->header_crc);
+    wiredata[0] = type;
+    wiredata[1] = flags;
+    VAL_PUT_LE16(wiredata + 2, content_len);
+    VAL_PUT_LE32(wiredata + 4, type_data);
 }
 
-void val_deserialize_header(const uint8_t *wire_data, val_packet_header_t *hdr)
+void val_deserialize_frame_header(const uint8_t *wiredata, uint8_t *type, uint8_t *flags, uint16_t *content_len, uint32_t *type_data)
 {
-    if (!wire_data || !hdr)
+    if (!wiredata)
         return;
-
-    hdr->type = wire_data[0];
-    hdr->wire_version = wire_data[1];
-    hdr->reserved2 = VAL_GET_LE16(wire_data + 2);
-    hdr->payload_len = VAL_GET_LE32(wire_data + 4);
-    hdr->seq = VAL_GET_LE32(wire_data + 8);
-    hdr->offset = VAL_GET_LE64(wire_data + 12);
-    hdr->header_crc = VAL_GET_LE32(wire_data + 20);
+    if (type) *type = wiredata[0];
+    if (flags) *flags = wiredata[1];
+    if (content_len) *content_len = VAL_GET_LE16(wiredata + 2);
+    if (type_data) *type_data = VAL_GET_LE32(wiredata + 4);
 }
 
 void val_serialize_handshake(const val_handshake_t *hs, uint8_t *wire_data)
@@ -145,6 +137,40 @@ void val_deserialize_resume_resp(const uint8_t *wire_data, val_resume_resp_t *re
     resp->resume_offset = VAL_GET_LE64(wire_data + 4);
     resp->verify_crc = VAL_GET_LE32(wire_data + 12);
     resp->verify_length = VAL_GET_LE64(wire_data + 16);
+}
+
+void val_serialize_verify_request(uint64_t offset, uint32_t crc, uint32_t length, uint8_t *wire_data)
+{
+    if (!wire_data)
+        return;
+    VAL_PUT_LE64(wire_data + 0, offset);
+    VAL_PUT_LE32(wire_data + 8, crc);
+    VAL_PUT_LE32(wire_data + 12, length);
+}
+
+void val_deserialize_verify_request(const uint8_t *wire_data, uint64_t *offset, uint32_t *crc, uint32_t *length)
+{
+    if (!wire_data)
+        return;
+    if (offset) *offset = VAL_GET_LE64(wire_data + 0);
+    if (crc) *crc = VAL_GET_LE32(wire_data + 8);
+    if (length) *length = VAL_GET_LE32(wire_data + 12);
+}
+
+void val_serialize_verify_response(val_status_t result, uint32_t receiver_crc, uint8_t *wire_data)
+{
+    if (!wire_data)
+        return;
+    VAL_PUT_LE32(wire_data + 0, (uint32_t)result);
+    VAL_PUT_LE32(wire_data + 4, receiver_crc);
+}
+
+void val_deserialize_verify_response(const uint8_t *wire_data, val_status_t *result, uint32_t *receiver_crc)
+{
+    if (!wire_data)
+        return;
+    if (result) *result = (val_status_t)VAL_GET_LE32(wire_data + 0);
+    if (receiver_crc) *receiver_crc = VAL_GET_LE32(wire_data + 4);
 }
 
 void val_serialize_error_payload(const val_error_payload_t *payload, uint8_t *wire_data)

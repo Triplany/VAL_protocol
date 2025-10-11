@@ -412,9 +412,9 @@ Default thresholds (unless overridden in configuration):
 - `degrade_error_threshold`: 3
 - `recovery_success_threshold`: 10
 
-#### 5.3.3 Streaming Mode
+#### 5.3.3 Flow Control Model
 
-Removed in version 0.7. The protocol operates purely in a bounded-window model with cwnd-based adaptation.
+The protocol uses a bounded-window model with packet-count based flow control and AIMD (Additive Increase Multiplicative Decrease) congestion control. The congestion window (cwnd) dynamically adapts based on network conditions within the negotiated window cap.
 
 #### 5.3.4 Error Recovery (Go-Back-N)
 

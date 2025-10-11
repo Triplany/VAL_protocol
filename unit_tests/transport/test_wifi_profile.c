@@ -16,6 +16,9 @@ static int test_wifi_good_conditions(void)
         return 1;
     }
     
+    // Disable partial I/O to avoid fragmenting packets (VAL protocol is packet-oriented)
+    ts_net_sim_reset();
+    
     // Setup paths
     char indir[512], outdir[512], infile[512], outfile[512];
     if (ts_build_case_dirs("wifi_good", indir, sizeof(indir), outdir, sizeof(outdir)) != 0)
@@ -115,6 +118,9 @@ static int test_wifi_poor_conditions(void)
         printf("FAIL: Could not initialize WiFi Poor profile\n");
         return 1;
     }
+    
+    // Disable partial I/O to avoid fragmenting packets (VAL protocol is packet-oriented)
+    ts_net_sim_reset();
     
     const size_t file_size = 10 * 1024; // Small for poor conditions
     
@@ -224,6 +230,9 @@ static int test_wifi_adaptive_behavior(void)
         return 1;
     }
     
+    // Disable partial I/O to avoid fragmenting packets (VAL protocol is packet-oriented)
+    ts_net_sim_reset();
+    
     const transport_profile_t *profile = transport_sim_get_profile();
     if (!profile)
     {
@@ -256,6 +265,8 @@ static int test_wifi_adaptive_behavior(void)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_HEAVY_MS, "wifi_profile");
+    
     int failures = 0;
     
     printf("========================================\n");
@@ -277,5 +288,6 @@ int main(void)
     }
     printf("========================================\n");
     
+    ts_cancel_timeout_guard(wd);
     return failures > 0 ? 1 : 0;
 }

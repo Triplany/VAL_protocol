@@ -132,6 +132,8 @@ static char *join_path(const char *dir, const char *filename) { return ts_join_p
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_NORMAL_MS, "it_tcp_multi");
+    
     char rx_path[4096], tx_path[4096];
     if (!ts_find_example_bins(rx_path, sizeof(rx_path), tx_path, sizeof(tx_path)))
     {
@@ -343,6 +345,7 @@ int main(void)
     waitpid(rx_pid, &status, 0);
 #endif
 
+    ts_cancel_timeout_guard(wd);
     printf("OK\n");
     return 0;
 }

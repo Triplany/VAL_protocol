@@ -1,24 +1,19 @@
 #include "val_wire.h"
 #include "val_protocol.h"
+#include "test_support.h"
 #include <stdio.h>
 #include <string.h>
 
 static int test_header(void) {
     uint8_t buf[VAL_WIRE_HEADER_SIZE];
-    val_packet_header_t in = {0};
-    in.type = VAL_PKT_HELLO;
-    in.wire_version = 0;
-    in.reserved2 = 0x1234;
-    in.payload_len = 0x89ABCDEFu;
-    in.seq = 0x01020304u;
-    in.offset = 0x1122334455667788ULL;
-    in.header_crc = 0xA1B2C3D4u;
-
-    val_serialize_header(&in, buf);
-    val_packet_header_t out = {0};
-    val_deserialize_header(buf, &out);
-
-    return (memcmp(&in, &out, sizeof(in)) == 0) ? 0 : 1;
+    uint8_t type_in = (uint8_t)VAL_PKT_HELLO;
+    uint8_t flags_in = 0xA5;
+    uint16_t len_in = 0x1234;
+    uint32_t data_in = 0x89ABCDEFu;
+    val_serialize_frame_header(type_in, flags_in, len_in, data_in, buf);
+    uint8_t type_out = 0, flags_out = 0; uint16_t len_out = 0; uint32_t data_out = 0;
+    val_deserialize_frame_header(buf, &type_out, &flags_out, &len_out, &data_out);
+    return (type_in == type_out && flags_in == flags_out && len_in == len_out && data_in == data_out) ? 0 : 1;
 }
 
 static int test_handshake(void) {
@@ -96,6 +91,8 @@ static int test_error_payload(void) {
 
 
 int main(void) {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "wire_roundtrip");
+    
     int fails = 0;
     fails += test_header();
     fails += test_handshake();
@@ -104,6 +101,8 @@ int main(void) {
     fails += test_error_payload();
     // Legacy MODE_SYNC removed in the bounded-window protocol
 
+    ts_cancel_timeout_guard(wd);
+    
     if (fails == 0) {
         printf("wire_roundtrip: PASS\n");
         return 0;

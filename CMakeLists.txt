@@ -21,6 +21,7 @@ endforeach()
 # Build options
 option(VAL_ENABLE_ERROR_STRINGS "Build optional error string utilities (host-only)" ON)
 option(VAL_ENABLE_METRICS "Enable compile-time protocol metrics counters and timing" OFF)
+option(BUILD_TESTING "Build unit tests (requires VAL_ENABLE_METRICS)" ON)
 
 # Platform-specific settings
 if(WIN32)
@@ -144,5 +145,15 @@ endif()
 # ---------------- Unit Tests ----------------
 # Unit tests are configured in the unit_tests subdirectory which places
 # their executables under ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unit_tests.
+# IMPORTANT: Tests require metrics to be enabled for validation.
+# Force VAL_ENABLE_METRICS=ON when BUILD_TESTING is enabled.
+if(BUILD_TESTING)
+    if(NOT VAL_ENABLE_METRICS)
+        message(STATUS "BUILD_TESTING enabled: forcing VAL_ENABLE_METRICS=ON for test validation")
+        set(VAL_ENABLE_METRICS ON CACHE BOOL "Enable metrics (required for tests)" FORCE)
+        target_compile_definitions(val_protocol PUBLIC VAL_ENABLE_METRICS=1)
+    endif()
+endif()
+
 enable_testing()
 add_subdirectory(unit_tests)

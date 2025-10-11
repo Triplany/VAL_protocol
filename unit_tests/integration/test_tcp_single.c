@@ -133,6 +133,8 @@ static int run_sender(const char *tx_path, const char *host, unsigned short port
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_NORMAL_MS, "it_tcp_single");
+    
     char rx_path[4096], tx_path[4096];
     if (!ts_find_example_bins(rx_path, sizeof(rx_path), tx_path, sizeof(tx_path)))
     {
@@ -421,6 +423,7 @@ int main(void)
     waitpid(rx_pid, &status2, 0);
 #endif
 
+    ts_cancel_timeout_guard(wd);
     printf("OK\n");
     free(in_small);
     free(in_large);

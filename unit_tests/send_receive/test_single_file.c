@@ -104,14 +104,14 @@ int main(void)
                 return 10;
             }
             // Under nominal conditions we expect zero timeouts/retransmits/CRC errors
-            if (mtx.timeouts != 0 || mtx.timeouts_soft != 0 || mtx.timeouts_hard != 0 ||
+            if (mtx.timeouts != 0 || mtx.timeouts_hard != 0 ||
                 mtx.retransmits != 0 || mtx.crc_errors != 0 ||
-                mrx.timeouts != 0 || mrx.timeouts_soft != 0 || mrx.timeouts_hard != 0 ||
+                mrx.timeouts != 0 || mrx.timeouts_hard != 0 ||
                 mrx.retransmits != 0 || mrx.crc_errors != 0)
             {
-                fprintf(stderr, "unexpected reliability events: tx[t=%u s=%u h=%u r=%u c=%u] rx[t=%u s=%u h=%u r=%u c=%u]\n",
-                        mtx.timeouts, mtx.timeouts_soft, mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors,
-                        mrx.timeouts, mrx.timeouts_soft, mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors);
+                fprintf(stderr, "unexpected reliability events: tx[t=%u h=%u r=%u c=%u] rx[t=%u h=%u r=%u c=%u]\n",
+                        mtx.timeouts, mtx.timeouts_hard, mtx.retransmits, mtx.crc_errors,
+                        mrx.timeouts, mrx.timeouts_hard, mrx.retransmits, mrx.crc_errors);
                 return 12;
             }
         }

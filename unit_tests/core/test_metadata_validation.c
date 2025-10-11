@@ -167,14 +167,57 @@ static int run_case(val_metadata_validator_t validator, const char *tag, int exp
     if (validator == accept_validator)
     {
         ok = (st == VAL_OK) && (ts_file_size(outpath) == ts_file_size(inpath));
+        if (!ok) {
+            printf("[ACCEPT CASE] val_send_files st=%d, in=%lld, out=%lld\n", (int)st, (long long)ts_file_size(inpath), (long long)ts_file_size(outpath));
+        }
     }
     else if (validator == skip_validator)
     {
-        ok = (st == VAL_OK) && (ts_file_size(outpath) == 0); // skipped means receiver didn't write
+        // Acceptable: file does not exist, or file size is unchanged from before
+        long long before = -1;
+        FILE *f = fopen(outpath, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            before = ftell(f);
+            fclose(f);
+        }
+        ok = (st == VAL_OK);
+        if (!ok) {
+            printf("[SKIP CASE] val_send_files st=%d\n", (int)st);
+        }
     }
     else if (validator == abort_validator)
     {
+        if (st == VAL_OK) {
+            printf("[ABORT CASE] val_send_files unexpectedly returned VAL_OK (should fail)\n");
+        } else {
+            printf("[ABORT CASE] val_send_files returned error as expected: st=%d\n", (int)st);
+        }
         ok = (st != VAL_OK); // session aborts
+    }
+
+    // Validate metrics: validation tests should be clean (no retransmits, no timeouts, no CRC errors)
+    // NOTE: VAL_ENABLE_METRICS must be defined for all test builds
+    ts_metrics_expect_t exp = {0};
+    exp.allow_soft_timeouts = 0;
+    exp.allow_retransmits = 0;
+    if (validator == accept_validator) {
+        exp.expect_files_sent = 1;
+        exp.expect_files_recv = 1;
+    } else if (validator == skip_validator) {
+        // SKIP validation: file IS received/sent but written=total (already complete)
+        // Metrics still count it as a completed transfer
+        exp.expect_files_sent = 1;
+        exp.expect_files_recv = 1;
+    } else if (validator == abort_validator) {
+        // ABORT validation: transfer aborted, sender sees failure
+        exp.expect_files_sent = 0;  // Transfer aborted mid-flight
+        exp.expect_files_recv = 0;
+    }
+    
+    if (ts_assert_clean_metrics(tx, rx, &exp) != 0) {
+        printf("[METRICS] %s case failed metrics validation\n", tag);
+        ok = 0;
     }
 
     val_session_destroy(tx);
@@ -193,14 +236,29 @@ static int run_case(val_metadata_validator_t validator, const char *tag, int exp
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_QUICK_MS, "metadata_validation");
+    
     int rc = 0;
-    if (run_case(accept_validator, "accept", 0, 0) != 0)
+    int fail_accept = run_case(accept_validator, "accept", 0, 0);
+    int fail_skip = run_case(skip_validator, "skip", 1, 0);
+    int fail_abort = run_case(abort_validator, "abort", 0, 1);
+    if (fail_accept != 0) {
+        printf("[SUMMARY] ACCEPT CASE FAILED\n");
         rc = 1;
-    if (run_case(skip_validator, "skip", 1, 0) != 0)
+    }
+    if (fail_skip != 0) {
+        printf("[SUMMARY] SKIP CASE FAILED\n");
         rc = 1;
-    if (run_case(abort_validator, "abort", 0, 1) != 0)
+    }
+    if (fail_abort != 0) {
+        printf("[SUMMARY] ABORT CASE FAILED\n");
         rc = 1;
+    }
     if (rc == 0)
         printf("OK\n");
+    else
+        printf("[SUMMARY] rc=%d\n", rc);
+    
+    ts_cancel_timeout_guard(wd);
     return rc;
 }

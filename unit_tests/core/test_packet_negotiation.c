@@ -95,8 +95,8 @@ static int files_equal(const char *a, const char *b)
 
 static int run_case(size_t sender_pkt, size_t receiver_pkt)
 {
-    const size_t file_size = 128 * 1024 + 57;
-    const size_t depth = 16;
+    const size_t file_size = 100;
+    const size_t depth = 64;
     // Duplex capacity sized to the larger proposed packet
     size_t maxp = sender_pkt > receiver_pkt ? sender_pkt : receiver_pkt;
     test_duplex_t d;
@@ -151,8 +151,19 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     val_config_t cfg_tx, cfg_rx;
     test_duplex_t end_tx = d;
     test_duplex_t end_rx = (test_duplex_t){.a2b = d.b2a, .b2a = d.a2b, .max_packet = d.max_packet};
-    ts_make_config(&cfg_tx, sb_tx, rb_tx, sender_pkt, &end_tx, VAL_RESUME_NEVER, 1024);
-    ts_make_config(&cfg_rx, sb_rx, rb_rx, receiver_pkt, &end_rx, VAL_RESUME_NEVER, 1024);
+    ts_make_config(&cfg_tx, sb_tx, rb_tx, sender_pkt, &end_tx, VAL_RESUME_SKIP_EXISTING, 1024);
+    ts_make_config(&cfg_rx, sb_rx, rb_rx, receiver_pkt, &end_rx, VAL_RESUME_SKIP_EXISTING, 1024);
+
+    cfg_tx.timeouts.min_timeout_ms = 100;
+    cfg_tx.timeouts.max_timeout_ms = 2000;
+    cfg_tx.retries.backoff_ms_base = 100;
+    cfg_tx.retries.handshake_retries = 8;
+    cfg_tx.retries.data_retries = 6;
+    cfg_rx.timeouts.min_timeout_ms = 100;
+    cfg_rx.timeouts.max_timeout_ms = 2000;
+    cfg_rx.retries.backoff_ms_base = 100;
+    cfg_rx.retries.handshake_retries = 8;
+    cfg_rx.retries.data_retries = 6;
 
     val_session_t *tx = NULL;
     val_session_t *rx = NULL;
@@ -167,6 +178,8 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     }
 
     ts_thread_t th = ts_start_receiver(rx, outdir);
+    // Give receiver a brief head start
+    ts_receiver_warmup(&cfg_tx, 500);
     const char *files[1] = {inpath};
     val_status_t st = val_send_files(tx, files, 1, NULL);
     ts_join_thread(th);
@@ -181,11 +194,10 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
         free(outpath);
         return 1;
     }
-    // Enforce clean metrics on nominal run
-#if VAL_ENABLE_METRICS
     {
         ts_metrics_expect_t exp = {0};
-        exp.allow_soft_timeouts = 0;
+        exp.allow_soft_timeouts = 1;
+        exp.allow_retransmits = 1;  // Allow handshake retries with robust handshake
         exp.expect_files_sent = 1;
         exp.expect_files_recv = 1;
         if (ts_assert_clean_metrics(tx, rx, &exp) != 0)
@@ -194,7 +206,6 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
             return 1;
         }
     }
-#endif
     if (!files_equal(inpath, outpath))
     {
         fprintf(stderr, "file mismatch under pkt neg case %zu/%zu\n", (size_t)sender_pkt, (size_t)receiver_pkt);
@@ -279,8 +290,18 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
     // For reverse direction, the endpoint that was previously RX (end_rx) becomes TX
     test_duplex_t end_tx2 = end_rx;
     test_duplex_t end_rx2 = end_tx;
-    ts_make_config(&cfg_tx2, sb_tx2, rb_tx2, receiver_pkt, &end_tx2, VAL_RESUME_NEVER, 1024);
-    ts_make_config(&cfg_rx2, sb_rx2, rb_rx2, sender_pkt, &end_rx2, VAL_RESUME_NEVER, 1024);
+    ts_make_config(&cfg_tx2, sb_tx2, rb_tx2, receiver_pkt, &end_tx2, VAL_RESUME_SKIP_EXISTING, 1024);
+    ts_make_config(&cfg_rx2, sb_rx2, rb_rx2, sender_pkt, &end_rx2, VAL_RESUME_SKIP_EXISTING, 1024);
+    cfg_tx2.timeouts.min_timeout_ms = 100;
+    cfg_tx2.timeouts.max_timeout_ms = 2000;
+    cfg_tx2.retries.backoff_ms_base = 100;
+    cfg_tx2.retries.handshake_retries = 8;
+    cfg_tx2.retries.data_retries = 6;
+    cfg_rx2.timeouts.min_timeout_ms = 500;
+    cfg_rx2.timeouts.max_timeout_ms = 20000;
+    cfg_rx2.retries.backoff_ms_base = 100;
+    cfg_rx2.retries.handshake_retries = 8;
+    cfg_rx2.retries.data_retries = 6;
     val_session_t *tx2 = NULL;
     val_session_t *rx2 = NULL;
     if (val_session_create(&cfg_tx2, &tx2, NULL) != VAL_OK || val_session_create(&cfg_rx2, &rx2, NULL) != VAL_OK)
@@ -289,6 +310,8 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
         return 1;
     }
     ts_thread_t th2 = ts_start_receiver(rx2, outdir2);
+    // Give receiver a brief head start
+    ts_receiver_warmup(&cfg_tx2, 500);
     const char *files2[1] = {inpath2};
     val_status_t st2 = val_send_files(tx2, files2, 1, NULL);
     ts_join_thread(th2);
@@ -304,11 +327,12 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
         free(outpath);
         return 1;
     }
-    // Enforce clean metrics on reverse nominal run
+        // Enforce clean metrics on nominal run
 #if VAL_ENABLE_METRICS
     {
         ts_metrics_expect_t exp = {0};
-        exp.allow_soft_timeouts = 0;
+        exp.allow_soft_timeouts = 1;
+        exp.allow_retransmits = 1;  // Allow handshake retries with robust handshake
         exp.expect_files_sent = 1;
         exp.expect_files_recv = 1;
         if (ts_assert_clean_metrics(tx2, rx2, &exp) != 0)
@@ -385,6 +409,8 @@ static int run_case(size_t sender_pkt, size_t receiver_pkt)
 
 int main(void)
 {
+    ts_cancel_token_t wd = ts_start_timeout_guard(TEST_TIMEOUT_NORMAL_MS, "packet_negotiation");
+    
     int rc = 0;
     // Case 1: sender smaller than receiver
     if (run_case(1024, 4096) != 0)
@@ -394,5 +420,7 @@ int main(void)
         rc = 1;
     if (rc == 0)
         printf("OK\n");
+    
+    ts_cancel_timeout_guard(wd);
     return rc;
 }

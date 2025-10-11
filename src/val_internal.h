@@ -22,7 +22,7 @@
 #if defined(NDEBUG)
 #define VAL_LOG_LEVEL 0
 #else
-#define VAL_LOG_LEVEL 4
+#define VAL_LOG_LEVEL 5
 #endif
 #endif
 
@@ -80,14 +80,7 @@ void val_internal_logf(val_session_t *s, int level, const char *file, int line, 
 
 // Packet Types are declared in public header (val_packet_type_t)
 
-typedef enum
-{
-    VAL_RESUME_ACTION_START_ZERO = 0,
-    VAL_RESUME_ACTION_START_OFFSET = 1,
-    VAL_RESUME_ACTION_VERIFY_FIRST = 2,
-    VAL_RESUME_ACTION_SKIP_FILE = 3,
-    VAL_RESUME_ACTION_ABORT_FILE = 4,
-} val_resume_action_t;
+// Use public val_resume_action_t enum from val_protocol.h
 
 // Minimal session struct
 // Adaptive timing state (RFC 6298-inspired)
@@ -245,6 +238,11 @@ static VAL_FORCE_INLINE int val_internal_join_path(char *dst, size_t cap, const 
 // Internal helpers
 int val_internal_send_packet(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len,
                              uint64_t offset);
+// Extended variant: for VAL_PKT_DATA, include_data_offset controls whether to include the explicit 8-byte offset
+// in the frame content and set VAL_DATA_OFFSET_PRESENT. Ignored for other packet types. When not included, the
+// receiver must treat the DATA packet as having an implied offset equal to its current next-expected position.
+int val_internal_send_packet_ex(val_session_t *s, val_packet_type_t type, const void *payload, uint32_t payload_len,
+                                uint64_t offset, int include_data_offset);
 int val_internal_recv_packet(val_session_t *s, val_packet_type_t *type, void *payload_out, uint32_t payload_cap,
                              uint32_t *payload_len_out, uint64_t *offset_out, uint32_t timeout_ms);
 
@@ -389,18 +387,10 @@ static VAL_FORCE_INLINE void val_metrics_inc_timeout(val_session_t *s)
     if (s)
     {
         s->metrics.timeouts++;
-        s->metrics.timeouts_soft++;
     }
 }
 // Explicit soft timeout increment (interim slice/backoff events)
-static VAL_FORCE_INLINE void val_metrics_inc_timeout_soft(val_session_t *s)
-{
-    if (s)
-    {
-        s->metrics.timeouts++;
-        s->metrics.timeouts_soft++;
-    }
-}
+// Soft timeout metrics removed - only hard timeouts are meaningful
 // Explicit hard timeout increment (terminal operation failure after retries)
 static VAL_FORCE_INLINE void val_metrics_inc_timeout_hard(val_session_t *s)
 {
@@ -463,10 +453,7 @@ static VAL_FORCE_INLINE void val_metrics_inc_timeout(val_session_t *s)
 {
     (void)s;
 }
-static VAL_FORCE_INLINE void val_metrics_inc_timeout_soft(val_session_t *s)
-{
-    (void)s;
-}
+// Soft timeout metrics removed - only hard timeouts are meaningful
 static VAL_FORCE_INLINE void val_metrics_inc_timeout_hard(val_session_t *s)
 {
     (void)s;
@@ -589,9 +576,10 @@ static inline val_status_t val_internal_check_health(val_session_t *s)
     // Use total attempts (operations + retries) as the sample size so that frequent retries
     // still advance the sampler and avoid dividing by an inappropriately small operations count.
     uint32_t attempts = s->health.operations + s->health.retries;
-    if (attempts < 2u)
+    // Do not enforce until we have a meaningful window of observations
+    if (attempts < 64u)
     {
-        VAL_LOG_DEBUGF(s, "health: check skipped, ops=%u < 2 (attempts=%u)", s->health.operations, attempts);
+        VAL_LOG_DEBUGF(s, "health: check skipped, ops=%u < 64 (attempts=%u)", s->health.operations, attempts);
         return VAL_OK;
     }
 
@@ -600,7 +588,10 @@ static inline val_status_t val_internal_check_health(val_session_t *s)
     // Check retry rate: if >= ~25% of total attempts are retries, treat as unusable.
     // This avoids tripping under moderate loss while still catching sustained extreme conditions.
     // Use shifts to approximate 25%: attempts / 4 == attempts >> 2
-    if (s->health.retries > (attempts >> 2))
+    // Also require an absolute minimum of a few retries to avoid tripping on tiny samples that
+    // barely exceed the ratio threshold.
+    // Use a stricter ratio (>=50%) and absolute minimum (>=8 retries) to classify as excessive.
+    if (s->health.retries >= 8u && (s->health.retries * 2u) > attempts)
     {
         VAL_LOG_CRITF(s, "health: excessive retries ops=%u retries=%u attempts=%u",
                       s->health.operations, s->health.retries, attempts);
